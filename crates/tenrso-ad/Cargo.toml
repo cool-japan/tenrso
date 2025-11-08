@@ -1,0 +1,21 @@
+[package]
+name = "tenrso-ad"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Automatic differentiation support for TenRSo"
+
+[dependencies]
+tenrso-core.workspace = true
+tenrso-exec.workspace = true
+tenrso-decomp.workspace = true
+tenrso-planner.workspace = true
+scirs2-core.workspace = true
+scirs2-linalg.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

@@ -1,0 +1,33 @@
+[package]
+name = "tenrso-exec"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Unified execution API for TenRSo"
+
+[dependencies]
+tenrso-core.workspace = true
+tenrso-kernels.workspace = true
+tenrso-sparse.workspace = true
+tenrso-decomp.workspace = true
+tenrso-planner.workspace = true
+tenrso-ooc = { workspace = true, optional = true }
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+# SciRS2 ecosystem (MANDATORY - see SCIRS2_INTEGRATION_POLICY.md)
+scirs2-core.workspace = true
+
+[features]
+default = ["ooc"]
+ooc = ["dep:tenrso-ooc"]
+
+[dev-dependencies]
+criterion = "0.7"
+
+[[bench]]
+name = "executor_ops"
+harness = false

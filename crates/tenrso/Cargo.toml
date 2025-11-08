@@ -1,0 +1,42 @@
+[package]
+name = "tenrso"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Production-grade tensor computing stack - meta crate re-exporting all TenRSo components"
+keywords = ["tensor", "tensor-decomposition", "sparse", "machine-learning", "scientific"]
+categories = ["science", "algorithms", "mathematics"]
+
+[dependencies]
+# Core foundation
+tenrso-core.workspace = true
+
+# Computation engines
+tenrso-kernels.workspace = true
+tenrso-decomp.workspace = true
+tenrso-sparse.workspace = true
+
+# Optimization and scalability
+tenrso-planner.workspace = true
+tenrso-ooc.workspace = true
+
+# Execution API
+tenrso-exec.workspace = true
+
+# Automatic differentiation (optional)
+tenrso-ad = { workspace = true, optional = true }
+
+# Utilities (for examples)
+anyhow.workspace = true
+
+[features]
+default = ["ooc"]
+# Enable out-of-core processing (Arrow, Parquet, mmap)
+ooc = ["tenrso-exec/ooc"]
+# Enable automatic differentiation support
+ad = ["dep:tenrso-ad"]
+# Enable all features
+full = ["ooc", "ad"]

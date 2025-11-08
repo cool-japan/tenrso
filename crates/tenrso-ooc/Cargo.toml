@@ -1,0 +1,32 @@
+[package]
+name = "tenrso-ooc"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Out-of-core processing with Arrow/Parquet for TenRSo"
+
+[dependencies]
+tenrso-core.workspace = true
+scirs2-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+arrow = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
+memmap2 = { workspace = true, optional = true }
+
+[features]
+default = ["arrow", "parquet", "parallel"]
+arrow = ["dep:arrow"]
+parquet = ["dep:parquet"]
+mmap = ["dep:memmap2"]
+parallel = ["scirs2-core/parallel"]
+
+[dev-dependencies]
+criterion = "0.7"
+
+[[bench]]
+name = "large_tensors"
+harness = false

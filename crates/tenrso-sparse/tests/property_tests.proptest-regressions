@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b1bf92c20d5bed6ac2768f43b3fab1bad33248d46e317b14ca98c9f71fd4a187 # shrinks to (indices, values, shape) = ([(0, 0), (0, 0)], [-48.6133628678152, 0.0], (6, 6)), b_vals = [0.0, 0.0, 0.0, -9.492836965841962, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+cc 7d78b1a40ea0b36afe8ef27a44278ce38af1310016a8a5540a84c4d05685cc2c # shrinks to (indices, values, shape) = ([(2, 7), (2, 7)], [25.141425026658258, 0.0], (8, 8)), vec_vals = [4.642782629354023, 7.771604089628091, 5.6814958046537605, 3.3490876061115, 7.731229939142288, 0.6709255429657551, 4.77700776150197, -2.2102509781525526]
+cc dc197f70680a8b040f4d42be18bd85cbea56293284bb1668093931e6703b9751 # shrinks to (indices, values, shape) = ([(5, 5), (5, 5)], [0.0, 0.0], (8, 8))
+cc fe22db5e78b51e9a91dc79f6ada7bd6ae5680ec1e02da3981ce628b8a6430925 # shrinks to (indices, values, shape) = ([(7, 7), (7, 7)], [0.0, 0.0], (8, 8))
+cc a131eaf8df67837db98dc90778db2c8a5cff10b40fc360f2282e35012e4a78a0 # shrinks to (indices, values, shape) = ([(2, 2), (2, 2)], [0.0, 0.0], (10, 10))

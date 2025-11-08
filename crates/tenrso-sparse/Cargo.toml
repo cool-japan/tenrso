@@ -1,0 +1,32 @@
+[package]
+name = "tenrso-sparse"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Sparse tensor formats and operations for TenRSo"
+
+[dependencies]
+tenrso-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+smallvec.workspace = true
+indexmap.workspace = true
+# SciRS2-core is MANDATORY (see SCIRS2_INTEGRATION_POLICY.md)
+# NEVER use num-traits directly - always through scirs2-core
+scirs2-core.workspace = true
+
+[features]
+default = ["parallel"]
+parallel = []
+csf = []  # Enable CSF/HiCOO formats
+
+[dev-dependencies]
+proptest = "1.9"
+criterion = { version = "0.7", features = ["html_reports"] }
+
+[[bench]]
+name = "sparse_ops"
+harness = false

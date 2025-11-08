@@ -1,0 +1,28 @@
+[package]
+name = "tenrso-kernels"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Tensor kernel operations: Khatri-Rao, Kronecker, Hadamard, n-mode products, MTTKRP"
+
+[dependencies]
+tenrso-core.workspace = true
+anyhow.workspace = true
+# SciRS2-core is MANDATORY (see SCIRS2_INTEGRATION_POLICY.md)
+# NEVER use ndarray, num-traits directly - always through scirs2-core
+scirs2-core.workspace = true
+
+[features]
+default = ["parallel"]
+parallel = []
+
+[dev-dependencies]
+criterion = { version = "0.7", features = ["html_reports"] }
+proptest = "1.9"
+
+[[bench]]
+name = "kernel_benchmarks"
+harness = false

@@ -1,0 +1,39 @@
+[package]
+name = "tenrso-core"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Core tensor types, views, and axis metadata for TenRSo"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+smallvec.workspace = true
+# SciRS2-core is MANDATORY (see SCIRS2_INTEGRATION_POLICY.md)
+# NEVER use ndarray, rand, num-traits directly - always through scirs2-core
+scirs2-core.workspace = true
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+parallel = ["scirs2-core/parallel"]
+serde = ["dep:serde", "smallvec/serde", "scirs2-core/serialization"]
+
+[dev-dependencies]
+proptest = "1.9"
+criterion = "0.7"
+
+[[bench]]
+name = "tensor_creation"
+harness = false
+
+[[bench]]
+name = "unfold_fold"
+harness = false
+
+[[bench]]
+name = "reshape_permute"
+harness = false

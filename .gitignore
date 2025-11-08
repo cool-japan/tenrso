@@ -1,0 +1,24 @@
+# Rust build artifacts
+/target/
+/*/target/
+Cargo.lock
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing and coverage
+*.profraw
+*.profdata
+lcov.info
+
+# Documentation build
+/doc/
+
+# Backup files
+*.bak
+*.orig
