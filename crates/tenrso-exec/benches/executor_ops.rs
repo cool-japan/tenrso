@@ -5,7 +5,8 @@
 //! - Element-wise operations
 //! - Reduction operations
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use tenrso_core::{DenseND, TensorHandle};
 use tenrso_exec::{einsum_ex, CpuExecutor, ElemOp, ExecHints, ReduceOp, TenrsoExecutor};
 

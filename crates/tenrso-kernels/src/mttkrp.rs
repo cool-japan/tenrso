@@ -178,16 +178,16 @@ where
 
 /// Compute Khatri-Rao product of all matrices except the one at the specified mode
 ///
-/// The matrices are multiplied in reverse order (last to first, skipping mode)
+/// The matrices are multiplied in FORWARD order (first to last, skipping mode) to match unfold column ordering
 fn khatri_rao_except_mode<T>(factors: &[ArrayView2<T>], skip_mode: usize) -> Result<Array2<T>>
 where
     T: Clone + Num,
 {
-    // Collect all matrices except the one at skip_mode, in reverse order
+    // Collect all matrices except the one at skip_mode, in FORWARD order (matching unfold)
     let mut matrices: Vec<&ArrayView2<T>> = Vec::new();
-    for i in (0..factors.len()).rev() {
+    for (i, factor) in factors.iter().enumerate() {
         if i != skip_mode {
-            matrices.push(&factors[i]);
+            matrices.push(factor);
         }
     }
 
@@ -713,7 +713,7 @@ mod blocked_tests {
 
         for i in 0..result_std.shape()[0] {
             for j in 0..result_std.shape()[1] {
-                let diff = (result_std[[i, j]] - result_parallel[[i, j]]).abs();
+                let diff = f64::abs(result_std[[i, j]] - result_parallel[[i, j]]);
                 assert!(diff < 1e-10);
             }
         }
@@ -727,5 +727,483 @@ mod blocked_tests {
         let u2 = array![[1.0], [1.0]];
 
         mttkrp_blocked(&tensor.view(), &[u1.view(), u2.view()], 0, 0).unwrap();
+    }
+}
+
+/// Fused MTTKRP kernel that avoids materializing the full Khatri-Rao product
+///
+/// This is a memory-efficient version of MTTKRP that computes the Khatri-Rao
+/// product on-the-fly during the contraction, rather than materializing it first.
+/// This saves memory: O(R × ∏ᵢ≠ₘₒ₋ᵈₑ Iᵢ) and can be more cache-efficient.
+///
+/// **Key optimization:** Instead of computing the full KR product matrix,
+/// compute each element on-demand during the matrix multiplication.
+///
+/// # Algorithm
+///
+/// For each output element result\[i,r\]:
+/// 1. Iterate through all tensor fibers along the mode
+/// 2. For each fiber position, compute the KR product element on-the-fly
+/// 3. Multiply by the tensor value and accumulate
+///
+/// # Arguments
+///
+/// * `tensor` - Input tensor
+/// * `factors` - Factor matrices
+/// * `mode` - Mode to compute MTTKRP for
+///
+/// # Returns
+///
+/// Matrix with shape (I_mode, R)
+///
+/// # Complexity
+///
+/// Time: O(I_mode × R × ∏ᵢ≠ₘₒ₋ᵈₑ Iᵢ × N) where N is tensor rank
+/// Space: O(I_mode × R) (no intermediate KR product storage)
+///
+/// # Examples
+///
+/// ```
+/// use scirs2_core::ndarray_ext::{Array, Array2};
+/// use tenrso_kernels::mttkrp_fused;
+///
+/// // 3D tensor: 4×5×6
+/// let tensor = Array::from_shape_vec(
+///     vec![4, 5, 6],
+///     (0..120).map(|x| x as f64).collect()
+/// ).unwrap();
+///
+/// let u1 = Array2::from_shape_vec((4, 3), vec![1.0; 12]).unwrap();
+/// let u2 = Array2::from_shape_vec((5, 3), vec![1.0; 15]).unwrap();
+/// let u3 = Array2::from_shape_vec((6, 3), vec![1.0; 18]).unwrap();
+///
+/// let result = mttkrp_fused(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1).unwrap();
+/// assert_eq!(result.shape(), &[5, 3]);
+/// ```
+pub fn mttkrp_fused<T>(
+    tensor: &ArrayView<T, IxDyn>,
+    factors: &[ArrayView2<T>],
+    mode: usize,
+) -> Result<Array2<T>>
+where
+    T: Clone + Num + One + Zero,
+{
+    let tensor_shape = tensor.shape();
+    let rank_tensor = tensor_shape.len();
+
+    // Validation
+    if mode >= rank_tensor {
+        anyhow::bail!(
+            "Mode {} out of bounds for tensor with rank {}",
+            mode,
+            rank_tensor
+        );
+    }
+
+    if factors.len() != rank_tensor {
+        anyhow::bail!(
+            "Number of factor matrices ({}) must match tensor rank ({})",
+            factors.len(),
+            rank_tensor
+        );
+    }
+
+    let cp_rank = factors[0].shape()[1];
+    for (i, factor) in factors.iter().enumerate() {
+        if factor.shape()[1] != cp_rank {
+            anyhow::bail!(
+                "Factor matrix {} has {} columns, expected {}",
+                i,
+                factor.shape()[1],
+                cp_rank
+            );
+        }
+        if factor.shape()[0] != tensor_shape[i] {
+            anyhow::bail!(
+                "Factor matrix {} has {} rows, expected {} (tensor mode-{} size)",
+                i,
+                factor.shape()[0],
+                tensor_shape[i],
+                i
+            );
+        }
+    }
+
+    let mode_size = tensor_shape[mode];
+    let mut result = Array2::<T>::zeros((mode_size, cp_rank));
+
+    // For simpler correctness, use the standard approach but avoid storing full KR
+    // Instead, compute it on-the-fly during multiplication
+    let unfolded = unfold_tensor(tensor, mode)?;
+
+    // Build list of "other" dimensions (excluding mode) in order
+    let other_dims: Vec<usize> = (0..rank_tensor).filter(|&d| d != mode).collect();
+
+    // Compute strides for unfold ordering (FORWARD): [d0, d1, d2, ...]
+    // Column j = i_{d0} * (I_{d1}*I_{d2}*...) + i_{d1} * (I_{d2}*...) + ...
+    // This matches khatri_rao_except_mode which now uses FORWARD ordering
+    let mut strides = vec![1; other_dims.len()];
+    for i in (0..other_dims.len().saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * tensor_shape[other_dims[i + 1]];
+    }
+
+    // For each element in the result matrix
+    for i in 0..mode_size {
+        for r in 0..cp_rank {
+            let mut sum = T::zero();
+            let n_cols = unfolded.shape()[1];
+
+            for j in 0..n_cols {
+                let tensor_val = unfolded[[i, j]].clone();
+
+                // Compute KR product element on-the-fly for column j and rank r
+                // Extract multi-index from unfold column j in FORWARD order
+                let mut kr_val = T::one();
+
+                // Extract indices from j using FORWARD dimension ordering
+                for (idx, &dim) in other_dims.iter().enumerate() {
+                    let dim_size = tensor_shape[dim];
+                    let dim_idx = (j / strides[idx]) % dim_size;
+                    kr_val = kr_val * factors[dim][[dim_idx, r]].clone();
+                }
+
+                sum = sum + tensor_val * kr_val;
+            }
+
+            result[[i, r]] = sum;
+        }
+    }
+
+    Ok(result)
+}
+
+/// Parallel fused MTTKRP using Rayon
+///
+/// Combines the memory efficiency of fused MTTKRP with parallel execution.
+/// Best for large tensors where memory is constrained and parallelism is available.
+///
+/// # Examples
+///
+/// ```
+/// use scirs2_core::ndarray_ext::{Array, Array2};
+/// use tenrso_kernels::mttkrp_fused_parallel;
+///
+/// let tensor = Array::from_shape_vec(
+///     vec![8, 9, 10],
+///     (0..720).map(|x| x as f64).collect()
+/// ).unwrap();
+///
+/// let u1 = Array2::from_shape_vec((8, 4), vec![1.0; 32]).unwrap();
+/// let u2 = Array2::from_shape_vec((9, 4), vec![1.0; 36]).unwrap();
+/// let u3 = Array2::from_shape_vec((10, 4), vec![1.0; 40]).unwrap();
+///
+/// let result = mttkrp_fused_parallel(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1).unwrap();
+/// assert_eq!(result.shape(), &[9, 4]);
+/// ```
+#[cfg(feature = "parallel")]
+pub fn mttkrp_fused_parallel<T>(
+    tensor: &ArrayView<T, IxDyn>,
+    factors: &[ArrayView2<T>],
+    mode: usize,
+) -> Result<Array2<T>>
+where
+    T: Clone + Num + One + Zero + Send + Sync,
+{
+    use scirs2_core::parallel_ops::*;
+
+    let tensor_shape = tensor.shape();
+    let rank_tensor = tensor_shape.len();
+
+    // Validation (same as fused)
+    if mode >= rank_tensor {
+        anyhow::bail!(
+            "Mode {} out of bounds for tensor with rank {}",
+            mode,
+            rank_tensor
+        );
+    }
+
+    if factors.len() != rank_tensor {
+        anyhow::bail!(
+            "Number of factor matrices ({}) must match tensor rank ({})",
+            factors.len(),
+            rank_tensor
+        );
+    }
+
+    let cp_rank = factors[0].shape()[1];
+    let mode_size = tensor_shape[mode];
+
+    // Unfold tensor
+    let unfolded = unfold_tensor(tensor, mode)?;
+    let n_cols = unfolded.shape()[1];
+
+    // Build list of "other" dimensions (excluding mode) in order
+    let other_dims: Vec<usize> = (0..rank_tensor).filter(|&d| d != mode).collect();
+
+    // Compute strides for mapping column index to multi-indices
+    let mut strides = vec![1; other_dims.len()];
+    for i in (0..other_dims.len().saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * tensor_shape[other_dims[i + 1]];
+    }
+
+    // Parallel computation over rank dimensions
+    let partial_results: Vec<Array2<T>> = (0..cp_rank)
+        .into_par_iter()
+        .map(|r| {
+            let mut result_col = Array2::<T>::zeros((mode_size, 1));
+
+            for i in 0..mode_size {
+                let mut sum = T::zero();
+
+                for j in 0..n_cols {
+                    let tensor_val = unfolded[[i, j]].clone();
+
+                    // Compute KR product element on-the-fly for column j and rank r
+                    // Extract multi-index from unfold column j in FORWARD order
+                    let mut kr_val = T::one();
+
+                    // Extract indices from j using FORWARD dimension ordering
+                    for (idx, &dim) in other_dims.iter().enumerate() {
+                        let dim_size = tensor_shape[dim];
+                        let dim_idx = (j / strides[idx]) % dim_size;
+                        kr_val = kr_val * factors[dim][[dim_idx, r]].clone();
+                    }
+
+                    sum = sum + tensor_val * kr_val;
+                }
+
+                result_col[[i, 0]] = sum;
+            }
+
+            result_col
+        })
+        .collect();
+
+    // Assemble result from columns
+    let mut result = Array2::<T>::zeros((mode_size, cp_rank));
+    for (r, col) in partial_results.iter().enumerate() {
+        for i in 0..mode_size {
+            result[[i, r]] = col[[i, 0]].clone();
+        }
+    }
+
+    Ok(result)
+}
+
+#[cfg(test)]
+mod fused_tests {
+    use super::*;
+    use scirs2_core::ndarray_ext::{array, Array};
+
+    #[test]
+    fn test_mttkrp_manual_verification() {
+        // Manually verify MTTKRP computation to understand the correct formula
+        // Tensor: 2x3x2
+        let tensor =
+            Array::from_shape_vec(vec![2, 3, 2], (1..=12).map(|x| x as f64).collect()).unwrap();
+        let u1 = array![[1.0, 0.0], [2.0, 1.0]]; // F0, shape [2, 2]
+        let u2 = array![[1.0, 0.0], [0.5, 1.0], [0.0, 1.0]]; // F1, shape [3, 2]
+        let u3 = array![[1.0, 0.0], [0.0, 1.0]]; // F2, shape [2, 2]
+
+        // Manual computation for mode=1, rank=0:
+        // V[i1, r] = sum_{i0, i2} tensor[i0, i1, i2] * F0[i0, r] * F2[i2, r]
+        let mut manual_result = Array2::<f64>::zeros((3, 2));
+        for i1 in 0..3 {
+            for r in 0..2 {
+                let mut sum = 0.0;
+                for i0 in 0..2 {
+                    for i2 in 0..2 {
+                        sum += tensor[[i0, i1, i2]] * u1[[i0, r]] * u3[[i2, r]];
+                    }
+                }
+                manual_result[[i1, r]] = sum;
+            }
+        }
+
+        // Compare with standard MTTKRP
+        let result_std = mttkrp(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1).unwrap();
+
+        println!("\nManual result:\n{:?}", manual_result);
+        println!("Standard MTTKRP result:\n{:?}", result_std);
+
+        for i in 0..3 {
+            for j in 0..2 {
+                let diff = f64::abs(manual_result[[i, j]] - result_std[[i, j]]);
+                assert!(
+                    diff < 1e-10,
+                    "Mismatch at [{},{}]: manual={} vs std={}",
+                    i,
+                    j,
+                    manual_result[[i, j]],
+                    result_std[[i, j]]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_mttkrp_fused_debug() {
+        // Simple 2x3x2 tensor for easier debugging (non-square to expose ordering issues)
+        let tensor =
+            Array::from_shape_vec(vec![2, 3, 2], (1..=12).map(|x| x as f64).collect()).unwrap();
+        let u1 = array![[1.0, 0.0], [2.0, 1.0]];
+        let u2 = array![[1.0, 0.0], [0.5, 1.0], [0.0, 1.0]];
+        let u3 = array![[1.0, 0.0], [0.0, 1.0]];
+
+        // Print tensor
+        println!("\nTensor:\n{:?}", tensor);
+
+        // Compute unfold and KR manually to see the ordering
+        let unfolded = unfold_tensor(&tensor.view(), 1).unwrap();
+        let kr = khatri_rao_except_mode(&[u1.view(), u2.view(), u3.view()], 1).unwrap();
+
+        println!("\nUnfolded (mode=1):\n{:?}", unfolded);
+        println!("\nKR product:\n{:?}", kr);
+
+        // Test mode 1
+        let result_std = mttkrp(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1).unwrap();
+        let result_fused =
+            mttkrp_fused(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1).unwrap();
+
+        println!("\nStandard result:\n{:?}", result_std);
+        println!("Fused result:\n{:?}", result_fused);
+
+        assert_eq!(result_std.shape(), result_fused.shape());
+
+        for i in 0..result_std.shape()[0] {
+            for j in 0..result_std.shape()[1] {
+                let diff = f64::abs(result_std[[i, j]] - result_fused[[i, j]]);
+                assert!(
+                    diff < 1e-10,
+                    "Mismatch at [{},{}]: {} vs {}",
+                    i,
+                    j,
+                    result_std[[i, j]],
+                    result_fused[[i, j]]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_mttkrp_fused_matches_standard() {
+        let tensor =
+            Array::from_shape_vec(vec![3, 4, 5], (0..60).map(|x| x as f64).collect()).unwrap();
+
+        let u1 = array![[1.0, 0.5], [0.5, 1.0], [0.8, 0.2]];
+        let u2 = array![[1.0, 0.0], [0.0, 1.0], [0.5, 0.5], [0.2, 0.8]];
+        let u3 = array![[1.0, 0.0], [0.0, 1.0], [0.5, 0.5], [0.25, 0.75], [0.6, 0.4]];
+
+        let result_std = mttkrp(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1).unwrap();
+        let result_fused =
+            mttkrp_fused(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1).unwrap();
+
+        assert_eq!(result_std.shape(), result_fused.shape());
+
+        // Check values match within tolerance
+        for i in 0..result_std.shape()[0] {
+            for j in 0..result_std.shape()[1] {
+                let diff = f64::abs(result_std[[i, j]] - result_fused[[i, j]]);
+                assert!(
+                    diff < 1e-10,
+                    "Mismatch at [{},{}]: {} vs {}",
+                    i,
+                    j,
+                    result_std[[i, j]],
+                    result_fused[[i, j]]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_mttkrp_fused_all_modes() {
+        let tensor =
+            Array::from_shape_vec(vec![2, 3, 4], (1..=24).map(|x| x as f64).collect()).unwrap();
+
+        let u1 = array![[1.0, 0.5], [0.5, 1.0]];
+        let u2 = array![[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
+        let u3 = array![[1.0, 0.0], [0.0, 1.0], [0.5, 0.5], [0.25, 0.75]];
+
+        // Test all modes
+        for mode in 0..3 {
+            let result_std =
+                mttkrp(&tensor.view(), &[u1.view(), u2.view(), u3.view()], mode).unwrap();
+            let result_fused =
+                mttkrp_fused(&tensor.view(), &[u1.view(), u2.view(), u3.view()], mode).unwrap();
+
+            assert_eq!(result_std.shape(), result_fused.shape());
+
+            for i in 0..result_std.shape()[0] {
+                for j in 0..result_std.shape()[1] {
+                    let diff = (result_std[[i, j]] - result_fused[[i, j]]).abs();
+                    assert!(diff < 1e-10);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_mttkrp_fused_small_tensor() {
+        let tensor = Array::from_shape_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let u1 = array![[1.0], [1.0]];
+        let u2 = array![[1.0], [2.0]];
+
+        let result_std = mttkrp(&tensor.view(), &[u1.view(), u2.view()], 0).unwrap();
+        let result_fused = mttkrp_fused(&tensor.view(), &[u1.view(), u2.view()], 0).unwrap();
+
+        assert_eq!(result_std.shape(), result_fused.shape());
+
+        for i in 0..result_std.shape()[0] {
+            for j in 0..result_std.shape()[1] {
+                let diff = f64::abs(result_std[[i, j]] - result_fused[[i, j]]);
+                assert!(diff < 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn test_mttkrp_fused_rank1() {
+        let tensor = Array::from_shape_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let u1 = array![[1.0], [1.0]];
+        let u2 = array![[1.0], [2.0]];
+
+        let result = mttkrp_fused(&tensor.view(), &[u1.view(), u2.view()], 0).unwrap();
+        assert_eq!(result.shape(), &[2, 1]);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_mttkrp_fused_parallel() {
+        let tensor =
+            Array::from_shape_vec(vec![4, 5, 6], (0..120).map(|x| x as f64).collect()).unwrap();
+
+        let u1 = Array::from_shape_vec((4, 3), vec![1.0; 12]).unwrap();
+        let u2 = Array::from_shape_vec((5, 3), vec![1.0; 15]).unwrap();
+        let u3 = Array::from_shape_vec((6, 3), vec![1.0; 18]).unwrap();
+
+        let result_std = mttkrp(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1).unwrap();
+        let result_parallel =
+            mttkrp_fused_parallel(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1).unwrap();
+
+        assert_eq!(result_std.shape(), result_parallel.shape());
+
+        for i in 0..result_std.shape()[0] {
+            for j in 0..result_std.shape()[1] {
+                let diff = f64::abs(result_std[[i, j]] - result_parallel[[i, j]]);
+                assert!(diff < 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Mode")]
+    fn test_mttkrp_fused_invalid_mode() {
+        let tensor = Array::from_shape_vec(vec![2, 3], vec![1.0; 6]).unwrap();
+        let u1 = array![[1.0], [1.0]];
+        let u2 = array![[1.0], [1.0], [1.0]];
+
+        mttkrp_fused(&tensor.view(), &[u1.view(), u2.view()], 5).unwrap();
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "tenrso-core"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -15,16 +15,20 @@ smallvec.workspace = true
 # SciRS2-core is MANDATORY (see SCIRS2_INTEGRATION_POLICY.md)
 # NEVER use ndarray, rand, num-traits directly - always through scirs2-core
 scirs2-core.workspace = true
+scirs2-linalg = { workspace = true, optional = true }
+scirs2-fft = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 
 [features]
 default = []
 parallel = ["scirs2-core/parallel"]
 serde = ["dep:serde", "smallvec/serde", "scirs2-core/serialization"]
+linalg = ["dep:scirs2-linalg"]
+fft = ["dep:scirs2-fft"]
 
 [dev-dependencies]
-proptest = "1.9"
-criterion = "0.7"
+proptest.workspace = true
+criterion.workspace = true
 
 [[bench]]
 name = "tensor_creation"

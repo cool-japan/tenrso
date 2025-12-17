@@ -1,6 +1,6 @@
 [package]
 name = "tenrso-kernels"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,14 +14,15 @@ anyhow.workspace = true
 # SciRS2-core is MANDATORY (see SCIRS2_INTEGRATION_POLICY.md)
 # NEVER use ndarray, num-traits directly - always through scirs2-core
 scirs2-core.workspace = true
+scirs2-linalg.workspace = true
 
 [features]
 default = ["parallel"]
 parallel = []
 
 [dev-dependencies]
-criterion = { version = "0.7", features = ["html_reports"] }
-proptest = "1.9"
+criterion.workspace = true
+proptest.workspace = true
 
 [[bench]]
 name = "kernel_benchmarks"

@@ -35,7 +35,14 @@ fn main() -> anyhow::Result<()> {
     println!("Tolerance: {}", tolerance);
     println!();
 
-    let cp = cp_als(&tensor, rank, max_iters, tolerance, InitStrategy::Random)?;
+    let cp = cp_als(
+        &tensor,
+        rank,
+        max_iters,
+        tolerance,
+        InitStrategy::Random,
+        None,
+    )?;
 
     println!("Results:");
     println!("  - Iterations: {}", cp.iters);
@@ -79,7 +86,7 @@ fn main() -> anyhow::Result<()> {
     for (name, strategy) in strategies {
         print!("  Testing {}... ", name);
         let start = std::time::Instant::now();
-        let result = cp_als(&small_tensor, small_rank, 30, 1e-4, strategy)?;
+        let result = cp_als(&small_tensor, small_rank, 30, 1e-4, strategy, None)?;
         let elapsed = start.elapsed();
 
         println!(
@@ -106,7 +113,14 @@ fn main() -> anyhow::Result<()> {
     println!();
 
     for &test_rank in &[10, 20, 40, 80] {
-        let cp = cp_als(&data_tensor, test_rank, 50, 1e-5, InitStrategy::Random)?;
+        let cp = cp_als(
+            &data_tensor,
+            test_rank,
+            50,
+            1e-5,
+            InitStrategy::Random,
+            None,
+        )?;
 
         // Calculate compressed size
         let compressed_elements: usize = data_shape.iter().map(|&dim| dim * test_rank).sum();
@@ -126,7 +140,7 @@ fn main() -> anyhow::Result<()> {
     println!("{}", "-".repeat(80));
 
     let analysis_tensor = DenseND::<f64>::random_uniform(&[30, 30, 30], 0.0, 1.0);
-    let cp = cp_als(&analysis_tensor, 15, 50, 1e-4, InitStrategy::Svd)?;
+    let cp = cp_als(&analysis_tensor, 15, 50, 1e-4, InitStrategy::Svd, None)?;
 
     println!("Factor matrix statistics:");
     for (i, factor) in cp.factors.iter().enumerate() {
@@ -176,7 +190,14 @@ fn main() -> anyhow::Result<()> {
 
     for &iters in &[1, 5, 10, 20, 50, 100] {
         let start = std::time::Instant::now();
-        let cp = cp_als(&conv_tensor, conv_rank, iters, 1e-10, InitStrategy::Random)?;
+        let cp = cp_als(
+            &conv_tensor,
+            conv_rank,
+            iters,
+            1e-10,
+            InitStrategy::Random,
+            None,
+        )?;
         let elapsed = start.elapsed();
 
         println!(
@@ -201,7 +222,7 @@ fn main() -> anyhow::Result<()> {
         let rank = 10;
 
         let start = std::time::Instant::now();
-        let cp = cp_als(&tensor, rank, 30, 1e-4, InitStrategy::Random)?;
+        let cp = cp_als(&tensor, rank, 30, 1e-4, InitStrategy::Random, None)?;
         let elapsed = start.elapsed();
 
         let original_elements: usize = shape.iter().product();

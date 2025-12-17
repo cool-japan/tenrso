@@ -273,6 +273,110 @@ where
     Ok(result)
 }
 
+/// Parallel version of CP reconstruction for high-rank decompositions
+///
+/// Computes rank-1 components in parallel using Rayon, providing significant speedup
+/// for decompositions with high rank (R > 10).
+///
+/// For factor matrices A₁, A₂, ..., Aₙ (each Iₖ × R) and optional weights λ,
+/// reconstructs the tensor as:
+/// `T = ∑ᵣ λᵣ × (A₁[:,r] ⊗ A₂[:,r] ⊗ ... ⊗ Aₙ[:,r])`
+///
+/// # Arguments
+///
+/// * `factors` - Factor matrices (one per mode)
+/// * `weights` - Optional weights for each rank-1 component (defaults to 1.0)
+///
+/// # Returns
+///
+/// Reconstructed N-dimensional tensor
+///
+/// # Errors
+///
+/// Returns error if:
+/// - No factors provided
+/// - Factors have different numbers of columns (ranks)
+/// - Number of weights doesn't match rank
+///
+/// # Complexity
+///
+/// Time: O(R × ∏ᵢ Iᵢ / P) where R is rank and P is number of cores
+/// Space: O(∏ᵢ Iᵢ)
+///
+/// # Examples
+///
+/// ```
+/// use scirs2_core::ndarray_ext::array;
+/// use tenrso_kernels::cp_reconstruct_parallel;
+///
+/// // Rank-2 CP decomposition of 2×3 matrix
+/// let a1 = array![[1.0, 0.0], [0.0, 1.0]];  // 2×2
+/// let a2 = array![[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];  // 3×2
+///
+/// let tensor = cp_reconstruct_parallel(&[a1.view(), a2.view()], None).unwrap();
+/// assert_eq!(tensor.shape(), &[2, 3]);
+/// ```
+#[cfg(feature = "parallel")]
+pub fn cp_reconstruct_parallel<T>(
+    factors: &[ArrayView2<T>],
+    weights: Option<&ArrayView1<T>>,
+) -> Result<Array<T, IxDyn>>
+where
+    T: Clone + Num + Send + Sync,
+{
+    use scirs2_core::parallel_ops::*;
+
+    if factors.is_empty() {
+        anyhow::bail!("Need at least one factor matrix for CP reconstruction");
+    }
+
+    let rank = factors[0].shape()[1];
+
+    // Validate all factors have same rank
+    for (i, factor) in factors.iter().enumerate() {
+        if factor.shape()[1] != rank {
+            anyhow::bail!(
+                "Factor {} has {} columns, expected {}",
+                i,
+                factor.shape()[1],
+                rank
+            );
+        }
+    }
+
+    // Validate weights if provided
+    if let Some(w) = weights {
+        if w.len() != rank {
+            anyhow::bail!("Weights length {} must match rank {}", w.len(), rank);
+        }
+    }
+
+    // Compute tensor shape
+    let shape: Vec<usize> = factors.iter().map(|f| f.shape()[0]).collect();
+
+    // Compute each rank-1 component in parallel
+    let components: Vec<Array<T, IxDyn>> = (0..rank)
+        .into_par_iter()
+        .map(|r| {
+            // Extract r-th column from each factor matrix
+            let vectors: Vec<Array1<T>> = factors.iter().map(|f| f.column(r).to_owned()).collect();
+            let vector_views: Vec<ArrayView1<T>> = vectors.iter().map(|v| v.view()).collect();
+
+            // Compute weighted outer product
+            let weight = weights.map(|w| w[r].clone()).unwrap_or_else(T::one);
+            outer_product_weighted(&vector_views, weight).expect("outer product failed")
+        })
+        .collect();
+
+    // Sum all components
+    let mut result = Array::<T, IxDyn>::zeros(IxDyn(&shape));
+    for component in components {
+        result = result + component;
+    }
+
+    Ok(result)
+}
+
 /// Convert flat index to multi-dimensional index
 fn flat_to_multi_index(mut flat_idx: usize, shape: &[usize]) -> Vec<usize> {
     let mut multi_idx = vec![0; shape.len()];
@@ -412,5 +516,72 @@ mod tests {
         let a2 = array![[5.0], [6.0]]; // Rank 1
 
         cp_reconstruct(&[a1.view(), a2.view()], None).unwrap();
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_cp_reconstruct_parallel_matches_serial() {
+        // Test that parallel version matches serial for rank-2
+        let a1 = array![[1.0, 0.5], [0.5, 1.0]];
+        let a2 = array![[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
+
+        let serial = cp_reconstruct(&[a1.view(), a2.view()], None).unwrap();
+        let parallel = cp_reconstruct_parallel(&[a1.view(), a2.view()], None).unwrap();
+
+        assert_eq!(serial.shape(), parallel.shape());
+        for i in 0..serial.len() {
+            let diff = f64::abs(serial.as_slice().unwrap()[i] - parallel.as_slice().unwrap()[i]);
+            assert!(
+                diff < 1e-10,
+                "Mismatch at index {}: {} vs {}",
+                i,
+                serial.as_slice().unwrap()[i],
+                parallel.as_slice().unwrap()[i]
+            );
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_cp_reconstruct_parallel_with_weights() {
+        // Test parallel version with weights
+        let a1 = array![[1.0, 2.0], [3.0, 4.0]];
+        let a2 = array![[5.0, 6.0], [7.0, 8.0]];
+        let weights = array![2.0, 3.0];
+
+        let serial = cp_reconstruct(&[a1.view(), a2.view()], Some(&weights.view())).unwrap();
+        let parallel =
+            cp_reconstruct_parallel(&[a1.view(), a2.view()], Some(&weights.view())).unwrap();
+
+        assert_eq!(serial.shape(), parallel.shape());
+        for i in 0..serial.len() {
+            let diff = f64::abs(serial.as_slice().unwrap()[i] - parallel.as_slice().unwrap()[i]);
+            assert!(diff < 1e-10);
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_cp_reconstruct_parallel_high_rank() {
+        // Test with higher rank (10) to benefit from parallelism
+        use scirs2_core::ndarray_ext::Array;
+        let rank = 10;
+        let a1 = Array::from_shape_vec((5, rank), vec![1.0; 5 * rank]).unwrap();
+        let a2 = Array::from_shape_vec((6, rank), vec![1.0; 6 * rank]).unwrap();
+        let a3 = Array::from_shape_vec((7, rank), vec![1.0; 7 * rank]).unwrap();
+
+        let serial = cp_reconstruct(&[a1.view(), a2.view(), a3.view()], None).unwrap();
+        let parallel = cp_reconstruct_parallel(&[a1.view(), a2.view(), a3.view()], None).unwrap();
+
+        assert_eq!(serial.shape(), parallel.shape());
+        assert_eq!(serial.shape(), &[5, 6, 7]);
+
+        // With all factors = 1.0 and rank=10, result should be 10.0 everywhere
+        for val in serial.iter() {
+            assert!(f64::abs(val - 10.0) < 1e-10);
+        }
+        for val in parallel.iter() {
+            assert!(f64::abs(val - 10.0) < 1e-10);
+        }
     }
 }

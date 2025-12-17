@@ -32,7 +32,7 @@ fn main() -> anyhow::Result<()> {
     println!();
 
     // Perform CP-ALS
-    let cp = cp_als(&original, rank, 50, 1e-4, InitStrategy::Random)?;
+    let cp = cp_als(&original, rank, 50, 1e-4, InitStrategy::Random, None)?;
     println!(
         "CP-ALS converged in {} iterations (fit={:.4})",
         cp.iters, cp.fit
@@ -175,7 +175,7 @@ fn main() -> anyhow::Result<()> {
     // CP decomposition (various ranks)
     println!("CP Decomposition:");
     for &rank in &[5, 10, 20] {
-        let cp = cp_als(&comp_original, rank, 50, 1e-4, InitStrategy::Random)?;
+        let cp = cp_als(&comp_original, rank, 50, 1e-4, InitStrategy::Random, None)?;
         let recon = cp.reconstruct(&comp_shape)?;
         let error = (&comp_original - &recon).frobenius_norm() / comp_original.frobenius_norm();
 
@@ -234,7 +234,14 @@ fn main() -> anyhow::Result<()> {
     let error_original = DenseND::<f64>::random_uniform(&error_shape, 0.0, 1.0);
     let error_rank = 10;
 
-    let cp = cp_als(&error_original, error_rank, 50, 1e-4, InitStrategy::Random)?;
+    let cp = cp_als(
+        &error_original,
+        error_rank,
+        50,
+        1e-4,
+        InitStrategy::Random,
+        None,
+    )?;
     let recon = cp.reconstruct(&error_shape)?;
 
     // Calculate element-wise errors
@@ -275,7 +282,7 @@ fn main() -> anyhow::Result<()> {
     // CP-ALS with different ranks
     for &rank in &[5, 10, 20] {
         let start = std::time::Instant::now();
-        let cp = cp_als(&timing_original, rank, 50, 1e-4, InitStrategy::Random)?;
+        let cp = cp_als(&timing_original, rank, 50, 1e-4, InitStrategy::Random, None)?;
         let recon = cp.reconstruct(&timing_shape)?;
         let elapsed = start.elapsed();
 
@@ -322,7 +329,14 @@ fn main() -> anyhow::Result<()> {
     let mod_original = DenseND::<f64>::random_uniform(&mod_shape, 0.0, 1.0);
     let mod_rank = 10;
 
-    let mut cp = cp_als(&mod_original, mod_rank, 50, 1e-4, InitStrategy::Random)?;
+    let mut cp = cp_als(
+        &mod_original,
+        mod_rank,
+        50,
+        1e-4,
+        InitStrategy::Random,
+        None,
+    )?;
     let orig_recon = cp.reconstruct(&mod_shape)?;
     let orig_error = (&mod_original - &orig_recon).frobenius_norm() / mod_original.frobenius_norm();
 

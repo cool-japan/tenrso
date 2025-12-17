@@ -24,7 +24,7 @@ fn test_cp_als_rank1_exact() {
     let tensor = DenseND::from_vec(data, &[size, size, size]).unwrap();
 
     // Rank-1 decomposition should be nearly perfect
-    let cp = cp_als(&tensor, 1, 50, 1e-6, InitStrategy::Random).unwrap();
+    let cp = cp_als(&tensor, 1, 50, 1e-6, InitStrategy::Random, None).unwrap();
 
     assert_eq!(cp.factors.len(), 3);
     assert!(cp.iters > 0 && cp.iters <= 50); // Should complete some iterations
@@ -53,7 +53,7 @@ fn test_cp_als_low_rank() {
     // Test CP-ALS with a small tensor
     let tensor = DenseND::<f64>::random_uniform(&[4, 5, 6], 0.0, 1.0);
 
-    let cp = cp_als(&tensor, 2, 20, 1e-4, InitStrategy::Random).unwrap();
+    let cp = cp_als(&tensor, 2, 20, 1e-4, InitStrategy::Random, None).unwrap();
 
     assert_eq!(cp.factors.len(), 3);
     assert_eq!(cp.factors[0].shape(), &[4, 2]);
@@ -69,7 +69,7 @@ fn test_cp_als_weight_extraction() {
     // Use a random tensor instead of ones to avoid rank-deficiency issues
     // A tensor of all ones has rank 1, which causes numerical instability for rank-2 decomposition
     let tensor = DenseND::<f64>::random_uniform(&[3, 4, 5], 0.5, 1.5);
-    let mut cp = cp_als(&tensor, 2, 10, 1e-4, InitStrategy::Random).unwrap();
+    let mut cp = cp_als(&tensor, 2, 10, 1e-4, InitStrategy::Random, None).unwrap();
 
     // Initially no weights
     assert!(cp.weights.is_none());
@@ -156,7 +156,7 @@ fn test_cp_tucker_comparison() {
     let tensor = DenseND::<f64>::random_uniform(&[5, 5, 5], 0.0, 1.0);
 
     // CP decomposition
-    let cp = cp_als(&tensor, 3, 20, 1e-4, InitStrategy::Random).unwrap();
+    let cp = cp_als(&tensor, 3, 20, 1e-4, InitStrategy::Random, None).unwrap();
     let cp_reconstructed = cp.reconstruct(&[5, 5, 5]).unwrap();
 
     // Tucker decomposition
@@ -184,7 +184,7 @@ fn test_cp_als_convergence() {
     // Test that CP-ALS improves over iterations
     let tensor = DenseND::<f64>::random_uniform(&[4, 4, 4], 0.0, 1.0);
 
-    let cp = cp_als(&tensor, 2, 50, 1e-6, InitStrategy::Random).unwrap();
+    let cp = cp_als(&tensor, 2, 50, 1e-6, InitStrategy::Random, None).unwrap();
 
     // Should complete some iterations
     assert!(cp.iters > 0 && cp.iters <= 50);
@@ -199,7 +199,7 @@ fn test_cp_als_convergence() {
 #[should_panic(expected = "InvalidRank")]
 fn test_cp_als_invalid_rank_zero() {
     let tensor = DenseND::<f64>::ones(&[3, 4, 5]);
-    let _ = cp_als(&tensor, 0, 10, 1e-4, InitStrategy::Random).unwrap();
+    let _ = cp_als(&tensor, 0, 10, 1e-4, InitStrategy::Random, None).unwrap();
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn test_cp_als_invalid_rank_zero() {
 fn test_cp_als_invalid_rank_exceeds_mode() {
     let tensor = DenseND::<f64>::ones(&[3, 4, 5]);
     // Rank 10 exceeds mode-0 size (3)
-    let _ = cp_als(&tensor, 10, 10, 1e-4, InitStrategy::Random).unwrap();
+    let _ = cp_als(&tensor, 10, 10, 1e-4, InitStrategy::Random, None).unwrap();
 }
 
 #[test]
@@ -229,7 +229,7 @@ fn test_tucker_invalid_rank_exceeds_mode() {
 #[test]
 fn test_cp_reconstruction_shape_compatibility() {
     let tensor = DenseND::<f64>::random_uniform(&[3, 4, 5], 0.0, 1.0);
-    let cp = cp_als(&tensor, 2, 10, 1e-4, InitStrategy::Random).unwrap();
+    let cp = cp_als(&tensor, 2, 10, 1e-4, InitStrategy::Random, None).unwrap();
 
     // Correct shape should work
     let reconstructed = cp.reconstruct(&[3, 4, 5]);

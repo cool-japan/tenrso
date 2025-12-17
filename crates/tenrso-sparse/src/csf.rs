@@ -8,7 +8,7 @@
 //! # Structure
 //!
 //! For an n-mode tensor, CSF has:
-//! - `mode_order`: Permutation of modes (e.g., [0,1,2] or [2,1,0])
+//! - `mode_order`: Permutation of modes (e.g., `[0,1,2]` or `[2,1,0]`)
 //! - `fptr[i]`: Fiber pointers at level i (i = 0..n-1)
 //! - `fids[i]`: Fiber indices at level i (i = 0..n-1)
 //! - `vals`: Nonzero values at leaf level
@@ -17,17 +17,17 @@
 //!
 //! For a 3D tensor with nonzeros at (0,1,2)=5, (0,1,3)=6, (1,2,3)=7:
 //!
-//! Mode order [0,1,2]:
+//! Mode order `[0,1,2]`:
 //! - Level 0 (mode 0):
-//!   - fptr[0] = [0, 1, 2]  // 2 unique mode-0 indices (0 and 1)
-//!   - fids[0] = [0, 1]      // mode-0 indices
+//!   - `fptr[0] = [0, 1, 2]`  // 2 unique mode-0 indices (0 and 1)
+//!   - `fids[0] = [0, 1]`      // mode-0 indices
 //! - Level 1 (mode 1):
-//!   - fptr[1] = [0, 1, 2]  // fibers for each mode-0 index
-//!   - fids[1] = [1, 2]      // mode-1 indices
+//!   - `fptr[1] = [0, 1, 2]`  // fibers for each mode-0 index
+//!   - `fids[1] = [1, 2]`      // mode-1 indices
 //! - Level 2 (mode 2, leaf):
-//!   - fptr[2] = [0, 2, 3]  // values for each (mode-0, mode-1) pair
-//!   - fids[2] = [2, 3, 3]   // mode-2 indices
-//!   - vals = [5.0, 6.0, 7.0]
+//!   - `fptr[2] = [0, 2, 3]`  // values for each (mode-0, mode-1) pair
+//!   - `fids[2] = [2, 3, 3]`   // mode-2 indices
+//!   - `vals = [5.0, 6.0, 7.0]`
 //!
 //! # Complexity
 //!
@@ -111,7 +111,7 @@ impl<T: Float> CsfTensor<T> {
     /// # Arguments
     ///
     /// - `coo`: Input tensor in COO format
-    /// - `mode_order`: Permutation of modes (e.g., [0,1,2] or [2,1,0])
+    /// - `mode_order`: Permutation of modes (e.g., `[0,1,2]` or `[2,1,0]`)
     ///
     /// # Complexity
     ///

@@ -89,6 +89,42 @@ pub type Rank = usize;
 /// ```
 pub type Shape = SmallVec<[usize; 6]>;
 
+/// Padding mode for array padding operations.
+///
+/// Defines how values are padded at the edges of arrays.
+///
+/// # Modes
+///
+/// - `Constant`: Pads with a constant value
+/// - `Edge`: Pads with the edge values of the array
+/// - `Reflect`: Pads with the reflection of values at the edge (mirrored)
+/// - `Wrap`: Pads with wrap-around (periodic boundary conditions)
+///
+/// # Examples
+///
+/// ```
+/// use tenrso_core::{DenseND, PadMode};
+///
+/// let tensor = DenseND::<f64>::from_vec(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+///
+/// // Different padding modes
+/// let const_pad = tensor.pad(&[(1, 1)], PadMode::Constant, 0.0).unwrap();
+/// let edge_pad = tensor.pad(&[(1, 1)], PadMode::Edge, 0.0).unwrap();
+/// let reflect_pad = tensor.pad(&[(1, 1)], PadMode::Reflect, 0.0).unwrap();
+/// let wrap_pad = tensor.pad(&[(1, 1)], PadMode::Wrap, 0.0).unwrap();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PadMode {
+    /// Pad with a constant value
+    Constant,
+    /// Pad with edge values
+    Edge,
+    /// Pad with reflection of the array
+    Reflect,
+    /// Pad with wrap-around (periodic)
+    Wrap,
+}
+
 /// Metadata for a single tensor axis.
 ///
 /// Provides symbolic naming for tensor dimensions, making code more readable
@@ -159,6 +195,7 @@ impl AxisMeta {
 /// let sparse = SparseND::from_coo(indices, values, shape);
 /// ```
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SparseND<T> {
     _phantom: std::marker::PhantomData<T>,
 }
@@ -179,6 +216,7 @@ pub struct SparseND<T> {
 /// let tucker = LowRank::tucker(core, factors);
 /// ```
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LowRank<T> {
     _phantom: std::marker::PhantomData<T>,
 }
@@ -210,6 +248,12 @@ pub struct LowRank<T> {
 /// }
 /// ```
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(bound(serialize = "T: serde::Serialize")))]
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(deserialize = "T: serde::Deserialize<'de>"))
+)]
 pub enum TensorRepr<T>
 where
     T: Clone + Num,
@@ -309,6 +353,12 @@ impl<T: std::fmt::Debug + Clone + Num> std::fmt::Debug for TensorRepr<T> {
 /// assert_eq!(dense.shape(), &[5, 5]);
 /// ```
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(bound(serialize = "T: serde::Serialize")))]
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(deserialize = "T: serde::Deserialize<'de>"))
+)]
 pub struct TensorHandle<T>
 where
     T: Clone + Num,

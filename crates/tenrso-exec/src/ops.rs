@@ -322,7 +322,7 @@ mod tests {
 
         // Expected: [1*5+2*7, 1*6+2*8] = [19, 22]
         //           [3*5+4*7, 3*6+4*8] = [43, 50]
-        let expected = vec![19.0, 22.0, 43.0, 50.0];
+        let expected = [19.0, 22.0, 43.0, 50.0];
         let result_view = c.view();
 
         for (i, &expected_val) in expected.iter().enumerate() {

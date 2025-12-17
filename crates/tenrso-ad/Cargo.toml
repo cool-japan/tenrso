@@ -1,6 +1,6 @@
 [package]
 name = "tenrso-ad"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -17,5 +17,18 @@ scirs2-core.workspace = true
 scirs2-linalg.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+rayon.workspace = true
+num-traits = "0.2"
 
 [dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+num_cpus.workspace = true
+
+[[bench]]
+name = "gradient_benchmarks"
+harness = false
+
+[[bench]]
+name = "graph_benchmarks"
+harness = false

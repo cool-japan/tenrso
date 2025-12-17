@@ -746,7 +746,7 @@ impl<T: Float> CsrMatrix<T> {
                     let col = b.col_indices[b_idx];
                     let b_val = b.values[b_idx];
 
-                    // Accumulate A[i,j] * B[j,col] into result[i,col]
+                    // Accumulate `A[i,j] * B[j,col]` into `result[i,col]`
                     let entry = row_map.entry(col).or_insert(T::zero());
                     *entry = *entry + a_val * b_val;
                 }

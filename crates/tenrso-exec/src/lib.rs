@@ -2,6 +2,10 @@
 //!
 //! Unified execution API for TenRSo.
 //!
+//! **Version:** 0.1.0-alpha.2
+//! **Tests:** 244 passing (100%)
+//! **Status:** M4 Complete - Unified execution with optimization
+//!
 //! This crate provides:
 //! - `einsum_ex` - the main public API for tensor contractions
 //! - `TenrsoExecutor` trait for different backends
@@ -33,7 +37,7 @@ use scirs2_core::numeric::{Float, FromPrimitive, Num};
 /// ```
 pub fn einsum_ex<T>(spec: &str) -> EinsumBuilder<'_, T>
 where
-    T: Clone + Num + std::ops::AddAssign + std::default::Default + Float + FromPrimitive,
+    T: Clone + Num + std::ops::AddAssign + std::default::Default + Float + FromPrimitive + 'static,
 {
     EinsumBuilder::new(spec)
 }
@@ -41,7 +45,7 @@ where
 /// Builder for einsum operations
 pub struct EinsumBuilder<'a, T>
 where
-    T: Clone + Num + Float + FromPrimitive,
+    T: Clone + Num + Float + FromPrimitive + 'static,
 {
     spec: String,
     inputs: Option<&'a [tenrso_core::TensorHandle<T>]>,
@@ -50,7 +54,7 @@ where
 
 impl<'a, T> EinsumBuilder<'a, T>
 where
-    T: Clone + Num + std::ops::AddAssign + std::default::Default + Float + FromPrimitive,
+    T: Clone + Num + std::ops::AddAssign + std::default::Default + Float + FromPrimitive + 'static,
 {
     /// Create a new einsum builder
     pub fn new(spec: impl Into<String>) -> Self {

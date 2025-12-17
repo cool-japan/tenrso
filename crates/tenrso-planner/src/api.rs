@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::fmt;
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -305,6 +306,217 @@ pub trait Planner {
     fn make_plan(&self, spec: &str, shapes: &[Vec<usize>], hints: &PlanHints) -> Result<Plan>;
 }
 
+// Display implementations for pretty-printing
+
+impl fmt::Display for Plan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Contraction Plan:")?;
+        writeln!(f, "  Steps: {}", self.nodes.len())?;
+        writeln!(f, "  Estimated FLOPs: {:.2e}", self.estimated_flops)?;
+        writeln!(
+            f,
+            "  Peak Memory: {} bytes ({:.2} MB)",
+            self.estimated_memory,
+            self.estimated_memory as f64 / 1_048_576.0
+        )?;
+        writeln!(f)?;
+
+        for (i, node) in self.nodes.iter().enumerate() {
+            writeln!(f, "Step {}:", i + 1)?;
+            writeln!(f, "  {}", node)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for PlanNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Contract ")?;
+        for (i, input_spec) in self.output_spec.input_specs.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "'{}'", input_spec)?;
+        }
+        writeln!(f, " -> '{}'", self.output_spec.output_spec)?;
+        writeln!(f, "    Cost: {:.2e} FLOPs", self.cost)?;
+        writeln!(f, "    Memory: {} bytes", self.memory)?;
+        write!(f, "    Representation: {:?}", self.repr)?;
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for ReprHint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReprHint::Dense => write!(f, "Dense"),
+            ReprHint::Sparse => write!(f, "Sparse"),
+            ReprHint::LowRank => write!(f, "LowRank"),
+            ReprHint::Auto => write!(f, "Auto"),
+        }
+    }
+}
+
+impl Plan {
+    /// Export the plan as a Graphviz DOT format string for visualization
+    ///
+    /// The resulting string can be saved to a `.dot` file and rendered with:
+    /// ```bash
+    /// dot -Tpng plan.dot -o plan.png
+    /// ```
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tenrso_planner::{greedy_planner, EinsumSpec, PlanHints};
+    ///
+    /// let spec = EinsumSpec::parse("ij,jk->ik").unwrap();
+    /// let shapes = vec![vec![10, 20], vec![20, 30]];
+    /// let hints = PlanHints::default();
+    /// let plan = greedy_planner(&spec, &shapes, &hints).unwrap();
+    ///
+    /// let dot = plan.to_dot();
+    /// assert!(dot.contains("digraph"));
+    /// ```
+    pub fn to_dot(&self) -> String {
+        let mut dot = String::from("digraph ContractionPlan {\n");
+        dot.push_str("  rankdir=TB;\n");
+        dot.push_str("  node [shape=box, style=rounded];\n\n");
+
+        // Add metadata
+        dot.push_str(&format!(
+            "  label=\"Contraction Plan\\nSteps: {}\\nFLOPs: {:.2e}\\nMemory: {:.2} MB\";\n",
+            self.nodes.len(),
+            self.estimated_flops,
+            self.estimated_memory as f64 / 1_048_576.0
+        ));
+        dot.push_str("  labelloc=t;\n\n");
+
+        // Add nodes
+        for (i, node) in self.nodes.iter().enumerate() {
+            let inputs_str = node.output_spec.input_specs.join(", ");
+            let label = format!(
+                "Step {}\\n{}\\n→ {}\\nCost: {:.2e}\\nRepr: {:?}",
+                i + 1,
+                inputs_str,
+                node.output_spec.output_spec,
+                node.cost,
+                node.repr
+            );
+            dot.push_str(&format!("  step{} [label=\"{}\"];\n", i, label));
+        }
+
+        // Add edges (sequential flow)
+        for i in 0..self.nodes.len().saturating_sub(1) {
+            dot.push_str(&format!("  step{} -> step{};\n", i, i + 1));
+        }
+
+        dot.push_str("}\n");
+        dot
+    }
+
+    /// Validate the plan for correctness
+    ///
+    /// Checks:
+    /// - All contraction steps have valid specifications
+    /// - No self-contractions
+    /// - Cost and memory estimates are non-negative
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the plan is valid, otherwise an error describing the issue
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tenrso_planner::{greedy_planner, EinsumSpec, PlanHints};
+    ///
+    /// let spec = EinsumSpec::parse("ij,jk->ik").unwrap();
+    /// let shapes = vec![vec![10, 20], vec![20, 30]];
+    /// let hints = PlanHints::default();
+    /// let plan = greedy_planner(&spec, &shapes, &hints).unwrap();
+    ///
+    /// assert!(plan.validate().is_ok());
+    /// ```
+    pub fn validate(&self) -> Result<()> {
+        // Check for empty plan
+        if self.nodes.is_empty() && self.estimated_flops > 0.0 {
+            anyhow::bail!("Plan has no steps but non-zero FLOPs estimate");
+        }
+
+        // Validate each node
+        for (i, node) in self.nodes.iter().enumerate() {
+            // Check for empty input specs
+            if node.output_spec.input_specs.is_empty() {
+                anyhow::bail!("Step {}: No input specifications", i + 1);
+            }
+
+            // Check for self-contraction (same input spec twice)
+            if node.output_spec.input_specs.len() == 2
+                && node.output_spec.input_specs[0] == node.output_spec.input_specs[1]
+            {
+                anyhow::bail!(
+                    "Step {}: Self-contraction detected (same input twice)",
+                    i + 1
+                );
+            }
+
+            // Check cost is non-negative
+            if node.cost < 0.0 {
+                anyhow::bail!("Step {}: Negative cost {}", i + 1, node.cost);
+            }
+
+            // Check cost is finite
+            if !node.cost.is_finite() {
+                anyhow::bail!("Step {}: Non-finite cost {}", i + 1, node.cost);
+            }
+
+            // Check output spec is not empty
+            if node.output_spec.output_spec.is_empty() {
+                anyhow::bail!("Step {}: Empty output specification", i + 1);
+            }
+
+            // Check all characters in specs are valid
+            for input_spec in &node.output_spec.input_specs {
+                if !input_spec.chars().all(|c| c.is_ascii_lowercase()) {
+                    anyhow::bail!(
+                        "Step {}: Invalid characters in input spec '{}'",
+                        i + 1,
+                        input_spec
+                    );
+                }
+            }
+
+            if !node
+                .output_spec
+                .output_spec
+                .chars()
+                .all(|c| c.is_ascii_lowercase())
+            {
+                anyhow::bail!(
+                    "Step {}: Invalid characters in output spec '{}'",
+                    i + 1,
+                    node.output_spec.output_spec
+                );
+            }
+        }
+
+        // Check total FLOPs is non-negative
+        if self.estimated_flops < 0.0 {
+            anyhow::bail!("Plan has negative total FLOPs: {}", self.estimated_flops);
+        }
+
+        // Check total FLOPs is finite
+        if !self.estimated_flops.is_finite() {
+            anyhow::bail!("Plan has non-finite total FLOPs: {}", self.estimated_flops);
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,5 +715,279 @@ mod tests {
             let deserialized: ReprHint = serde_json::from_str(&json).unwrap();
             assert_eq!(hint, deserialized);
         }
+    }
+
+    #[test]
+    fn test_plan_display() {
+        let mut plan = Plan::new();
+        plan.nodes.push(PlanNode {
+            inputs: vec![0, 1],
+            output_spec: ContractionSpec::new(
+                vec!["ij".to_string(), "jk".to_string()],
+                "ik".to_string(),
+            ),
+            cost: 12000.0,
+            memory: 240000,
+            repr: ReprHint::Dense,
+        });
+        plan.estimated_flops = 12000.0;
+        plan.estimated_memory = 240000;
+
+        let display_str = format!("{}", plan);
+        assert!(display_str.contains("Contraction Plan"));
+        assert!(display_str.contains("Steps: 1"));
+        assert!(display_str.contains("1.20e4"));
+        assert!(display_str.contains("240000"));
+        assert!(display_str.contains("Step 1:"));
+        assert!(display_str.contains("'ij'"));
+        assert!(display_str.contains("'jk'"));
+        assert!(display_str.contains("'ik'"));
+    }
+
+    #[test]
+    fn test_plan_node_display() {
+        let node = PlanNode {
+            inputs: vec![0, 1],
+            output_spec: ContractionSpec::new(
+                vec!["ijk".to_string(), "jkl".to_string()],
+                "il".to_string(),
+            ),
+            cost: 5000.0,
+            memory: 10000,
+            repr: ReprHint::Sparse,
+        };
+
+        let display_str = format!("{}", node);
+        assert!(display_str.contains("Contract"));
+        assert!(display_str.contains("'ijk'"));
+        assert!(display_str.contains("'jkl'"));
+        assert!(display_str.contains("'il'"));
+        assert!(display_str.contains("5.00e3"));
+        assert!(display_str.contains("10000"));
+        assert!(display_str.contains("Sparse"));
+    }
+
+    #[test]
+    fn test_repr_hint_display() {
+        assert_eq!(format!("{}", ReprHint::Dense), "Dense");
+        assert_eq!(format!("{}", ReprHint::Sparse), "Sparse");
+        assert_eq!(format!("{}", ReprHint::LowRank), "LowRank");
+        assert_eq!(format!("{}", ReprHint::Auto), "Auto");
+    }
+
+    #[test]
+    fn test_plan_to_dot() {
+        let mut plan = Plan::new();
+        plan.nodes.push(PlanNode {
+            inputs: vec![0, 1],
+            output_spec: ContractionSpec::new(
+                vec!["ij".to_string(), "jk".to_string()],
+                "ik".to_string(),
+            ),
+            cost: 1000.0,
+            memory: 5000,
+            repr: ReprHint::Dense,
+        });
+        plan.nodes.push(PlanNode {
+            inputs: vec![2, 3],
+            output_spec: ContractionSpec::new(
+                vec!["ik".to_string(), "kl".to_string()],
+                "il".to_string(),
+            ),
+            cost: 2000.0,
+            memory: 10000,
+            repr: ReprHint::Sparse,
+        });
+        plan.estimated_flops = 3000.0;
+        plan.estimated_memory = 10000;
+
+        let dot = plan.to_dot();
+
+        // Check structure
+        assert!(dot.starts_with("digraph ContractionPlan"));
+        assert!(dot.contains("rankdir=TB"));
+        assert!(dot.contains("shape=box"));
+
+        // Check metadata
+        assert!(dot.contains("Steps: 2"));
+        assert!(dot.contains("3.00e3"));
+
+        // Check nodes
+        assert!(dot.contains("step0"));
+        assert!(dot.contains("step1"));
+        assert!(dot.contains("ij, jk"));
+        assert!(dot.contains("ik, kl"));
+        assert!(dot.contains("→ ik"));
+        assert!(dot.contains("→ il"));
+
+        // Check edges
+        assert!(dot.contains("step0 -> step1"));
+
+        // Check it ends properly
+        assert!(dot.trim().ends_with("}"));
+    }
+
+    #[test]
+    fn test_plan_to_dot_empty() {
+        let plan = Plan::new();
+        let dot = plan.to_dot();
+
+        assert!(dot.contains("digraph ContractionPlan"));
+        assert!(dot.contains("Steps: 0"));
+        assert!(dot.contains("0.00e0"));
+    }
+
+    #[test]
+    fn test_plan_validate_valid() {
+        let mut plan = Plan::new();
+        plan.nodes.push(PlanNode {
+            inputs: vec![0, 1],
+            output_spec: ContractionSpec::new(
+                vec!["ij".to_string(), "jk".to_string()],
+                "ik".to_string(),
+            ),
+            cost: 1000.0,
+            memory: 5000,
+            repr: ReprHint::Dense,
+        });
+        plan.estimated_flops = 1000.0;
+        plan.estimated_memory = 5000;
+
+        assert!(plan.validate().is_ok());
+    }
+
+    #[test]
+    fn test_plan_validate_empty() {
+        let plan = Plan::new();
+        assert!(plan.validate().is_ok());
+    }
+
+    #[test]
+    fn test_plan_validate_negative_cost() {
+        let mut plan = Plan::new();
+        plan.nodes.push(PlanNode {
+            inputs: vec![0, 1],
+            output_spec: ContractionSpec::new(
+                vec!["ij".to_string(), "jk".to_string()],
+                "ik".to_string(),
+            ),
+            cost: -1000.0, // Invalid
+            memory: 5000,
+            repr: ReprHint::Dense,
+        });
+        plan.estimated_flops = 1000.0;
+
+        let result = plan.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Negative cost"));
+    }
+
+    #[test]
+    fn test_plan_validate_infinite_cost() {
+        let mut plan = Plan::new();
+        plan.nodes.push(PlanNode {
+            inputs: vec![0, 1],
+            output_spec: ContractionSpec::new(
+                vec!["ij".to_string(), "jk".to_string()],
+                "ik".to_string(),
+            ),
+            cost: f64::INFINITY, // Invalid
+            memory: 5000,
+            repr: ReprHint::Dense,
+        });
+        plan.estimated_flops = 1000.0;
+
+        let result = plan.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Non-finite cost"));
+    }
+
+    #[test]
+    fn test_plan_validate_empty_input_specs() {
+        let mut plan = Plan::new();
+        plan.nodes.push(PlanNode {
+            inputs: vec![],
+            output_spec: ContractionSpec::new(
+                vec![], // Invalid - no inputs
+                "ik".to_string(),
+            ),
+            cost: 1000.0,
+            memory: 5000,
+            repr: ReprHint::Dense,
+        });
+        plan.estimated_flops = 1000.0;
+
+        let result = plan.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No input specifications"));
+    }
+
+    #[test]
+    fn test_plan_validate_invalid_characters() {
+        let mut plan = Plan::new();
+        plan.nodes.push(PlanNode {
+            inputs: vec![0, 1],
+            output_spec: ContractionSpec::new(
+                vec!["IJ".to_string(), "jk".to_string()], // Invalid - uppercase
+                "ik".to_string(),
+            ),
+            cost: 1000.0,
+            memory: 5000,
+            repr: ReprHint::Dense,
+        });
+        plan.estimated_flops = 1000.0;
+
+        let result = plan.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid characters"));
+    }
+
+    #[test]
+    fn test_plan_validate_empty_output_spec() {
+        let mut plan = Plan::new();
+        plan.nodes.push(PlanNode {
+            inputs: vec![0, 1],
+            output_spec: ContractionSpec::new(
+                vec!["ij".to_string(), "jk".to_string()],
+                "".to_string(), // Invalid - empty output
+            ),
+            cost: 1000.0,
+            memory: 5000,
+            repr: ReprHint::Dense,
+        });
+        plan.estimated_flops = 1000.0;
+
+        let result = plan.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Empty output specification"));
+    }
+
+    #[test]
+    fn test_plan_validate_self_contraction() {
+        let mut plan = Plan::new();
+        plan.nodes.push(PlanNode {
+            inputs: vec![0, 0], // Same input twice
+            output_spec: ContractionSpec::new(
+                vec!["ij".to_string(), "ij".to_string()], // Self-contraction
+                "ij".to_string(),
+            ),
+            cost: 1000.0,
+            memory: 5000,
+            repr: ReprHint::Dense,
+        });
+        plan.estimated_flops = 1000.0;
+
+        let result = plan.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Self-contraction"));
     }
 }

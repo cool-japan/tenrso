@@ -6,3 +6,7 @@
 # everyone who runs the test benefits from these saved cases.
 cc 88693e8d29e2148124e241538c85b8c5a6beaecc60e2c5392bf89dd04660c5bd # shrinks to size = 10, rank = 5
 cc 8528c6a27255f201a4f8b863a718b4148003b8bfcf1917ee8cd79bebb41c25cc # shrinks to size = 8, rank = 5
+cc 6ceddce907a3569166017fb181de0416bebb1eafaef20c4b598af183117b68ca # shrinks to size = 8, rank = 3
+cc e1676ade15c959ea9126a59457eb336565ce3a0f2cbe3c3135fc88af7c5a3603 # shrinks to size = 11, rank = 3
+cc 144b1723c8660f0feb385f77373ec52b6eea1d9d904a29702c6904d82fbd71cb # shrinks to size = 11, rank = 3
+cc 3a9bb83321301692dd8b3f994dd6d1a0ff9cb4678620879ce14b5d095ddcbcb2 # shrinks to size = 11, rank = 3

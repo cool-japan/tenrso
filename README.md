@@ -24,15 +24,15 @@
 
 ## Installation
 
-**Version:** 0.1.0-alpha.1
+**Version:** 0.1.0-alpha.2
 
 Add TenRSo crates to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tenrso-core = "0.1.0-alpha.1"
-tenrso-exec = "0.1.0-alpha.1"
-tenrso-decomp = "0.1.0-alpha.1"
+tenrso-core = "0.1.0-alpha.2"
+tenrso-exec = "0.1.0-alpha.2"
+tenrso-decomp = "0.1.0-alpha.2"
 ```
 
 Or use the workspace in development:
@@ -126,23 +126,21 @@ let result = einsum_ex::<f32>("ab,bc->ac")
 
 API documentation: `cargo doc --workspace --no-deps --open`
 
-### Alpha.1 Release Notes
+### Latest Release
 
-**What's New in 0.1.0-alpha.1:**
-- ✅ All critical bugs fixed (CP-ALS, TT-SVD, Tucker-HOOI)
-- ✅ 524/524 tests passing (100% pass rate)
-- ✅ SIMD optimizations (3-4× speedup)
-- ✅ Hardware FMA support (2× additional speedup)
-- ✅ Parallel execution (6-8× speedup on 8 cores)
-- ✅ Complete out-of-core processing (Arrow, Parquet, mmap)
+**What's New in 0.1.0-alpha.2:**
+- ✅ Production-ready for alpha testing
+- ✅ Comprehensive doctests in all public APIs
+- ✅ Full test suite passing with --all-targets --all-features
+- ✅ Documentation improvements across all crates
 - ✅ Zero compiler/clippy warnings
-- ✅ Production-grade quality
+- ✅ Ready for wider testing and feedback
 
 See [CHANGELOG.md](CHANGELOG.md) for complete release notes.
 
 ## Project Status
 
-**🎉 ALPHA.1 RELEASED** - **524/524 tests passing (100%)**
+**🎉 ALPHA.2 IN PREPARATION** - **Production-Ready Quality**
 
 | Milestone | Status | Tests |
 |-----------|--------|-------|
@@ -152,8 +150,8 @@ See [CHANGELOG.md](CHANGELOG.md) for complete release notes.
 | M3: Sparse & Masked | ✅ Complete | 128 |
 | M4: Planner | ✅ Complete | 125 |
 | M5: Out-of-Core | ✅ Complete | 96 |
-| M6: AD hooks | ✅ Core Complete | 13 |
-| **Alpha.1** | ✅ **SHIPPED** | **524** |
+| M6: AD hooks | ✅ Complete | 164 |
+| **Alpha.2** | 🚀 **IN PREPARATION** | **524+** |
 
 See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md) for details.
 

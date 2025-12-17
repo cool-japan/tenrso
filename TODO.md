@@ -1,9 +1,33 @@
 # TenRSo TODO
 
-> **Version:** 0.1.0-alpha.1
-> **Status:** 🎉 **ALPHA.1 RELEASED** - 524/524 tests passing (100%)
+> **Version:** 0.1.0-alpha.2
+> **Status:** 🎉 **ALPHA.2 RELEASED** - 1,820+ library tests passing (100%)
+> **Release Date:** 2025-12-16
 
 This document tracks high-level tasks across the entire TenRSo project. For crate-specific tasks, see individual `crates/*/TODO.md` files.
+
+---
+
+## Alpha.2 Release Highlights (2025-12-16)
+
+### Documentation Quality Improvements ✅
+- [x] Fixed all intra-doc link issues (10 files)
+- [x] Comprehensive lib.rs review (995 doc lines, 68 examples)
+- [x] docs.rs compatibility verified
+- [x] Zero documentation warnings
+- [x] All bracket notation properly escaped in rustdoc
+
+### Code Quality ✅
+- [x] Zero compiler warnings (all targets, all features)
+- [x] Zero clippy warnings (all targets, all features)
+- [x] Consistent code formatting
+- [x] 1,820+ library tests passing (100%)
+
+### Testing ✅
+- [x] All library tests passing
+- [x] Property-based tests passing
+- [x] Integration tests passing
+- [x] Core functionality verified
 
 ---
 
@@ -43,18 +67,29 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
 - [x] Axis metadata tracking
 - [x] Property tests for shape operations - ✅ 36 tests passing (19 unit + 17 doc)
 
-### Tensor Kernels (tenrso-kernels) - ✅ COMPLETE
+### Tensor Kernels (tenrso-kernels) - ✅ COMPLETE + ENHANCED
 
+**Core Kernels:**
 - [x] Khatri-Rao product (column-wise Kronecker) - ✅ Complete with parallel version
 - [x] Kronecker product (matrix/tensor) - ✅ Complete with parallel version
 - [x] Hadamard product (element-wise) - ✅ Complete (2D, ND, in-place variants)
 - [x] N-mode product (TTM/TTT) - ✅ Complete with sequential multi-mode
 - [x] MTTKRP (Matricized Tensor Times Khatri-Rao Product) - ✅ Complete
-- [x] **NEW:** Blocked/Tiled MTTKRP - ✅ Complete (cache-optimized + parallel)
-- [x] **NEW:** Outer products - ✅ Complete (2D, ND, weighted, CP reconstruction)
-- [x] **NEW:** Tucker operator - ✅ Complete (multi-mode products + reconstruction)
-- [x] Correctness property tests - ✅ **102 tests passing** (74 unit + 9 integration + 19 doc)
-- [ ] Performance benchmarks - ⏳ Future
+- [x] Blocked/Tiled MTTKRP - ✅ Complete (cache-optimized + parallel)
+- [x] Outer products - ✅ Complete (2D, ND, weighted, CP reconstruction)
+- [x] Tucker operator - ✅ Complete (multi-mode products + reconstruction)
+
+**Advanced Operations (2025-11-21):**
+- [x] **NEW:** Tensor contractions - ✅ Complete (contract_tensors, sum_over_modes, inner_product, trace)
+- [x] **NEW:** Tensor reductions - ✅ Complete (sum, mean, variance, std, norms, min/max)
+- [x] **NEW:** Enhanced property tests - ✅ Complete (40 tests for mathematical correctness)
+
+**Quality & Testing:**
+- [x] Correctness property tests - ✅ **192 tests passing** (132 unit + 22 integration + 38 doc)
+- [x] Comprehensive integration tests - ✅ Complete (CP-ALS, Tucker-HOOI workflows)
+- [x] Performance benchmarks - ✅ Complete (13.3 Gelem/s peak, documented in PERFORMANCE.md)
+- [x] Production-ready error handling - ✅ Complete (structured error types)
+- [x] Utility functions - ✅ Complete (timing, validation, testing helpers)
 - [ ] SIMD optimization passes - ⏳ Future
 
 ---

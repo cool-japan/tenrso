@@ -207,7 +207,7 @@ fn main() -> anyhow::Result<()> {
     println!("{}", "-".repeat(80));
 
     let analysis_tensor = DenseND::<f64>::random_uniform(&[10, 10, 10, 10, 10], 0.0, 1.0);
-    let tt = tt_svd(&analysis_tensor, &vec![8, 8, 8, 8], 1e-6)?;
+    let tt = tt_svd(&analysis_tensor, &[8, 8, 8, 8], 1e-6)?;
 
     println!("TT-ranks: {:?}", tt.ranks);
     println!();
@@ -253,10 +253,10 @@ fn main() -> anyhow::Result<()> {
         let mut tt_elements = 0;
         let n_modes = shape.len();
 
-        for i in 0..n_modes {
+        for (i, &dim) in shape.iter().enumerate() {
             let r_left = if i == 0 { 1 } else { rank };
             let r_right = if i == n_modes - 1 { 1 } else { rank };
-            tt_elements += r_left * shape[i] * r_right;
+            tt_elements += r_left * dim * r_right;
         }
 
         let compression = original_elements as f64 / tt_elements as f64;
@@ -279,7 +279,7 @@ fn main() -> anyhow::Result<()> {
 
     // TT decomposition
     let start = std::time::Instant::now();
-    let tt = tt_svd(&compare_tensor, &vec![10, 10, 10], 1e-6)?;
+    let tt = tt_svd(&compare_tensor, &[10, 10, 10], 1e-6)?;
     let tt_time = start.elapsed();
     let tt_recon = tt.reconstruct()?;
     let tt_error = (&compare_tensor - &tt_recon).frobenius_norm() / compare_tensor.frobenius_norm();
@@ -288,14 +288,14 @@ fn main() -> anyhow::Result<()> {
 
     // CP decomposition (rank-10)
     let start = std::time::Instant::now();
-    let cp = cp_als(&compare_tensor, 10, 50, 1e-6, InitStrategy::Random)?;
+    let cp = cp_als(&compare_tensor, 10, 50, 1e-6, InitStrategy::Random, None)?;
     let cp_time = start.elapsed();
     let cp_recon = cp.reconstruct(&compare_shape)?;
     let cp_error = (&compare_tensor - &cp_recon).frobenius_norm() / compare_tensor.frobenius_norm();
 
     // Tucker decomposition
     let start = std::time::Instant::now();
-    let tucker = tucker_hosvd(&compare_tensor, &vec![8, 8, 8, 8])?;
+    let tucker = tucker_hosvd(&compare_tensor, &[8, 8, 8, 8])?;
     let tucker_time = start.elapsed();
     let tucker_recon = tucker.reconstruct()?;
     let tucker_error =

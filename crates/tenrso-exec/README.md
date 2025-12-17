@@ -68,6 +68,109 @@ let abs_tensor = exec.elem_op(ElemOp::Abs, &tensor)?;
 let sum = exec.reduce(ReduceOp::Sum, &tensor, &[0, 1])?;
 ```
 
+### Performance Configuration
+
+`tenrso-exec` includes advanced optimization features that can be configured per executor:
+
+```rust
+use tenrso_exec::CpuExecutor;
+
+// Default: all optimizations enabled
+let mut exec = CpuExecutor::new();
+
+// Custom configuration with selective optimizations
+let mut exec = CpuExecutor::new()
+    .with_simd(true)                    // SIMD-accelerated operations
+    .with_tiled_reductions(true)        // Cache-friendly blocked reductions
+    .with_vectorized_broadcast(true);   // Optimized broadcasting patterns
+
+// Disable all optimizations (for debugging or baseline comparison)
+let mut exec = CpuExecutor::unoptimized();
+```
+
+#### Optimization Features
+
+- **SIMD Operations** (`enable_simd`):
+  - Vectorized element-wise operations (neg, abs, exp, log, sin, cos, etc.)
+  - Vectorized binary operations (add, sub, mul, div, etc.)
+  - Automatically activated for tensors ≥1024 elements
+  - Typical speedup: 2-4× for simple ops, up to 8× for expensive ops (exp, sin)
+
+- **Tiled Reductions** (`enable_tiled_reductions`):
+  - Cache-friendly blocked reductions using 4KB tiles
+  - Optimizes sum, mean, max, min operations
+  - Automatically activated for tensors ≥100K elements
+  - Typical speedup: 1.5-3× for large tensors (reduces cache misses)
+
+- **Vectorized Broadcasting** (`enable_vectorized_broadcast`):
+  - Pattern-aware broadcasting with specialized kernels
+  - Detects common patterns (scalar, same-shape, axis-specific)
+  - Parallel execution for large operations
+  - Typical speedup: 1.5-2× for broadcast-heavy workloads
+
+#### When to Use Each Optimization
+
+**Enable SIMD when**:
+- Working with large vectors/tensors (>1K elements)
+- Performing many element-wise operations
+- Using expensive math functions (exp, log, trigonometric)
+
+**Enable Tiled Reductions when**:
+- Reducing very large tensors (>100K elements)
+- Memory bandwidth is a bottleneck
+- Working with multi-dimensional reductions
+
+**Disable optimizations when**:
+- Debugging numerical differences
+- Profiling baseline performance
+- Working with very small tensors (<1K elements)
+- Comparing against reference implementations
+
+#### Performance Tuning Guidelines
+
+1. **Default configuration is optimal for most workloads**:
+   ```rust
+   let mut exec = CpuExecutor::new(); // All optimizations enabled
+   ```
+
+2. **For debugging or numerical verification**:
+   ```rust
+   let mut exec = CpuExecutor::unoptimized();
+   ```
+
+3. **For memory-constrained environments**:
+   ```rust
+   let mut exec = CpuExecutor::new()
+       .with_tiled_reductions(false); // Reduce memory footprint
+   ```
+
+4. **For maximum throughput on modern CPUs**:
+   ```rust
+   let mut exec = CpuExecutor::new(); // All optimizations enabled by default
+   ```
+
+#### Benchmarking
+
+Run comprehensive benchmarks to measure optimization impact:
+
+```bash
+# Run all benchmarks
+cargo bench
+
+# Run optimization-specific benchmarks
+cargo bench --bench optimization_benchmarks
+
+# Compare optimized vs unoptimized performance
+cargo bench --bench optimization_benchmarks -- simd
+cargo bench --bench optimization_benchmarks -- tiled
+```
+
+Benchmark results include:
+- SIMD element-wise operations at various tensor sizes
+- Tiled reductions vs standard reductions
+- Combined optimization pipeline performance
+- Automatic threshold detection verification
+
 ## API Reference
 
 ### Einsum Builder

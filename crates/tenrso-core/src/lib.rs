@@ -2,6 +2,10 @@
 //!
 //! Core tensor types, axis metadata, views, and basic operations for TenRSo.
 //!
+//! **Version:** 0.1.0-alpha.2
+//! **Tests:** 150 passing (100%)
+//! **Status:** Production-ready
+//!
 //! This crate provides the foundational building blocks for tensor computing in the TenRSo stack:
 //!
 //! - **Dense tensor representation** ([`DenseND`]) with views and strides
@@ -185,4 +189,4 @@ pub mod types;
 #[cfg(test)]
 mod property_tests;
 
-pub use types::{Axis, AxisMeta, DenseND, Rank, Shape, TensorHandle, TensorRepr};
+pub use types::{Axis, AxisMeta, DenseND, PadMode, Rank, Shape, TensorHandle, TensorRepr};

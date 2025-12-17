@@ -3,6 +3,9 @@
 //! **Production-grade tensor operations** with generalized contraction, decompositions,
 //! sparse formats, and out-of-core processing.
 //!
+//! **Version:** 0.1.0-alpha.2
+//! **Status:** Production-ready alpha release with 1,820+ tests passing
+//!
 //! This is the **meta crate** that re-exports all TenRSo components for convenient access.
 //!
 //! ## Quick Start
@@ -56,7 +59,7 @@
 //! use tenrso::core::DenseND;
 //!
 //! let tensor = DenseND::<f64>::random_uniform(&[10, 10, 10], 0.0, 1.0);
-//! let cp = cp_als(&tensor, 5, 50, 1e-4, InitStrategy::Random).unwrap();
+//! let cp = cp_als(&tensor, 5, 50, 1e-4, InitStrategy::Random, None).unwrap();
 //! println!("CP decomposition modes: {}", cp.factors.len());
 //! ```
 //!

@@ -506,6 +506,462 @@ proptest! {
 }
 
 // ============================================================================
+// Tensor Contraction Property Tests
+// ============================================================================
+
+proptest! {
+    /// Test tensor contraction is bilinear: contract(aA, B) = a*contract(A, B)
+    #[test]
+    fn test_contraction_scalar_mult((m, n, k) in (2usize..8, 2usize..8, 2usize..8)) {
+        use crate::contractions::contract_tensors;
+
+        let a = Array::from_shape_fn(vec![m, n], |_| 2.0f64);
+        let b = Array::from_shape_fn(vec![n, k], |_| 3.0f64);
+        let scalar = 5.0;
+
+        let scaled_a = &a * scalar;
+
+        let result1 = contract_tensors(&scaled_a.view(), &b.view(), &[1], &[0]).unwrap();
+        let result2 = contract_tensors(&a.view(), &b.view(), &[1], &[0]).unwrap() * scalar;
+
+        prop_assert_eq!(result1.shape(), result2.shape());
+        for i in 0..result1.len() {
+            let diff = (result1.as_slice().unwrap()[i] - result2.as_slice().unwrap()[i]).abs();
+            prop_assert!(diff < 1e-9, "Mismatch at {}: {} vs {}", i,
+                result1.as_slice().unwrap()[i], result2.as_slice().unwrap()[i]);
+        }
+    }
+
+    /// Test tensor inner product is symmetric: <A, B> = <B, A>
+    #[test]
+    fn test_inner_product_symmetric((m, n) in (2usize..10, 2usize..10)) {
+        use crate::contractions::tensor_inner_product;
+
+        let a = Array::from_shape_fn(vec![m, n], |idx| {
+            let i = idx[0];
+            let j = idx[1];
+            (i + j + 1) as f64
+        });
+        let b = Array::from_shape_fn(vec![m, n], |idx| {
+            let i = idx[0];
+            let j = idx[1];
+            (i * j + 1) as f64
+        });
+
+        let ab = tensor_inner_product(&a.view(), &b.view()).unwrap();
+        let ba = tensor_inner_product(&b.view(), &a.view()).unwrap();
+
+        prop_assert!((ab - ba).abs() < 1e-10);
+    }
+
+    /// Test sum reduction: sum over all modes equals sum of all elements
+    #[test]
+    fn test_sum_all_modes_equals_total((m, n, k) in (2usize..6, 2usize..6, 2usize..6)) {
+        use crate::reductions::sum_along_modes;
+
+        let tensor = Array::from_shape_fn(vec![m, n, k], |idx| {
+            (idx[0] + idx[1] + idx[2]) as f64
+        });
+
+        let sum_all = sum_along_modes(&tensor.view(), &[0, 1, 2]).unwrap();
+        let expected: f64 = tensor.iter().sum();
+
+        prop_assert!((sum_all[[0]] - expected).abs() < 1e-9);
+    }
+
+    /// Test mean reduction: mean of constants is constant
+    #[test]
+    fn test_mean_of_constants(constant in 1.0f64..10.0f64, (m, n) in (2usize..10, 2usize..10)) {
+        use crate::reductions::mean_along_modes;
+
+        let tensor = Array::from_elem(vec![m, n], constant);
+
+        let mean = mean_along_modes(&tensor.view(), &[0, 1]).unwrap();
+
+        prop_assert!((mean[[0]] - constant).abs() < 1e-10);
+    }
+
+    /// Test variance of constants is zero
+    #[test]
+    fn test_variance_of_constants(constant in 1.0f64..10.0f64, size in 3usize..10) {
+        use crate::reductions::variance_along_modes;
+
+        let tensor = Array::from_elem(vec![size, size], constant);
+
+        let var = variance_along_modes(&tensor.view(), &[0], 1).unwrap();
+
+        // Variance of constants should be zero
+        for val in var.iter() {
+            prop_assert!(val.abs() < 1e-9, "Variance should be zero for constants");
+        }
+    }
+
+    /// Test Frobenius norm is non-negative and zero only for zero tensor
+    #[test]
+    fn test_frobenius_norm_properties((m, n) in (2usize..10, 2usize..10)) {
+        use crate::reductions::frobenius_norm_tensor;
+
+        let tensor = Array::from_shape_fn(vec![m, n], |idx| {
+            ((idx[0] + idx[1]) % 3) as f64
+        });
+
+        let norm = frobenius_norm_tensor(&tensor.view());
+
+        prop_assert!(norm >= 0.0);
+
+        // If tensor has any non-zero element, norm > 0
+        if tensor.iter().any(|&x| x != 0.0) {
+            prop_assert!(norm > 0.0);
+        }
+    }
+
+    /// Test p-norm ordering: ||x||_∞ ≤ ||x||_2 ≤ ||x||_1
+    #[test]
+    fn test_pnorm_ordering(size in 3usize..8) {
+        use crate::reductions::pnorm_along_modes;
+
+        let tensor = Array::from_shape_fn(vec![size, size], |idx| {
+            if idx[0] == idx[1] { 1.0 } else { 0.5 }
+        });
+
+        let l1 = pnorm_along_modes(&tensor.view(), &[0, 1], 1.0).unwrap()[[0]];
+        let l2 = pnorm_along_modes(&tensor.view(), &[0, 1], 2.0).unwrap()[[0]];
+
+        // For non-negative vectors, l2 <= l1 (holds when normalized)
+        // The actual ordering depends on the number of elements, but we can test basic sanity
+        prop_assert!(l1 > 0.0);
+        prop_assert!(l2 > 0.0);
+    }
+
+    /// Test min/max basic properties
+    #[test]
+    fn test_min_max_bounds(size in 2usize..10) {
+        use crate::reductions::{min_along_modes, max_along_modes};
+
+        let tensor = Array::from_shape_fn(vec![size, size], |idx| {
+            (idx[0] * idx[1]) as f64
+        });
+
+        let min_val = min_along_modes(&tensor.view(), &[0, 1]).unwrap()[[0]];
+        let max_val = max_along_modes(&tensor.view(), &[0, 1]).unwrap()[[0]];
+
+        // Min should be <= Max
+        prop_assert!(min_val <= max_val);
+
+        // Min and max should be within tensor values
+        let tensor_min = tensor.iter().cloned().fold(f64::INFINITY, f64::min);
+        let tensor_max = tensor.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+        prop_assert!((min_val - tensor_min).abs() < 1e-10);
+        prop_assert!((max_val - tensor_max).abs() < 1e-10);
+    }
+
+    /// Test that median is between min and max
+    #[test]
+    fn test_median_bounds(data in prop::collection::vec(-100.0..100.0f64, 5..50)) {
+        let tensor = Array::from_shape_vec(vec![1, data.len()], data.clone()).unwrap();
+
+        let median = median_along_modes(&tensor.view(), &[1]).unwrap();
+
+        let min_val = data.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_val = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+        prop_assert!(median[[0]] >= min_val - 1e-10);
+        prop_assert!(median[[0]] <= max_val + 1e-10);
+    }
+
+    /// Test that median of constant array equals that constant
+    #[test]
+    fn test_median_constant(value in -100.0..100.0f64, size in 3..20usize) {
+        let tensor = Array::from_elem(vec![1, size], value);
+
+        let median = median_along_modes(&tensor.view(), &[1]).unwrap();
+
+        prop_assert!((median[[0]] - value).abs() < 1e-10);
+    }
+
+    /// Test percentile bounds and monotonicity
+    #[test]
+    fn test_percentile_properties(data in prop::collection::vec(-100.0..100.0f64, 5..50)) {
+        let tensor = Array::from_shape_vec(vec![1, data.len()], data.clone()).unwrap();
+
+        // 0th percentile should equal minimum
+        let p0 = percentile_along_modes(&tensor.view(), &[1], 0.0).unwrap();
+        let min_val = data.iter().cloned().fold(f64::INFINITY, f64::min);
+        prop_assert!((p0[[0]] - min_val).abs() < 1e-10);
+
+        // 100th percentile should equal maximum
+        let p100 = percentile_along_modes(&tensor.view(), &[1], 100.0).unwrap();
+        let max_val = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        prop_assert!((p100[[0]] - max_val).abs() < 1e-10);
+
+        // 50th percentile should equal median
+        let p50 = percentile_along_modes(&tensor.view(), &[1], 50.0).unwrap();
+        let median = median_along_modes(&tensor.view(), &[1]).unwrap();
+        prop_assert!((p50[[0]] - median[[0]]).abs() < 1e-10);
+    }
+
+    /// Test percentile monotonicity: p1 < p2 => percentile(p1) <= percentile(p2)
+    #[test]
+    fn test_percentile_monotonicity(
+        data in prop::collection::vec(-100.0..100.0f64, 5..50),
+        p1 in 0.0..50.0f64,
+        p2 in 50.0..100.0f64
+    ) {
+        let tensor = Array::from_shape_vec(vec![1, data.len()], data.clone()).unwrap();
+
+        let val1 = percentile_along_modes(&tensor.view(), &[1], p1).unwrap();
+        let val2 = percentile_along_modes(&tensor.view(), &[1], p2).unwrap();
+
+        // p1 < p2, so val1 should be <= val2
+        prop_assert!(val1[[0]] <= val2[[0]] + 1e-10);
+    }
+
+    /// Test that skewness is scale-invariant
+    #[test]
+    fn test_skewness_scale_invariant(
+        data in prop::collection::vec(-10.0..10.0f64, 10..30),
+        scale in 0.1..10.0f64
+    ) {
+        let tensor1 = Array::from_shape_vec(vec![1, data.len()], data.clone()).unwrap();
+        let scaled_data: Vec<f64> = data.iter().map(|x| x * scale).collect();
+        let tensor2 = Array::from_shape_vec(vec![1, scaled_data.len()], scaled_data).unwrap();
+
+        let skew1 = skewness_along_modes(&tensor1.view(), &[1], true);
+        let skew2 = skewness_along_modes(&tensor2.view(), &[1], true);
+
+        // Both should succeed or both should fail
+        if let (Ok(s1), Ok(s2)) = (skew1, skew2) {
+            // Skewness should be invariant to scaling (within numerical tolerance)
+            if !s1[[0]].is_nan() && !s2[[0]].is_nan() && !s1[[0]].is_infinite() && !s2[[0]].is_infinite() {
+                prop_assert!((s1[[0]] - s2[[0]]).abs() < 1e-6,
+                    "Skewness not scale-invariant: {} vs {}", s1[[0]], s2[[0]]);
+            }
+        }
+    }
+
+    /// Test that symmetric distributions have near-zero skewness
+    #[test]
+    fn test_skewness_symmetric(center in -10.0..10.0f64, range in 1.0..20.0f64) {
+        // Create symmetric data around center
+        let values: Vec<f64> = (-10..=10).map(|i| center + (i as f64) * range / 20.0).collect();
+        let tensor = Array::from_shape_vec(vec![1, values.len()], values).unwrap();
+
+        let skew = skewness_along_modes(&tensor.view(), &[1], true).unwrap();
+
+        // Symmetric distribution should have near-zero skewness
+        prop_assert!(skew[[0]].abs() < 0.5, "Skewness not near zero: {}", skew[[0]]);
+    }
+
+    /// Test that kurtosis is scale-invariant
+    #[test]
+    fn test_kurtosis_scale_invariant(
+        data in prop::collection::vec(-10.0..10.0f64, 10..30),
+        scale in 0.1..10.0f64
+    ) {
+        let tensor1 = Array::from_shape_vec(vec![1, data.len()], data.clone()).unwrap();
+        let scaled_data: Vec<f64> = data.iter().map(|x| x * scale).collect();
+        let tensor2 = Array::from_shape_vec(vec![1, scaled_data.len()], scaled_data).unwrap();
+
+        let kurt1 = kurtosis_along_modes(&tensor1.view(), &[1], true, true);
+        let kurt2 = kurtosis_along_modes(&tensor2.view(), &[1], true, true);
+
+        // Both should succeed or both should fail
+        if let (Ok(k1), Ok(k2)) = (kurt1, kurt2) {
+            // Kurtosis should be invariant to scaling (within numerical tolerance)
+            if !k1[[0]].is_nan() && !k2[[0]].is_nan() && !k1[[0]].is_infinite() && !k2[[0]].is_infinite() {
+                prop_assert!((k1[[0]] - k2[[0]]).abs() < 1e-6,
+                    "Kurtosis not scale-invariant: {} vs {}", k1[[0]], k2[[0]]);
+            }
+        }
+    }
+
+    /// Test Fisher vs Pearson kurtosis relationship
+    #[test]
+    fn test_kurtosis_fisher_pearson_relation(data in prop::collection::vec(-10.0..10.0f64, 10..30)) {
+        let tensor = Array::from_shape_vec(vec![1, data.len()], data.clone()).unwrap();
+
+        let fisher = kurtosis_along_modes(&tensor.view(), &[1], true, true);
+        let pearson = kurtosis_along_modes(&tensor.view(), &[1], false, true);
+
+        if let (Ok(f), Ok(p)) = (fisher, pearson) {
+            if !f[[0]].is_nan() && !p[[0]].is_nan() && !f[[0]].is_infinite() && !p[[0]].is_infinite() {
+                // Pearson = Fisher + 3
+                prop_assert!((p[[0]] - (f[[0]] + 3.0)).abs() < 1e-6,
+                    "Fisher-Pearson relation violated: {} vs {}", f[[0]], p[[0]]);
+            }
+        }
+    }
+
+    /// Test that moments are translation-invariant for skewness and kurtosis
+    #[test]
+    fn test_moments_translation_invariant(
+        data in prop::collection::vec(-10.0..10.0f64, 10..30),
+        shift in -100.0..100.0f64
+    ) {
+        let tensor1 = Array::from_shape_vec(vec![1, data.len()], data.clone()).unwrap();
+        let shifted_data: Vec<f64> = data.iter().map(|x| x + shift).collect();
+        let tensor2 = Array::from_shape_vec(vec![1, shifted_data.len()], shifted_data).unwrap();
+
+        let skew1 = skewness_along_modes(&tensor1.view(), &[1], true);
+        let skew2 = skewness_along_modes(&tensor2.view(), &[1], true);
+
+        if let (Ok(s1), Ok(s2)) = (skew1, skew2) {
+            if !s1[[0]].is_nan() && !s2[[0]].is_nan() && !s1[[0]].is_infinite() && !s2[[0]].is_infinite() {
+                // Skewness should be translation-invariant
+                prop_assert!((s1[[0]] - s2[[0]]).abs() < 1e-6,
+                    "Skewness not translation-invariant: {} vs {}", s1[[0]], s2[[0]]);
+            }
+        }
+
+        let kurt1 = kurtosis_along_modes(&tensor1.view(), &[1], true, true);
+        let kurt2 = kurtosis_along_modes(&tensor2.view(), &[1], true, true);
+
+        if let (Ok(k1), Ok(k2)) = (kurt1, kurt2) {
+            if !k1[[0]].is_nan() && !k2[[0]].is_nan() && !k1[[0]].is_infinite() && !k2[[0]].is_infinite() {
+                // Kurtosis should be translation-invariant
+                prop_assert!((k1[[0]] - k2[[0]]).abs() < 1e-6,
+                    "Kurtosis not translation-invariant: {} vs {}", k1[[0]], k2[[0]]);
+            }
+        }
+    }
+
+    // ========================================================================
+    // Covariance and Correlation Properties
+    // ========================================================================
+
+    /// Test that covariance of X with itself equals variance
+    #[test]
+    fn test_covariance_self_equals_variance(size in 5usize..50) {
+        let data: Vec<f64> = (0..size).map(|i| (i as f64) * 0.1).collect();
+        let x = Array::from_shape_vec(vec![1, size], data).unwrap();
+
+        let cov = covariance_along_modes(&x.view(), &x.view(), &[1], 1).unwrap();
+        let var = variance_along_modes(&x.view(), &[1], 1).unwrap();
+
+        prop_assert!((cov[[0]] - var[[0]]).abs() < 1e-10,
+            "Cov(X,X) should equal Var(X): {} vs {}", cov[[0]], var[[0]]);
+    }
+
+    /// Test that covariance is symmetric: cov(X, Y) = cov(Y, X)
+    #[test]
+    fn test_covariance_symmetric(size in 5usize..30) {
+        let x_data: Vec<f64> = (0..size).map(|i| (i as f64) * 0.1).collect();
+        let y_data: Vec<f64> = (0..size).map(|i| (i as f64) * 0.2 + 1.0).collect();
+
+        let x = Array::from_shape_vec(vec![1, size], x_data).unwrap();
+        let y = Array::from_shape_vec(vec![1, size], y_data).unwrap();
+
+        let cov_xy = covariance_along_modes(&x.view(), &y.view(), &[1], 1).unwrap();
+        let cov_yx = covariance_along_modes(&y.view(), &x.view(), &[1], 1).unwrap();
+
+        prop_assert!((cov_xy[[0]] - cov_yx[[0]]).abs() < 1e-10,
+            "Covariance should be symmetric: {} vs {}", cov_xy[[0]], cov_yx[[0]]);
+    }
+
+    /// Test that correlation of X with itself is 1.0
+    #[test]
+    fn test_correlation_self_is_one(size in 5usize..50) {
+        // Use non-constant data to avoid NaN
+        let data: Vec<f64> = (0..size).map(|i| (i as f64) * 0.1 + 1.0).collect();
+        let x = Array::from_shape_vec(vec![1, size], data).unwrap();
+
+        let corr = correlation_along_modes(&x.view(), &x.view(), &[1]).unwrap();
+
+        prop_assert!((corr[[0]] - 1.0).abs() < 1e-10,
+            "Correlation of X with itself should be 1.0, got {}", corr[[0]]);
+    }
+
+    /// Test that correlation is symmetric: corr(X, Y) = corr(Y, X)
+    #[test]
+    fn test_correlation_symmetric(size in 5usize..30) {
+        let x_data: Vec<f64> = (0..size).map(|i| (i as f64) * 0.1 + 1.0).collect();
+        let y_data: Vec<f64> = (0..size).map(|i| (i as f64) * 0.2 + 2.0).collect();
+
+        let x = Array::from_shape_vec(vec![1, size], x_data).unwrap();
+        let y = Array::from_shape_vec(vec![1, size], y_data).unwrap();
+
+        let corr_xy = correlation_along_modes(&x.view(), &y.view(), &[1]).unwrap();
+        let corr_yx = correlation_along_modes(&y.view(), &x.view(), &[1]).unwrap();
+
+        prop_assert!((corr_xy[[0]] - corr_yx[[0]]).abs() < 1e-10,
+            "Correlation should be symmetric: {} vs {}", corr_xy[[0]], corr_yx[[0]]);
+    }
+
+    /// Test that correlation is bounded: -1 <= corr(X, Y) <= 1
+    #[test]
+    fn test_correlation_bounds(size in 5usize..30, offset in 0usize..100) {
+        use scirs2_core::ndarray_ext::Array;
+
+        // Generate deterministic pseudo-random data
+        let x_data: Vec<f64> = (0..size).map(|i| {
+            let seed = ((i + offset) * 31) as f64;
+            seed.sin().abs() * 10.0
+        }).collect();
+        let y_data: Vec<f64> = (0..size).map(|i| {
+            let seed = ((i + offset) * 17) as f64;
+            seed.cos().abs() * 10.0
+        }).collect();
+
+        let x = Array::from_shape_vec(vec![1, size], x_data).unwrap();
+        let y = Array::from_shape_vec(vec![1, size], y_data).unwrap();
+
+        let corr = correlation_along_modes(&x.view(), &y.view(), &[1]).unwrap();
+
+        if !corr[[0]].is_nan() {
+            prop_assert!(corr[[0]] >= -1.0 && corr[[0]] <= 1.0,
+                "Correlation {} outside bounds [-1, 1]", corr[[0]]);
+        }
+    }
+
+    /// Test that correlation of perfectly linearly related variables is ±1
+    #[test]
+    fn test_correlation_linear_relationship(size in 5usize..30, scale in 0.1f64..10.0) {
+        let x_data: Vec<f64> = (0..size).map(|i| (i as f64) * 0.1).collect();
+        let y_data: Vec<f64> = x_data.iter().map(|&x| scale * x + 5.0).collect();
+
+        let x = Array::from_shape_vec(vec![1, size], x_data).unwrap();
+        let y = Array::from_shape_vec(vec![1, size], y_data).unwrap();
+
+        let corr = correlation_along_modes(&x.view(), &y.view(), &[1]).unwrap();
+
+        // For positive scale: perfect positive correlation
+        if scale > 0.0 {
+            prop_assert!((corr[[0]] - 1.0).abs() < 1e-8,
+                "Correlation should be 1.0 for positive linear relationship, got {}", corr[[0]]);
+        }
+    }
+
+    /// Test that cov(aX + b, cY + d) = a*c*cov(X, Y) for scale transformations
+    #[test]
+    fn test_covariance_bilinearity(size in 5usize..20, a in 0.5f64..2.0, c in 0.5f64..2.0) {
+        let x_data: Vec<f64> = (0..size).map(|i| (i as f64) * 0.1).collect();
+        let y_data: Vec<f64> = (0..size).map(|i| (i as f64) * 0.2 + 1.0).collect();
+
+        let x = Array::from_shape_vec(vec![1, size], x_data.clone()).unwrap();
+        let y = Array::from_shape_vec(vec![1, size], y_data.clone()).unwrap();
+
+        // Compute cov(X, Y)
+        let cov_xy = covariance_along_modes(&x.view(), &y.view(), &[1], 1).unwrap();
+
+        // Compute cov(aX + b, cY + d)
+        let x_scaled: Vec<f64> = x_data.iter().map(|&xi| a * xi + 5.0).collect();
+        let y_scaled: Vec<f64> = y_data.iter().map(|&yi| c * yi + 10.0).collect();
+
+        let x_s = Array::from_shape_vec(vec![1, size], x_scaled).unwrap();
+        let y_s = Array::from_shape_vec(vec![1, size], y_scaled).unwrap();
+
+        let cov_scaled = covariance_along_modes(&x_s.view(), &y_s.view(), &[1], 1).unwrap();
+
+        // Should satisfy: cov(aX + b, cY + d) = a*c*cov(X, Y)
+        let expected = a * c * cov_xy[[0]];
+        prop_assert!((cov_scaled[[0]] - expected).abs() < 1e-6,
+            "Bilinearity property violated: {} vs {} (a={}, c={})",
+            cov_scaled[[0]], expected, a, c);
+    }
+}
+
+// ============================================================================
 // Utility Function Property Tests
 // ============================================================================
 

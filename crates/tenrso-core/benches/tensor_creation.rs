@@ -8,7 +8,8 @@
 //! cargo bench --bench tensor_creation
 //! ```
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use tenrso_core::DenseND;
 
 /// Benchmark zeros creation for various sizes

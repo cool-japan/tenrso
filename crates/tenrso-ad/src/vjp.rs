@@ -126,7 +126,43 @@ where
     T: Num + Clone + std::ops::AddAssign + std::default::Default,
 {
     fn vjp(&self, output_grad: &DenseND<T>) -> Result<Vec<DenseND<T>>> {
-        // Compute gradient w.r.t. first input
+        // Special case: if output is scalar, use broadcasting instead of einsum
+        if self.spec.output.is_empty() {
+            // For scalar output, gradient is just the scalar value broadcast to input shapes
+            // grad_a = output_grad * input_b
+            // grad_b = output_grad * input_a
+
+            // Get the scalar gradient value
+            if output_grad.shape().is_empty() {
+                let scalar_grad = output_grad.as_array()[[].as_ref()].clone();
+
+                // Broadcast to input shapes
+                let mut grad_a_data = Array::zeros(IxDyn(self.input_a.shape()));
+                let mut grad_b_data = Array::zeros(IxDyn(self.input_b.shape()));
+
+                // For inner product i,i->, gradients are:
+                // grad_a[i] = output_grad * input_b[i]
+                // grad_b[i] = output_grad * input_a[i]
+                Zip::from(&mut grad_a_data)
+                    .and(self.input_b.as_array())
+                    .for_each(|ga, b| *ga = scalar_grad.clone() * b.clone());
+
+                Zip::from(&mut grad_b_data)
+                    .and(self.input_a.as_array())
+                    .for_each(|gb, a| *gb = scalar_grad.clone() * a.clone());
+
+                return Ok(vec![
+                    DenseND::from_array(grad_a_data),
+                    DenseND::from_array(grad_b_data),
+                ]);
+            } else {
+                return Err(anyhow!(
+                    "Expected scalar output gradient for scalar einsum output"
+                ));
+            }
+        }
+
+        // Normal case: use adjoint einsum contractions
         let adjoint_spec_a = self.adjoint_spec_for_input_a()?;
         let grad_a = execute_dense_contraction(&adjoint_spec_a, output_grad, &self.input_b)?;
 
@@ -330,7 +366,20 @@ where
                     ));
                 }
                 let scalar = grad.get(&vec![0; grad.rank()]).unwrap();
-                Ok(DenseND::from_elem(&self.input_shape, scalar.clone()))
+
+                // Apply scaling for mean reduction
+                let scaled_scalar = match self.reduction_type {
+                    ReductionType::Mean => {
+                        let n_elements = self.input_shape.iter().product::<usize>();
+                        let divisor = T::from(n_elements).ok_or_else(|| {
+                            anyhow!("Failed to convert n_elements to numeric type")
+                        })?;
+                        scalar.clone() / divisor
+                    }
+                    _ => scalar.clone(),
+                };
+
+                Ok(DenseND::from_elem(&self.input_shape, scaled_scalar))
             }
             Some(_axis) => {
                 // Partial reduction: broadcast along the reduced axis
@@ -464,6 +513,44 @@ mod tests {
             for j in 0..3 {
                 assert_eq!(*grads[0].get(&[i, j]).unwrap(), 5.0);
             }
+        }
+    }
+
+    #[test]
+    fn test_einsum_vjp_scalar_output() {
+        // Test inner product (scalar output): y = sum_i(a[i] * b[i])
+        // Forward: y = a · b
+        let spec = EinsumSpec::parse("i,i->").unwrap();
+
+        let a = DenseND::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+        let b = DenseND::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[4]).unwrap();
+
+        let y = execute_dense_contraction(&spec, &a, &b).unwrap();
+
+        // Result should be scalar: 1*5 + 2*6 + 3*7 + 4*8 = 70
+        assert!(y.shape().is_empty());
+        assert_eq!(*y.get(&[]).unwrap(), 70.0);
+
+        // Backward: given grad_y (scalar), compute grad_a and grad_b
+        // grad_a[i] = grad_y * b[i]
+        // grad_b[i] = grad_y * a[i]
+        let grad_y = DenseND::from_elem(&[], 1.0);
+
+        let vjp_ctx = EinsumVjp::new(spec, a.clone(), b.clone());
+        let grads = vjp_ctx.vjp(&grad_y).unwrap();
+
+        assert_eq!(grads.len(), 2);
+        assert_eq!(grads[0].shape(), a.shape());
+        assert_eq!(grads[1].shape(), b.shape());
+
+        // Check grad_a = b
+        for i in 0..4 {
+            assert_eq!(*grads[0].get(&[i]).unwrap(), *b.get(&[i]).unwrap());
+        }
+
+        // Check grad_b = a
+        for i in 0..4 {
+            assert_eq!(*grads[1].get(&[i]).unwrap(), *a.get(&[i]).unwrap());
         }
     }
 }

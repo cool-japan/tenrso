@@ -766,3 +766,345 @@ mod tucker_tests {
         assert_eq!(result.shape(), &[2, 3, 4]);
     }
 }
+
+/// Tensor-Tensor Product (TTT): Contract two tensors along specified modes
+///
+/// This is a generalization of matrix multiplication to tensors. Contracts
+/// tensor A along specified modes with tensor B along corresponding modes.
+///
+/// For example:
+/// - Tensor A with shape (I₁, I₂, I₃)
+/// - Tensor B with shape (J₁, J₂, J₃)
+/// - Contract A's mode-2 with B's mode-0 (where I₃ must equal J₁)
+/// - Result has shape (I₁, I₂, J₂, J₃)
+///
+/// This operation is fundamental for tensor networks, quantum computing,
+/// and general tensor contractions.
+///
+/// # Arguments
+///
+/// * `tensor_a` - First tensor
+/// * `tensor_b` - Second tensor
+/// * `modes_a` - Modes in tensor A to contract (must be sorted)
+/// * `modes_b` - Modes in tensor B to contract (must be sorted, same length as modes_a)
+///
+/// # Returns
+///
+/// Result tensor with contracted modes removed and remaining modes concatenated
+///
+/// # Errors
+///
+/// Returns error if:
+/// - Number of contraction modes don't match
+/// - Contraction mode sizes don't match
+/// - Mode indices are out of bounds
+/// - Modes are not sorted
+///
+/// # Complexity
+///
+/// Time: O(∏(output dims) × ∏(contraction dims))
+/// Space: O(∏(output dims))
+///
+/// # Examples
+///
+/// ```
+/// use scirs2_core::ndarray_ext::Array;
+/// use tenrso_kernels::tensor_tensor_product;
+///
+/// // Matrix multiplication as TTT
+/// let a = Array::from_shape_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+/// let b = Array::from_shape_vec(vec![3, 4], (0..12).map(|x| x as f64).collect()).unwrap();
+///
+/// // Contract mode-1 of A with mode-0 of B
+/// let result = tensor_tensor_product(&a.view(), &b.view(), &[1], &[0]).unwrap();
+/// assert_eq!(result.shape(), &[2, 4]);  // Matrix multiplication result
+/// ```
+pub fn tensor_tensor_product<T>(
+    tensor_a: &ArrayView<T, IxDyn>,
+    tensor_b: &ArrayView<T, IxDyn>,
+    modes_a: &[usize],
+    modes_b: &[usize],
+) -> Result<Array<T, IxDyn>>
+where
+    T: Clone + Num + One + Zero,
+{
+    // Validation
+    if modes_a.len() != modes_b.len() {
+        anyhow::bail!(
+            "Number of contraction modes must match: A has {} modes, B has {} modes",
+            modes_a.len(),
+            modes_b.len()
+        );
+    }
+
+    let shape_a = tensor_a.shape();
+    let shape_b = tensor_b.shape();
+    let rank_a = shape_a.len();
+    let rank_b = shape_b.len();
+
+    // Check modes are in bounds and sorted
+    for (i, &mode) in modes_a.iter().enumerate() {
+        if mode >= rank_a {
+            anyhow::bail!(
+                "Mode {} out of bounds for tensor A with rank {}",
+                mode,
+                rank_a
+            );
+        }
+        if i > 0 && modes_a[i] <= modes_a[i - 1] {
+            anyhow::bail!("Modes A must be sorted: {:?}", modes_a);
+        }
+    }
+
+    for (i, &mode) in modes_b.iter().enumerate() {
+        if mode >= rank_b {
+            anyhow::bail!(
+                "Mode {} out of bounds for tensor B with rank {}",
+                mode,
+                rank_b
+            );
+        }
+        if i > 0 && modes_b[i] <= modes_b[i - 1] {
+            anyhow::bail!("Modes B must be sorted: {:?}", modes_b);
+        }
+    }
+
+    // Check contraction dimensions match
+    for (&mode_a, &mode_b) in modes_a.iter().zip(modes_b.iter()) {
+        if shape_a[mode_a] != shape_b[mode_b] {
+            anyhow::bail!(
+                "Contraction dimension mismatch: A mode-{} has size {}, B mode-{} has size {}",
+                mode_a,
+                shape_a[mode_a],
+                mode_b,
+                shape_b[mode_b]
+            );
+        }
+    }
+
+    // Special case: no contraction modes (outer product)
+    if modes_a.is_empty() {
+        return compute_outer_product_tensors(tensor_a, tensor_b);
+    }
+
+    // Compute free modes (modes not involved in contraction)
+    let free_modes_a: Vec<usize> = (0..rank_a).filter(|m| !modes_a.contains(m)).collect();
+    let free_modes_b: Vec<usize> = (0..rank_b).filter(|m| !modes_b.contains(m)).collect();
+
+    // Compute output shape
+    let mut output_shape = Vec::new();
+    for &mode in &free_modes_a {
+        output_shape.push(shape_a[mode]);
+    }
+    for &mode in &free_modes_b {
+        output_shape.push(shape_b[mode]);
+    }
+
+    if output_shape.is_empty() {
+        // Complete contraction (scalar result)
+        output_shape.push(1);
+    }
+
+    // Reshape tensors for efficient contraction
+    // A: (free_a..., contract_a...)
+    // B: (contract_b..., free_b...)
+    let free_a_size: usize = free_modes_a.iter().map(|&m| shape_a[m]).product();
+    let free_a_size = if free_a_size == 0 { 1 } else { free_a_size };
+
+    let free_b_size: usize = free_modes_b.iter().map(|&m| shape_b[m]).product();
+    let free_b_size = if free_b_size == 0 { 1 } else { free_b_size };
+
+    let contract_size: usize = modes_a.iter().map(|&m| shape_a[m]).product();
+
+    // Permute and reshape A to (free_a_size, contract_size)
+    let mut perm_a = free_modes_a.clone();
+    perm_a.extend(modes_a.iter().copied());
+    let permuted_a = tensor_a.clone().permuted_axes(IxDyn(&perm_a));
+    let contiguous_a = permuted_a.as_standard_layout().into_owned();
+    let reshaped_a = contiguous_a.into_shape_with_order((free_a_size, contract_size))?;
+
+    // Permute and reshape B to (contract_size, free_b_size)
+    let mut perm_b = modes_b.to_vec();
+    perm_b.extend(free_modes_b.iter().copied());
+    let permuted_b = tensor_b.clone().permuted_axes(IxDyn(&perm_b));
+    let contiguous_b = permuted_b.as_standard_layout().into_owned();
+    let reshaped_b = contiguous_b.into_shape_with_order((contract_size, free_b_size))?;
+
+    // Matrix multiplication: (free_a_size, contract_size) × (contract_size, free_b_size)
+    // Result: (free_a_size, free_b_size)
+    let mut result_matrix = Array2::<T>::zeros((free_a_size, free_b_size));
+
+    for i in 0..free_a_size {
+        for j in 0..free_b_size {
+            let mut sum = T::zero();
+            for k in 0..contract_size {
+                sum = sum + reshaped_a[[i, k]].clone() * reshaped_b[[k, j]].clone();
+            }
+            result_matrix[[i, j]] = sum;
+        }
+    }
+
+    // Reshape result to output shape
+    let result = result_matrix.into_shape_with_order(IxDyn(&output_shape))?;
+
+    Ok(result)
+}
+
+/// Helper function to compute outer product of two tensors
+fn compute_outer_product_tensors<T>(
+    tensor_a: &ArrayView<T, IxDyn>,
+    tensor_b: &ArrayView<T, IxDyn>,
+) -> Result<Array<T, IxDyn>>
+where
+    T: Clone + Num,
+{
+    let shape_a = tensor_a.shape();
+    let shape_b = tensor_b.shape();
+
+    let mut output_shape = shape_a.to_vec();
+    output_shape.extend_from_slice(shape_b);
+
+    let total_size: usize = output_shape.iter().product();
+    let mut result_data = Vec::with_capacity(total_size);
+
+    // Compute outer product: result[i..., j...] = a[i...] * b[j...]
+    for a_val in tensor_a.iter() {
+        for b_val in tensor_b.iter() {
+            result_data.push(a_val.clone() * b_val.clone());
+        }
+    }
+
+    let result = Array::from_shape_vec(IxDyn(&output_shape), result_data)?;
+    Ok(result)
+}
+
+#[cfg(test)]
+mod ttt_tests {
+    use super::*;
+
+    #[test]
+    fn test_ttt_matrix_multiplication() {
+        // Matrix multiplication as tensor-tensor product
+        let a = Array::from_shape_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let b = Array::from_shape_vec(vec![3, 4], (0..12).map(|x| x as f64).collect()).unwrap();
+
+        // Contract mode-1 of A with mode-0 of B
+        let result = tensor_tensor_product(&a.view(), &b.view(), &[1], &[0]).unwrap();
+        assert_eq!(result.shape(), &[2, 4]);
+
+        // Verify it matches standard matrix multiplication
+        // A[0,:] dot B[:,0] = 1*0 + 2*4 + 3*8 = 0 + 8 + 24 = 32
+        assert_eq!(result[[0, 0]], 32.0);
+    }
+
+    #[test]
+    fn test_ttt_3d_contraction() {
+        // 3D tensor contraction
+        let a = Array::from_shape_vec(vec![2, 3, 4], (0..24).map(|x| x as f64).collect()).unwrap();
+        let b = Array::from_shape_vec(vec![4, 5], (0..20).map(|x| x as f64).collect()).unwrap();
+
+        // Contract mode-2 of A with mode-0 of B
+        let result = tensor_tensor_product(&a.view(), &b.view(), &[2], &[0]).unwrap();
+        assert_eq!(result.shape(), &[2, 3, 5]);
+    }
+
+    #[test]
+    fn test_ttt_multiple_contractions() {
+        // Contract multiple modes
+        let a =
+            Array::from_shape_vec(vec![2, 3, 4, 5], (0..120).map(|x| x as f64).collect()).unwrap();
+        let b = Array::from_shape_vec(vec![4, 5, 6], (0..120).map(|x| x as f64).collect()).unwrap();
+
+        // Contract modes (2,3) of A with modes (0,1) of B
+        let result = tensor_tensor_product(&a.view(), &b.view(), &[2, 3], &[0, 1]).unwrap();
+        assert_eq!(result.shape(), &[2, 3, 6]);
+    }
+
+    #[test]
+    fn test_ttt_outer_product() {
+        // No contraction = outer product
+        let a = Array::from_shape_vec(vec![2, 3], vec![1.0; 6]).unwrap();
+        let b = Array::from_shape_vec(vec![4, 5], vec![2.0; 20]).unwrap();
+
+        let result = tensor_tensor_product(&a.view(), &b.view(), &[], &[]).unwrap();
+        assert_eq!(result.shape(), &[2, 3, 4, 5]);
+
+        // All elements should be 1.0 * 2.0 = 2.0
+        for val in result.iter() {
+            assert_eq!(*val, 2.0);
+        }
+    }
+
+    #[test]
+    fn test_ttt_complete_contraction() {
+        // Complete contraction (all modes contracted)
+        let a = Array::from_shape_vec(vec![3, 4], (1..=12).map(|x| x as f64).collect()).unwrap();
+        let b = Array::from_shape_vec(vec![3, 4], vec![1.0; 12]).unwrap();
+
+        // Contract both modes
+        let result = tensor_tensor_product(&a.view(), &b.view(), &[0, 1], &[0, 1]).unwrap();
+        assert_eq!(result.shape(), &[1]);
+
+        // Sum of all elements in A (since B is all ones)
+        let expected: f64 = (1..=12).sum::<i32>() as f64;
+        assert_eq!(result[[0]], expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "Number of contraction modes must match")]
+    fn test_ttt_mismatched_mode_counts() {
+        let a = Array::from_shape_vec(vec![2, 3], vec![1.0; 6]).unwrap();
+        let b = Array::from_shape_vec(vec![3, 4], vec![1.0; 12]).unwrap();
+
+        tensor_tensor_product(&a.view(), &b.view(), &[1], &[0, 1]).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "Contraction dimension mismatch")]
+    fn test_ttt_size_mismatch() {
+        let a = Array::from_shape_vec(vec![2, 3], vec![1.0; 6]).unwrap();
+        let b = Array::from_shape_vec(vec![4, 5], vec![1.0; 20]).unwrap();
+
+        // Mode-1 of A has size 3, mode-0 of B has size 4 (mismatch)
+        tensor_tensor_product(&a.view(), &b.view(), &[1], &[0]).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn test_ttt_invalid_mode() {
+        let a = Array::from_shape_vec(vec![2, 3], vec![1.0; 6]).unwrap();
+        let b = Array::from_shape_vec(vec![3, 4], vec![1.0; 12]).unwrap();
+
+        tensor_tensor_product(&a.view(), &b.view(), &[5], &[0]).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "sorted")]
+    fn test_ttt_unsorted_modes() {
+        let a = Array::from_shape_vec(vec![2, 3, 4], vec![1.0; 24]).unwrap();
+        let b = Array::from_shape_vec(vec![3, 4], vec![1.0; 12]).unwrap();
+
+        // Modes must be sorted
+        tensor_tensor_product(&a.view(), &b.view(), &[2, 1], &[0, 1]).unwrap();
+    }
+
+    #[test]
+    fn test_ttt_identity_contraction() {
+        // Contract with identity-like tensor
+        let a = Array::from_shape_vec(
+            vec![3, 3],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        )
+        .unwrap();
+        let b = Array::from_shape_vec(vec![3], vec![1.0, 2.0, 3.0]).unwrap();
+
+        // Contract mode-1 of A (3×3) with mode-0 of B (3)
+        let result = tensor_tensor_product(&a.view(), &b.view(), &[1], &[0]).unwrap();
+        assert_eq!(result.shape(), &[3]);
+
+        // Should extract the diagonal scaled by b
+        assert_eq!(result[[0]], 1.0);
+        assert_eq!(result[[1]], 2.0);
+        assert_eq!(result[[2]], 3.0);
+    }
+}

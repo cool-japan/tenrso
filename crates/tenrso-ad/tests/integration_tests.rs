@@ -365,3 +365,114 @@ fn test_cp_gradient_with_weights() -> Result<()> {
 
     Ok(())
 }
+
+/// Test scalar output VJP end-to-end (inner product)
+#[test]
+fn test_scalar_output_vjp_end_to_end() -> Result<()> {
+    // Test inner product: y = sum_i(a[i] * b[i])
+    let a = DenseND::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5])?;
+    let b = DenseND::from_vec(vec![2.0, 3.0, 4.0, 5.0, 6.0], &[5])?;
+
+    let spec = EinsumSpec::parse("i,i->")?;
+    let y = execute_dense_contraction(&spec, &a, &b)?;
+
+    // Expected: 1*2 + 2*3 + 3*4 + 4*5 + 5*6 = 70
+    assert!(y.shape().is_empty());
+    assert_eq!(*y.get(&[]).unwrap(), 70.0);
+
+    // Compute gradients
+    let grad_y = DenseND::from_elem(&[], 1.0);
+    let vjp_ctx = EinsumVjp::new(spec.clone(), a.clone(), b.clone());
+    let grads = vjp_ctx.vjp(&grad_y)?;
+
+    // Verify gradient shapes
+    assert_eq!(grads.len(), 2);
+    assert_eq!(grads[0].shape(), a.shape());
+    assert_eq!(grads[1].shape(), b.shape());
+
+    // Verify gradient values: grad_a = b, grad_b = a
+    for i in 0..5 {
+        assert_eq!(*grads[0].get(&[i]).unwrap(), *b.get(&[i]).unwrap());
+        assert_eq!(*grads[1].get(&[i]).unwrap(), *a.get(&[i]).unwrap());
+    }
+
+    // Verify with gradient checking
+    let f = |x: &DenseND<f64>| execute_dense_contraction(&spec, x, &b);
+    let df = |_x: &DenseND<f64>, grad_output: &DenseND<f64>| {
+        let vjp = EinsumVjp::new(spec.clone(), a.clone(), b.clone());
+        let grads = vjp.vjp(grad_output)?;
+        Ok(grads[0].clone())
+    };
+
+    let config = GradCheckConfig {
+        epsilon: 1e-5,
+        rtol: 1e-3,
+        atol: 1e-5,
+        use_central_diff: true,
+        verbose: false,
+    };
+
+    let result = check_gradient(f, df, &a, &grad_y, &config)?;
+    assert!(result.passed, "Gradient check failed for scalar output VJP");
+
+    Ok(())
+}
+
+/// Test edge case: single element tensor
+#[test]
+fn test_single_element_tensor_vjp() -> Result<()> {
+    // Test with single-element tensors
+    let a = DenseND::from_vec(vec![5.0], &[1, 1])?;
+    let b = DenseND::from_vec(vec![7.0], &[1, 1])?;
+
+    let spec = EinsumSpec::parse("ij,jk->ik")?;
+    let c = execute_dense_contraction(&spec, &a, &b)?;
+
+    // Expected: 5.0 * 7.0 = 35.0
+    assert_eq!(*c.get(&[0, 0]).unwrap(), 35.0);
+
+    // Compute gradients
+    let grad_c = DenseND::ones(&[1, 1]);
+    let vjp_ctx = EinsumVjp::new(spec, a.clone(), b.clone());
+    let grads = vjp_ctx.vjp(&grad_c)?;
+
+    // Verify gradient shapes
+    assert_eq!(grads[0].shape(), &[1, 1]);
+    assert_eq!(grads[1].shape(), &[1, 1]);
+
+    // Verify gradient values
+    assert_eq!(*grads[0].get(&[0, 0]).unwrap(), 7.0);
+    assert_eq!(*grads[1].get(&[0, 0]).unwrap(), 5.0);
+
+    Ok(())
+}
+
+/// Test large tensor gradient computation (performance/memory test)
+#[test]
+fn test_large_tensor_gradients() -> Result<()> {
+    // Create moderately large tensors (not too large for CI)
+    let size = 50; // 50x50 = 2500 elements
+    let a = DenseND::<f64>::ones(&[size, size]);
+    let b = DenseND::<f64>::ones(&[size, size]);
+
+    let spec = EinsumSpec::parse("ij,jk->ik")?;
+    let c = execute_dense_contraction(&spec, &a, &b)?;
+
+    // Compute gradients
+    let grad_c = DenseND::ones(c.shape());
+    let vjp_ctx = EinsumVjp::new(spec, a.clone(), b.clone());
+    let grads = vjp_ctx.vjp(&grad_c)?;
+
+    // Verify gradient shapes
+    assert_eq!(grads[0].shape(), a.shape());
+    assert_eq!(grads[1].shape(), b.shape());
+
+    // Verify gradient values (all should be size as f64)
+    assert_eq!(
+        *grads[0].get(&[0, 0]).unwrap(),
+        size as f64,
+        "Gradient value incorrect"
+    );
+
+    Ok(())
+}

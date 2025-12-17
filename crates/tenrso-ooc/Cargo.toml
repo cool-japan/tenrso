@@ -1,6 +1,6 @@
 [package]
 name = "tenrso-ooc"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -13,20 +13,91 @@ tenrso-core.workspace = true
 scirs2-core.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 arrow = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
 memmap2 = { workspace = true, optional = true }
+lz4 = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry-semantic-conventions = { workspace = true, optional = true }
+prometheus = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+lazy_static = { workspace = true, optional = true }
+tikv-jemallocator = { workspace = true, optional = true }
+tikv-jemalloc-ctl = { workspace = true, optional = true, features = ["stats"] }
+mimalloc = { workspace = true, optional = true }
+num_cpus.workspace = true
+crossbeam = { workspace = true, optional = true }
+dashmap = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+bincode = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+crc32fast.workspace = true
+xxhash-rust.workspace = true
+blake3.workspace = true
 
 [features]
-default = ["arrow", "parquet", "parallel"]
+default = ["arrow", "parquet", "mmap", "parallel", "compression", "lz4-compression", "zstd-compression", "tracing", "lock-free"]
 arrow = ["dep:arrow"]
 parquet = ["dep:parquet"]
 mmap = ["dep:memmap2"]
 parallel = ["scirs2-core/parallel"]
+compression = ["dep:lz4", "dep:zstd"]
+lz4-compression = ["compression", "dep:lz4"]
+zstd-compression = ["compression", "dep:zstd"]
+tracing = ["dep:tracing", "dep:tracing-subscriber"]
+opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-semantic-conventions", "dep:tokio", "dep:parking_lot"]
+prometheus-metrics = ["dep:prometheus", "dep:parking_lot", "dep:lazy_static"]
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
+mimalloc-allocator = ["dep:mimalloc"]
+lock-free = ["dep:crossbeam", "dep:dashmap", "dep:parking_lot"]
+distributed = ["dep:tonic", "dep:prost", "dep:bincode", "dep:bytes", "dep:futures", "dep:tokio", "dep:parking_lot", "lock-free"]
 
 [dev-dependencies]
-criterion = "0.7"
+criterion.workspace = true
+proptest.workspace = true
+tenrso-decomp.workspace = true
+tenrso-kernels.workspace = true
+tonic-build.workspace = true
+
+[[example]]
+name = "distributed_demo"
+required-features = ["distributed"]
 
 [[bench]]
 name = "large_tensors"
+harness = false
+
+[[bench]]
+name = "advanced_features"
+harness = false
+
+[[bench]]
+name = "allocator_comparison"
+harness = false
+
+[[bench]]
+name = "ml_eviction_benchmarks"
+harness = false
+
+[[bench]]
+name = "lockfree_prefetch_benchmarks"
+harness = false
+
+[[bench]]
+name = "distributed_benchmarks"
+harness = false
+required-features = ["distributed"]
+
+[[bench]]
+name = "integrity_and_autoselect"
 harness = false

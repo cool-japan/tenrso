@@ -16,7 +16,7 @@
 //!
 //! # Example
 //!
-//! For a 3D tensor with block_shape=[2,2,2]:
+//! For a 3D tensor with `block_shape=[2,2,2]`:
 //! - Tensor indices (0,1,2), (1,0,3), (2,3,4)
 //! - Block indices: (0,0,1), (0,0,1), (1,1,2)
 //! - Local coords: (0,1,0), (1,0,1), (0,1,0)
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn test_hicoo_block_grouping() {
         let mut coo = CooTensor::zeros(vec![4, 4, 4]).unwrap();
-        // All in same block (0,0,0) with block_shape [2,2,2]
+        // All in same block (0,0,0) with `block_shape [2,2,2]`
         coo.push(vec![0, 0, 0], 1.0).unwrap();
         coo.push(vec![0, 1, 1], 2.0).unwrap();
         coo.push(vec![1, 0, 1], 3.0).unwrap();

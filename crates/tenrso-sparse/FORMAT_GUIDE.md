@@ -2,7 +2,7 @@
 
 > **TenRSo Sparse Tensor Formats**
 > **Purpose:** Help you choose the optimal sparse format for your use case
-> **Last Updated:** 2025-11-06
+> **Last Updated:** 2025-11-26
 
 ---
 
@@ -15,6 +15,8 @@ Is your tensor dense (> 10% nonzeros)?
 
 What dimensionality?
 ├─ 2D Matrix
+│   ├─ GPU/SIMD operations, uniform rows → ELL
+│   ├─ Banded/diagonal structure → DIA
 │   ├─ Row-wise access pattern → CSR
 │   ├─ Column-wise access pattern → CSC
 │   ├─ Block-structured sparsity → BCSR
@@ -38,6 +40,8 @@ What dimensionality?
 | **CSR** | Row operations, SpMV | < 10% | 2D | SpMV, SpMM, row access | O(nnz) | O(nnz log nnz) |
 | **CSC** | Column operations | < 10% | 2D | SpMV, SpMM, col access | O(nnz) | O(nnz log nnz) |
 | **BCSR** | Block-structured | 1-10% | 2D | Block SpMV/SpMM | O(blocks) | O(nnz) |
+| **ELL** | GPU/SIMD, uniform rows | < 20% | 2D | Vectorized SpMV | O(n × max_nnz) | O(nnz) |
+| **DIA** | Banded matrices, PDEs | < 5% | 2D | Fast SpMV | O(diags × n) | O(nnz) |
 | **CSF** | Very sparse, MTTKRP | < 0.1% | 3D+ | Fiber iteration | O(nnz + fibers) | O(nnz log nnz) |
 | **HiCOO** | Clustered nonzeros | < 1% | 3D+ | Cache-friendly ops | O(nnz + blocks) | O(nnz log nnz) |
 | **Mask** | Boolean selection | Sparse | N-D | Set ops, indexing | O(nnz) | O(nnz) |
@@ -245,6 +249,130 @@ let bcsr = BcsrMatrix::from_dense(
 
 // Block SpMV - cache-friendly
 let y = bcsr.spmv(&x.view())?;
+```
+
+---
+
+### ELL (ELLPACK)
+
+**Description:** Fixed-width sparse format with uniform row storage for GPU operations.
+
+**Structure:**
+```rust
+struct EllMatrix<T> {
+    data: Array2<T>,         // (nrows × max_nnz_per_row)
+    indices: Array2<usize>,  // (nrows × max_nnz_per_row)
+    nrows: usize,
+    ncols: usize,
+    max_nnz_per_row: usize,
+}
+```
+
+**Strengths:**
+- ✅ Excellent for GPU/SIMD operations
+- ✅ Coalesced memory access patterns
+- ✅ Predictable memory layout
+- ✅ Fast vectorized SpMV
+- ✅ Easy to parallelize
+
+**Weaknesses:**
+- ❌ Wastes space if rows vary in nnz
+- ❌ Memory overhead with padding
+- ❌ Not suitable for highly variable row lengths
+- ❌ Fixed storage per row
+
+**Use Cases:**
+- GPU-accelerated computations
+- SIMD-vectorized SpMV
+- Matrices with uniform row sparsity
+- Real-time graphics (sparse textures)
+- Machine learning on GPUs
+
+**Performance Tips:**
+- Check fill_efficiency() - should be > 50%
+- Best when rows have similar nnz counts
+- Consider CSR if efficiency < 30%
+
+**Example:**
+```rust
+use tenrso_sparse::EllMatrix;
+
+// Create from CSR (automatic padding)
+let ell = EllMatrix::from_csr(&csr);
+
+// Check efficiency
+println!("Fill efficiency: {:.1}%", ell.fill_efficiency() * 100.0);
+
+// GPU-friendly SpMV
+let y = ell.spmv(&x)?;
+```
+
+---
+
+### DIA (Diagonal)
+
+**Description:** Stores sparse matrices as a collection of diagonals, optimal for banded structures.
+
+**Structure:**
+```rust
+struct DiaMatrix<T> {
+    data: Array2<T>,         // (num_diagonals × storage_len)
+    offsets: Vec<isize>,     // Diagonal offsets (0=main, ±k=sub/super)
+    nrows: usize,
+    ncols: usize,
+}
+```
+
+**Strengths:**
+- ✅ Optimal for banded matrices
+- ✅ Very fast SpMV for small bandwidth
+- ✅ Simple, intuitive structure
+- ✅ Excellent memory locality
+- ✅ Common in PDE discretizations
+
+**Weaknesses:**
+- ❌ Only efficient for banded patterns
+- ❌ Wastes space for general sparsity
+- ❌ Fixed diagonal structure
+- ❌ Not suitable for random sparsity
+
+**Use Cases:**
+- Finite difference/element methods
+- PDE discretizations (Laplacian, etc.)
+- Tridiagonal/pentadiagonal systems
+- Image processing (convolution kernels)
+- Signal processing (Toeplitz matrices)
+
+**Common Patterns:**
+- Tridiagonal: offsets `[-1, 0, 1]`
+- Pentadiagonal: offsets `[-2, -1, 0, 1, 2]`
+- Laplacian (2D): offsets `[-n, -1, 0, 1, n]`
+
+**Performance Tips:**
+- Check bandwidth() - smaller is better
+- SpMV complexity: O(num_diagonals × n)
+- Ideal when bandwidth << n
+
+**Example:**
+```rust
+use tenrso_sparse::DiaMatrix;
+use scirs2_core::ndarray_ext::array;
+
+// Tridiagonal matrix
+let data = array![
+    [-1.0, -1.0, -1.0, 0.0],   // subdiagonal
+    [2.0, 2.0, 2.0, 2.0],       // main diagonal
+    [0.0, -1.0, -1.0, -1.0]     // superdiagonal
+];
+let offsets = vec![-1, 0, 1];
+let dia = DiaMatrix::new(data, offsets, 4, 4)?;
+
+// Fast SpMV for banded structure
+let y = dia.spmv(&x)?;
+
+// Check efficiency
+let (lower, upper) = dia.bandwidth();
+println!("Bandwidth: {}+{} = {}", lower, upper, lower + upper);
 ```
 
 ---

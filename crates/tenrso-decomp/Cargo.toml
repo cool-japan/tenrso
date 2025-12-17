@@ -1,6 +1,6 @@
 [package]
 name = "tenrso-decomp"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -24,7 +24,7 @@ parallel = ["tenrso-kernels/parallel"]
 
 [dev-dependencies]
 criterion.workspace = true
-proptest = "1.9"
+proptest.workspace = true
 
 [[bench]]
 name = "decompositions"

@@ -1,10 +1,15 @@
 //! Benchmarks for tensor contraction planners
 //!
 //! Measures planning time and plan quality for various tensor network topologies.
+//! Includes all 6 planning algorithms: Greedy, Beam Search, DP, SA, GA, and Adaptive.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::hint::black_box;
-use tenrso_planner::{dp_planner, greedy_planner, EinsumSpec, PlanHints};
+use tenrso_planner::{
+    beam_search_planner, dp_planner, genetic_algorithm_planner, greedy_planner,
+    simulated_annealing_planner, AdaptivePlanner, BeamSearchPlanner, DPPlanner, EinsumSpec,
+    GeneticAlgorithmPlanner, GreedyPlanner, PlanHints, Planner, SimulatedAnnealingPlanner,
+};
 
 /// Benchmark greedy planner on matrix chain multiplication
 fn bench_greedy_matrix_chain(c: &mut Criterion) {
@@ -254,15 +259,298 @@ fn create_dense_network(n: usize) -> (EinsumSpec, Vec<Vec<usize>>) {
     (spec, shapes)
 }
 
+/// Benchmark Beam Search planner on matrix chains
+fn bench_beam_search_matrix_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("beam_search_matrix_chain");
+
+    for n in [3, 4, 5, 6, 8].iter() {
+        let (spec, shapes) = create_matrix_chain(*n);
+        let hints = PlanHints::default();
+
+        group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, _| {
+            b.iter(|| {
+                let _ =
+                    beam_search_planner(black_box(&spec), black_box(&shapes), black_box(&hints), 5);
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark Simulated Annealing planner on matrix chains
+fn bench_sa_matrix_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sa_matrix_chain");
+
+    for n in [3, 4, 5, 6, 8, 10].iter() {
+        let (spec, shapes) = create_matrix_chain(*n);
+        let hints = PlanHints::default();
+
+        group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, _| {
+            b.iter(|| {
+                let _ = simulated_annealing_planner(
+                    black_box(&spec),
+                    black_box(&shapes),
+                    black_box(&hints),
+                    1000.0,
+                    0.95,
+                    500, // Reduced iterations for benchmarking
+                );
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark Genetic Algorithm planner on matrix chains
+fn bench_ga_matrix_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ga_matrix_chain");
+    group.sample_size(10); // Reduce sample size for expensive GA
+
+    for n in [3, 4, 5, 6, 8, 10].iter() {
+        let (spec, shapes) = create_matrix_chain(*n);
+        let hints = PlanHints::default();
+
+        // Use fast preset for benchmarking
+        group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, _| {
+            b.iter(|| {
+                let _ = genetic_algorithm_planner(
+                    black_box(&spec),
+                    black_box(&shapes),
+                    black_box(&hints),
+                    50,  // population
+                    50,  // generations
+                    0.2, // mutation_rate
+                    3,   // elitism
+                );
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark Adaptive planner (auto-selection)
+fn bench_adaptive_planner(c: &mut Criterion) {
+    let mut group = c.benchmark_group("adaptive_planner");
+
+    for n in [3, 5, 8, 10, 15].iter() {
+        let (_, shapes) = create_matrix_chain(*n);
+        let hints = PlanHints::default();
+        let planner = AdaptivePlanner::new();
+
+        // Need to format spec as string for Planner trait
+        let spec_text = format!(
+            "{}->{}",
+            (0..*n)
+                .map(|i| {
+                    let indices: Vec<char> = "ijklmnopqrstuvwxyz".chars().collect();
+                    format!("{}{}", indices[i], indices[i + 1])
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+            {
+                let indices: Vec<char> = "ijklmnopqrstuvwxyz".chars().collect();
+                format!("{}{}", indices[0], indices[*n])
+            }
+        );
+
+        group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, _| {
+            b.iter(|| {
+                let _ =
+                    planner.make_plan(black_box(&spec_text), black_box(&shapes), black_box(&hints));
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Comprehensive planner comparison on star topology
+fn bench_planner_comparison_star(c: &mut Criterion) {
+    let mut group = c.benchmark_group("planner_comparison_star");
+    group.sample_size(10);
+
+    let n = 8; // Fixed size for comparison
+    let (spec, shapes) = create_star_topology(n);
+    let hints = PlanHints::default();
+
+    // Greedy
+    group.bench_function("greedy", |b| {
+        b.iter(|| {
+            let _ = greedy_planner(black_box(&spec), black_box(&shapes), black_box(&hints));
+        });
+    });
+
+    // Beam Search (k=5)
+    group.bench_function("beam_search_k5", |b| {
+        b.iter(|| {
+            let _ = beam_search_planner(black_box(&spec), black_box(&shapes), black_box(&hints), 5);
+        });
+    });
+
+    // DP
+    group.bench_function("dp", |b| {
+        b.iter(|| {
+            let _ = dp_planner(black_box(&spec), black_box(&shapes), black_box(&hints));
+        });
+    });
+
+    // SA (reduced iterations)
+    group.bench_function("sa_fast", |b| {
+        b.iter(|| {
+            let _ = simulated_annealing_planner(
+                black_box(&spec),
+                black_box(&shapes),
+                black_box(&hints),
+                1000.0,
+                0.95,
+                300,
+            );
+        });
+    });
+
+    // GA (fast preset)
+    group.bench_function("ga_fast", |b| {
+        b.iter(|| {
+            let _ = genetic_algorithm_planner(
+                black_box(&spec),
+                black_box(&shapes),
+                black_box(&hints),
+                50,
+                50,
+                0.2,
+                3,
+            );
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark struct-based planners using Planner trait
+fn bench_planner_trait_polymorphism(c: &mut Criterion) {
+    let mut group = c.benchmark_group("planner_trait");
+
+    let n = 5;
+    let (_, shapes) = create_matrix_chain(n);
+    let hints = PlanHints::default();
+
+    // Build spec string
+    let spec_str = format!(
+        "{}->{}",
+        (0..n)
+            .map(|i| {
+                let indices: Vec<char> = "ijklmnopqrstuvwxyz".chars().collect();
+                format!("{}{}", indices[i], indices[i + 1])
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        {
+            let indices: Vec<char> = "ijklmnopqrstuvwxyz".chars().collect();
+            format!("{}{}", indices[0], indices[n])
+        }
+    );
+
+    // Benchmark each planner via trait
+    let planners: Vec<(&str, Box<dyn Planner>)> = vec![
+        ("greedy_struct", Box::new(GreedyPlanner::new())),
+        (
+            "beam_struct",
+            Box::new(BeamSearchPlanner::with_beam_width(5)),
+        ),
+        ("dp_struct", Box::new(DPPlanner::new())),
+        (
+            "sa_struct",
+            Box::new(SimulatedAnnealingPlanner::with_params(1000.0, 0.95, 300)),
+        ),
+        ("ga_struct", Box::new(GeneticAlgorithmPlanner::fast())),
+        ("adaptive_struct", Box::new(AdaptivePlanner::new())),
+    ];
+
+    for (name, planner) in planners {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let _ =
+                    planner.make_plan(black_box(&spec_str), black_box(&shapes), black_box(&hints));
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark GA with different parameter configurations
+fn bench_ga_parameter_sensitivity(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ga_parameter_sensitivity");
+    group.sample_size(10);
+
+    let n = 6;
+    let (spec, shapes) = create_matrix_chain(n);
+    let hints = PlanHints::default();
+
+    // Test different population sizes
+    for pop_size in [25, 50, 100, 150].iter() {
+        group.bench_with_input(
+            BenchmarkId::new("population", pop_size),
+            pop_size,
+            |b, &pop| {
+                b.iter(|| {
+                    let _ = genetic_algorithm_planner(
+                        black_box(&spec),
+                        black_box(&shapes),
+                        black_box(&hints),
+                        pop,
+                        50, // fixed generations
+                        0.2,
+                        3,
+                    );
+                });
+            },
+        );
+    }
+
+    // Test different generation counts
+    for gen_count in [25, 50, 100, 150].iter() {
+        group.bench_with_input(
+            BenchmarkId::new("generations", gen_count),
+            gen_count,
+            |b, &gen| {
+                b.iter(|| {
+                    let _ = genetic_algorithm_planner(
+                        black_box(&spec),
+                        black_box(&shapes),
+                        black_box(&hints),
+                        50, // fixed population
+                        gen,
+                        0.2,
+                        3,
+                    );
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_greedy_matrix_chain,
     bench_dp_matrix_chain,
+    bench_beam_search_matrix_chain,
+    bench_sa_matrix_chain,
+    bench_ga_matrix_chain,
     bench_greedy_star,
     bench_dp_star,
     bench_plan_quality,
     bench_greedy_dense_network,
     bench_size_sensitivity,
+    bench_adaptive_planner,
+    bench_planner_comparison_star,
+    bench_planner_trait_polymorphism,
+    bench_ga_parameter_sensitivity,
 );
 
 criterion_main!(benches);

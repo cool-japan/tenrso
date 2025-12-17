@@ -1,6 +1,6 @@
 [package]
 name = "tenrso-exec"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -20,14 +20,25 @@ thiserror.workspace = true
 log.workspace = true
 # SciRS2 ecosystem (MANDATORY - see SCIRS2_INTEGRATION_POLICY.md)
 scirs2-core.workspace = true
+scirs2-linalg.workspace = true
+# Type-safe byte conversions for memory pooling
+bytemuck = "1.24"
 
 [features]
 default = ["ooc"]
 ooc = ["dep:tenrso-ooc"]
 
 [dev-dependencies]
-criterion = "0.7"
+criterion.workspace = true
 
 [[bench]]
 name = "executor_ops"
+harness = false
+
+[[bench]]
+name = "memory_pool_benchmarks"
+harness = false
+
+[[bench]]
+name = "pooled_ops_benchmarks"
 harness = false

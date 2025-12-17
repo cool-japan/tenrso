@@ -1,6 +1,6 @@
 [package]
 name = "tenrso-planner"
-version = "0.1.0-alpha.1"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,22 +10,32 @@ description = "Contraction order planning and optimization for TenRSo"
 
 [dependencies]
 tenrso-core.workspace = true
+scirs2-core.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
 indexmap.workspace = true
 smallvec.workspace = true
-serde = { version = "1.0", features = ["derive"], optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [features]
 default = []
-serde = ["dep:serde"]
+serde = ["dep:serde", "dep:serde_json"]
 
 [dev-dependencies]
-proptest = "1.9"
-criterion = { version = "0.7", features = ["html_reports"] }
-serde_json = "1.0"
+proptest.workspace = true
+criterion.workspace = true
+serde_json.workspace = true
 
 [[bench]]
 name = "planner_benchmarks"
+harness = false
+
+[[bench]]
+name = "comprehensive_comparison"
+harness = false
+
+[[bench]]
+name = "parallel_planners"
 harness = false

@@ -51,6 +51,18 @@ pub enum SparseError {
     #[error("Index error: {0}")]
     Index(#[from] IndexError),
 
+    /// CSR format errors
+    #[error("CSR error: {0}")]
+    Csr(#[from] crate::csr::CsrError),
+
+    /// CSC format errors
+    #[error("CSC error: {0}")]
+    Csc(#[from] crate::csc::CscError),
+
+    /// COO format errors
+    #[error("COO error: {0}")]
+    Coo(#[from] crate::coo::CooError),
+
     /// Generic error with message
     #[error("{0}")]
     Other(String),
@@ -180,6 +192,36 @@ pub enum IndexError {
 
 /// Result type alias for sparse tensor operations
 pub type SparseResult<T> = Result<T, SparseError>;
+
+// Convenience constructors for common error patterns
+impl SparseError {
+    /// Create an index out of bounds error
+    pub fn index_out_of_bounds(index: Vec<usize>, shape: Vec<usize>) -> Self {
+        SparseError::Index(IndexError::OutOfBounds { index, shape })
+    }
+
+    /// Create a validation error with a message
+    pub fn validation(msg: &str) -> Self {
+        SparseError::Other(msg.to_string())
+    }
+
+    /// Create a conversion error with a message
+    pub fn conversion(msg: String) -> Self {
+        SparseError::Conversion(ConversionError::Failed { reason: msg })
+    }
+
+    /// Create a shape mismatch error
+    pub fn shape_mismatch(expected: Vec<usize>, got: Vec<usize>) -> Self {
+        SparseError::ShapeMismatch(ShapeMismatchError::Tensor { expected, got })
+    }
+
+    /// Create an operation error with a message
+    pub fn operation(msg: &str) -> Self {
+        SparseError::Operation(OperationError::Failed {
+            reason: msg.to_string(),
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -36,6 +36,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tenrso_core::DenseND;
 
+#[cfg(feature = "compression")]
+use crate::compression::{compress_f64_slice, decompress_to_f64_vec, CompressionCodec};
+
 /// Access pattern hint for chunks
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessPattern {
@@ -70,6 +73,9 @@ struct ChunkMetadata {
     id: String,
     /// Size in bytes
     size_bytes: usize,
+    /// Tensor shape (for reconstruction)
+    #[allow(dead_code)]
+    shape: Vec<usize>,
     /// Access pattern
     pattern: AccessPattern,
     /// Last access timestamp
@@ -105,6 +111,9 @@ pub struct MemoryManager {
     lru_queue: VecDeque<String>,
     /// Enable automatic spill
     auto_spill: bool,
+    /// Compression codec for spilled chunks
+    #[cfg(feature = "compression")]
+    compression: CompressionCodec,
 }
 
 impl MemoryManager {
@@ -120,6 +129,8 @@ impl MemoryManager {
             in_memory: HashMap::new(),
             lru_queue: VecDeque::new(),
             auto_spill: true,
+            #[cfg(feature = "compression")]
+            compression: CompressionCodec::default(),
         }
     }
 
@@ -156,6 +167,13 @@ impl MemoryManager {
     /// Enable or disable automatic spill
     pub fn auto_spill(mut self, enable: bool) -> Self {
         self.auto_spill = enable;
+        self
+    }
+
+    /// Set compression codec for spilled chunks
+    #[cfg(feature = "compression")]
+    pub fn compression(mut self, codec: CompressionCodec) -> Self {
+        self.compression = codec;
         self
     }
 
@@ -216,6 +234,7 @@ impl MemoryManager {
         let metadata = ChunkMetadata {
             id: chunk_id.to_string(),
             size_bytes: size,
+            shape: tensor.shape().to_vec(),
             pattern,
             last_access: self.current_timestamp(),
             access_count: 0,
@@ -360,7 +379,7 @@ impl MemoryManager {
     /// Spill a specific chunk to disk
     ///
     /// **Note:** Requires the `mmap` feature to be enabled.
-    #[cfg(feature = "mmap")]
+    #[cfg(all(feature = "mmap", not(feature = "compression")))]
     fn spill_chunk(&mut self, chunk_id: &str) -> Result<()> {
         let tensor = self
             .in_memory
@@ -382,10 +401,40 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// Spill a specific chunk to disk with compression
+    ///
+    /// **Note:** Requires both `mmap` and `compression` features to be enabled.
+    #[cfg(all(feature = "mmap", feature = "compression"))]
+    fn spill_chunk(&mut self, chunk_id: &str) -> Result<()> {
+        let tensor = self
+            .in_memory
+            .remove(chunk_id)
+            .ok_or_else(|| anyhow!("Chunk {} not in memory", chunk_id))?;
+
+        let filename = format!("tenrso_chunk_{}.bin", chunk_id);
+        let path = self.temp_dir.join(filename);
+
+        // Flatten tensor data and compress
+        let data = tensor.as_slice();
+        let compressed = compress_f64_slice(data, self.compression)?;
+
+        // Write compressed data to file
+        std::fs::write(&path, compressed)?;
+
+        if let Some(meta) = self.chunks.get_mut(chunk_id) {
+            let size = meta.size_bytes;
+            meta.spilled = true;
+            meta.spill_path = Some(path);
+            self.current_memory_bytes = self.current_memory_bytes.saturating_sub(size);
+        }
+
+        Ok(())
+    }
+
     /// Load a chunk from disk back into memory
     ///
     /// **Note:** Requires the `mmap` feature to be enabled.
-    #[cfg(feature = "mmap")]
+    #[cfg(all(feature = "mmap", not(feature = "compression")))]
     fn load_from_disk(&mut self, chunk_id: &str) -> Result<()> {
         let meta = self
             .chunks
@@ -399,6 +448,47 @@ impl MemoryManager {
 
         let tensor = crate::mmap_io::read_tensor_binary(path)?;
         let size = meta.size_bytes;
+
+        // Ensure we have space
+        if self.current_memory_bytes + size > self.max_memory_bytes {
+            self.apply_spill_policy()?;
+        }
+
+        self.in_memory.insert(chunk_id.to_string(), tensor);
+        self.current_memory_bytes += size;
+
+        if let Some(meta) = self.chunks.get_mut(chunk_id) {
+            meta.spilled = false;
+        }
+
+        Ok(())
+    }
+
+    /// Load a chunk from disk back into memory with decompression
+    ///
+    /// **Note:** Requires both `mmap` and `compression` features to be enabled.
+    #[cfg(all(feature = "mmap", feature = "compression"))]
+    fn load_from_disk(&mut self, chunk_id: &str) -> Result<()> {
+        let meta = self
+            .chunks
+            .get(chunk_id)
+            .ok_or_else(|| anyhow!("Chunk {} not found", chunk_id))?;
+
+        let path = meta
+            .spill_path
+            .as_ref()
+            .ok_or_else(|| anyhow!("No spill path for chunk {}", chunk_id))?
+            .clone();
+
+        let shape = meta.shape.clone();
+        let size = meta.size_bytes;
+
+        // Read compressed data and decompress
+        let compressed = std::fs::read(&path)?;
+        let decompressed = decompress_to_f64_vec(&compressed)?;
+
+        // Reconstruct tensor with original shape
+        let tensor = DenseND::from_vec(decompressed, &shape)?;
 
         // Ensure we have space
         if self.current_memory_bytes + size > self.max_memory_bytes {
@@ -436,6 +526,8 @@ impl MemoryManager {
     }
 
     /// Clean up all spilled files
+    ///
+    /// **Note:** Requires the `mmap` feature to be enabled.
     #[cfg(feature = "mmap")]
     pub fn cleanup(&mut self) -> Result<()> {
         for meta in self.chunks.values() {
@@ -445,6 +537,12 @@ impl MemoryManager {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Clean up all spilled files (stub for when mmap is not enabled)
+    #[cfg(not(feature = "mmap"))]
+    pub fn cleanup(&mut self) -> Result<()> {
         Ok(())
     }
 

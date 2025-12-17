@@ -191,6 +191,16 @@ impl<T: Clone> CooTensor<T> {
         &self.values
     }
 
+    /// Get mutable reference to indices
+    pub fn indices_mut(&mut self) -> &mut [Vec<usize>] {
+        &mut self.indices
+    }
+
+    /// Get mutable reference to values
+    pub fn values_mut(&mut self) -> &mut [T] {
+        &mut self.values
+    }
+
     /// Compute density (nnz / total_elements)
     pub fn density(&self) -> f64 {
         let total: usize = self.shape.iter().product();

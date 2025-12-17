@@ -553,4 +553,179 @@ proptest! {
         prop_assert!((density - expected).abs() < 1e-10,
             "Density mismatch: got {}, expected {}", density, expected);
     }
+
+    // ============================================================================
+    // Element-wise Operation Properties
+    // ============================================================================
+
+    /// Property: Sparse clip ensures all values are within bounds
+    #[test]
+    fn prop_clip_bounds(
+        (indices, values, shape) in sparse_matrix_strategy(8, 8, 20)
+    ) {
+        use tenrso_sparse::ops::sparse_clip_csr;
+
+        // Create CSR matrix
+        let coo_indices: Vec<Vec<usize>> = indices.iter()
+            .map(|(i, j)| vec![*i, *j])
+            .collect();
+
+        let mut coo = CooTensor::new(coo_indices, values, vec![shape.0, shape.1]).unwrap();
+        coo.deduplicate();
+        let csr = CsrMatrix::from_coo(&coo).unwrap();
+
+        // Clip to range [0.0, 50.0]
+        let clipped = sparse_clip_csr(&csr, 0.0, 50.0).unwrap();
+
+        // All values should be within bounds
+        for &val in clipped.values() {
+            prop_assert!(val >= 0.0, "Value {} is below minimum", val);
+            prop_assert!(val <= 50.0, "Value {} is above maximum", val);
+        }
+
+        // NNZ should be preserved (clipping doesn't remove elements)
+        prop_assert_eq!(csr.nnz(), clipped.nnz());
+    }
+
+    /// Property: Sparse floor returns integer values
+    #[test]
+    fn prop_floor_integer(
+        (indices, values, shape) in sparse_matrix_strategy(8, 8, 20)
+    ) {
+        use tenrso_sparse::ops::sparse_floor_csr;
+
+        let coo_indices: Vec<Vec<usize>> = indices.iter()
+            .map(|(i, j)| vec![*i, *j])
+            .collect();
+
+        let mut coo = CooTensor::new(coo_indices, values, vec![shape.0, shape.1]).unwrap();
+        coo.deduplicate();
+        let csr = CsrMatrix::from_coo(&coo).unwrap();
+
+        let floored = sparse_floor_csr(&csr).unwrap();
+
+        // All values should be integers (floor of originals)
+        for (&original, &floored_val) in csr.values().iter().zip(floored.values().iter()) {
+            prop_assert_eq!(floored_val, original.floor());
+            prop_assert_eq!(floored_val.fract(), 0.0, "Floor should produce integer value");
+        }
+
+        // NNZ preserved
+        prop_assert_eq!(csr.nnz(), floored.nnz());
+    }
+
+    /// Property: Sparse ceil returns integer values
+    #[test]
+    fn prop_ceil_integer(
+        (indices, values, shape) in sparse_matrix_strategy(8, 8, 20)
+    ) {
+        use tenrso_sparse::ops::sparse_ceil_csr;
+
+        let coo_indices: Vec<Vec<usize>> = indices.iter()
+            .map(|(i, j)| vec![*i, *j])
+            .collect();
+
+        let mut coo = CooTensor::new(coo_indices, values, vec![shape.0, shape.1]).unwrap();
+        coo.deduplicate();
+        let csr = CsrMatrix::from_coo(&coo).unwrap();
+
+        let ceiled = sparse_ceil_csr(&csr).unwrap();
+
+        // All values should be integers (ceil of originals)
+        for (&original, &ceiled_val) in csr.values().iter().zip(ceiled.values().iter()) {
+            prop_assert_eq!(ceiled_val, original.ceil());
+            prop_assert_eq!(ceiled_val.fract(), 0.0, "Ceil should produce integer value");
+        }
+
+        // NNZ preserved
+        prop_assert_eq!(csr.nnz(), ceiled.nnz());
+    }
+
+    /// Property: Sparse round returns integer values
+    #[test]
+    fn prop_round_integer(
+        (indices, values, shape) in sparse_matrix_strategy(8, 8, 20)
+    ) {
+        use tenrso_sparse::ops::sparse_round_csr;
+
+        let coo_indices: Vec<Vec<usize>> = indices.iter()
+            .map(|(i, j)| vec![*i, *j])
+            .collect();
+
+        let mut coo = CooTensor::new(coo_indices, values, vec![shape.0, shape.1]).unwrap();
+        coo.deduplicate();
+        let csr = CsrMatrix::from_coo(&coo).unwrap();
+
+        let rounded = sparse_round_csr(&csr).unwrap();
+
+        // All values should be integers (round of originals)
+        for (&original, &rounded_val) in csr.values().iter().zip(rounded.values().iter()) {
+            prop_assert_eq!(rounded_val, original.round());
+            prop_assert_eq!(rounded_val.fract(), 0.0, "Round should produce integer value");
+        }
+
+        // NNZ preserved
+        prop_assert_eq!(csr.nnz(), rounded.nnz());
+    }
+
+    /// Property: Hypot satisfies sqrt(a² + b²) = hypot(a, b)
+    #[test]
+    fn prop_hypot_pythagorean(
+        (indices, values, shape) in sparse_matrix_strategy(6, 6, 15)
+    ) {
+        use tenrso_sparse::ops::sparse_hypot_csr;
+
+        let coo_indices: Vec<Vec<usize>> = indices.iter()
+            .map(|(i, j)| vec![*i, *j])
+            .collect();
+
+        // Use absolute values to avoid negative sqrt
+        let abs_values: Vec<f64> = values.iter().map(|&v| v.abs()).collect();
+
+        let mut coo = CooTensor::new(coo_indices, abs_values, vec![shape.0, shape.1]).unwrap();
+        coo.deduplicate();
+        let a = CsrMatrix::from_coo(&coo).unwrap();
+        let b = a.clone(); // Use same matrix for simplicity
+
+        let result = sparse_hypot_csr(&a, &b).unwrap();
+
+        // Verify hypot(a, a) = sqrt(a² + a²) = sqrt(2*a²) = a*sqrt(2)
+        for (&a_val, &result_val) in a.values().iter().zip(result.values().iter()) {
+            let expected = a_val * 2.0_f64.sqrt();
+            prop_assert!((result_val - expected).abs() < 1e-9,
+                "Hypot mismatch: got {}, expected {}", result_val, expected);
+        }
+    }
+
+    /// Property: Divide and multiply are inverse operations
+    #[test]
+    fn prop_divide_multiply_inverse(
+        (indices, values, shape) in sparse_matrix_strategy(6, 6, 15)
+    ) {
+        use tenrso_sparse::ops::{sparse_divide_csr, sparse_multiply_csr};
+
+        let coo_indices: Vec<Vec<usize>> = indices.iter()
+            .map(|(i, j)| vec![*i, *j])
+            .collect();
+
+        // Use non-zero values to avoid division by zero
+        let nonzero_values: Vec<f64> = values.iter()
+            .map(|&v| if v.abs() < 0.1 { 1.0 } else { v })
+            .collect();
+
+        let mut coo = CooTensor::new(coo_indices, nonzero_values, vec![shape.0, shape.1]).unwrap();
+        coo.deduplicate();
+        let a = CsrMatrix::from_coo(&coo).unwrap();
+        let b = a.clone();
+
+        // (A ./ B) .* B should approximately equal A for overlapping elements
+        let divided = sparse_divide_csr(&a, &b).unwrap();
+        let restored = sparse_multiply_csr(&divided, &b).unwrap();
+
+        // Verify values match original
+        for (&original, &restored_val) in a.values().iter().zip(restored.values().iter()) {
+            prop_assert!((original - restored_val).abs() < 1e-9,
+                "Divide-multiply inverse failed: {} != {}", original, restored_val);
+        }
+    }
 }

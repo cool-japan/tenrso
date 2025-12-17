@@ -6,7 +6,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use scirs2_core::ndarray_ext::{Array1, Array2};
 use std::hint::black_box;
-use tenrso_sparse::{BcsrMatrix, CooTensor, CsrMatrix};
+use tenrso_sparse::{BcsrMatrix, CooTensor, CsrMatrix, DiaMatrix, EllMatrix};
 
 /// Generate a random sparse matrix with specified density
 fn random_sparse_matrix(nrows: usize, ncols: usize, density: f64) -> CsrMatrix<f64> {
@@ -657,6 +657,353 @@ fn bench_reductions(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark parallel SpMV operations
+fn bench_par_spmv(c: &mut Criterion) {
+    let mut group = c.benchmark_group("parallel_spmv");
+
+    for size in [100, 500, 1000, 2000] {
+        for density in [0.01, 0.05, 0.1] {
+            let csr = random_sparse_matrix(size, size, density);
+            let x = random_dense_vector(size);
+
+            let id = BenchmarkId::from_parameter(format!("{}x{}_d{}", size, size, density));
+            group.throughput(Throughput::Elements((csr.nnz() * 2) as u64)); // 2 ops per nnz
+
+            #[cfg(feature = "parallel")]
+            group.bench_with_input(id, &(&csr, &x), |b, (csr, x)| {
+                b.iter(|| black_box(tenrso_sparse::parallel::par_spmv(csr, &x.view()).unwrap()));
+            });
+        }
+    }
+
+    group.finish();
+}
+
+/// Benchmark parallel SpMM operations
+fn bench_par_spmm(c: &mut Criterion) {
+    let mut group = c.benchmark_group("parallel_spmm");
+
+    for size in [100, 500, 1000] {
+        for density in [0.01, 0.05] {
+            let csr = random_sparse_matrix(size, size, density);
+            let b = random_dense_matrix(size, 10);
+
+            let id = BenchmarkId::from_parameter(format!("{}x{}_d{}_k10", size, size, density));
+            group.throughput(Throughput::Elements((csr.nnz() * 10 * 2) as u64));
+
+            #[cfg(feature = "parallel")]
+            group.bench_with_input(id, &(&csr, &b), |b_bench, (csr, b)| {
+                b_bench
+                    .iter(|| black_box(tenrso_sparse::parallel::par_spmm(csr, &b.view()).unwrap()));
+            });
+        }
+    }
+
+    group.finish();
+}
+
+/// Benchmark parallel format conversions
+fn bench_par_conversions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("parallel_conversions");
+
+    for size in [100, 500, 1000] {
+        for density in [0.01, 0.05, 0.1] {
+            let indices: Vec<Vec<usize>> = (0..((size * size) as f64 * density) as usize)
+                .map(|i| vec![i % size, (i * 7) % size])
+                .collect();
+            let values: Vec<f64> = (0..indices.len()).map(|i| i as f64).collect();
+            let coo = CooTensor::new(indices, values, vec![size, size]).unwrap();
+
+            let id =
+                BenchmarkId::from_parameter(format!("COO->CSR_{}x{}_d{}", size, size, density));
+
+            #[cfg(feature = "parallel")]
+            group.bench_with_input(id, &coo, |b, coo| {
+                b.iter(|| black_box(tenrso_sparse::parallel::par_coo_to_csr(coo).unwrap()));
+            });
+        }
+    }
+
+    group.finish();
+}
+
+/// Benchmark sequential vs parallel comparison
+fn bench_seq_vs_par(c: &mut Criterion) {
+    let mut group = c.benchmark_group("seq_vs_par_comparison");
+
+    let sizes = [500, 1000, 2000];
+
+    for size in sizes {
+        let csr = random_sparse_matrix(size, size, 0.05);
+        let x = random_dense_vector(size);
+
+        // Sequential SpMV
+        group.bench_with_input(
+            BenchmarkId::new("spmv_seq", size),
+            &(&csr, &x),
+            |b, (csr, x)| {
+                b.iter(|| black_box(csr.spmv(&x.view()).unwrap()));
+            },
+        );
+
+        // Parallel SpMV
+        #[cfg(feature = "parallel")]
+        group.bench_with_input(
+            BenchmarkId::new("spmv_par", size),
+            &(&csr, &x),
+            |b, (csr, x)| {
+                b.iter(|| black_box(tenrso_sparse::parallel::par_spmv(csr, &x.view()).unwrap()));
+            },
+        );
+
+        let b = random_dense_matrix(size, 10);
+
+        // Sequential SpMM
+        group.bench_with_input(
+            BenchmarkId::new("spmm_seq", size),
+            &(&csr, &b),
+            |b_bench, (csr, b)| {
+                b_bench.iter(|| black_box(csr.spmm(&b.view()).unwrap()));
+            },
+        );
+
+        // Parallel SpMM
+        #[cfg(feature = "parallel")]
+        group.bench_with_input(
+            BenchmarkId::new("spmm_par", size),
+            &(&csr, &b),
+            |b_bench, (csr, b)| {
+                b_bench
+                    .iter(|| black_box(tenrso_sparse::parallel::par_spmm(csr, &b.view()).unwrap()));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark ELL format SpMV operations
+fn bench_ell_spmv(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ell_spmv");
+
+    for size in [100, 500, 1000] {
+        for density in [0.01, 0.05, 0.1] {
+            let csr = random_sparse_matrix(size, size, density);
+            let ell = EllMatrix::from_csr(&csr);
+            let x = random_dense_vector(size);
+
+            let fill_eff = ell.fill_efficiency();
+            let id = BenchmarkId::from_parameter(format!(
+                "{}x{}_d{:.2}_eff{:.0}%",
+                size,
+                size,
+                density,
+                fill_eff * 100.0
+            ));
+            group.throughput(Throughput::Elements((csr.nnz() * 2) as u64));
+
+            group.bench_with_input(id, &(&ell, &x), |b, (ell, x)| {
+                b.iter(|| black_box(ell.spmv(x).unwrap()));
+            });
+        }
+    }
+
+    group.finish();
+}
+
+/// Generate a banded sparse matrix for DIA benchmarks
+fn random_banded_matrix(size: usize, bandwidth: usize) -> CsrMatrix<f64> {
+    let mut indices = Vec::new();
+    let mut values = Vec::new();
+
+    let mut seed = 11111u64;
+    for i in 0..size {
+        for offset in -(bandwidth as isize)..=(bandwidth as isize) {
+            let j = i as isize + offset;
+            if j >= 0 && j < size as isize {
+                seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+                let val = (seed % 10000) as f64 / 10000.0;
+                indices.push(vec![i, j as usize]);
+                values.push(val);
+            }
+        }
+    }
+
+    let coo = CooTensor::new(indices, values, vec![size, size]).expect("Failed to create COO");
+    CsrMatrix::from_coo(&coo).expect("Failed to convert to CSR")
+}
+
+/// Benchmark DIA format SpMV operations
+fn bench_dia_spmv(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dia_spmv");
+
+    for size in [100, 500, 1000] {
+        for bandwidth in [1, 2, 5] {
+            let csr = random_banded_matrix(size, bandwidth);
+            let dia = DiaMatrix::from_csr(&csr);
+            let x = random_dense_vector(size);
+
+            let (lower, upper) = dia.bandwidth();
+            let id = BenchmarkId::from_parameter(format!(
+                "{}x{}_bw{}({}+{})",
+                size,
+                size,
+                lower + upper,
+                lower,
+                upper
+            ));
+            group.throughput(Throughput::Elements((csr.nnz() * 2) as u64));
+
+            group.bench_with_input(id, &(&dia, &x), |b, (dia, x)| {
+                b.iter(|| black_box(dia.spmv(x).unwrap()));
+            });
+        }
+    }
+
+    group.finish();
+}
+
+/// Benchmark ELL vs CSR vs DIA SpMV comparison
+fn bench_format_spmv_comparison(c: &mut Criterion) {
+    let mut group = c.benchmark_group("spmv_format_comparison");
+
+    let size = 500;
+
+    // Test 1: Uniform sparsity (good for ELL)
+    let csr_uniform = random_sparse_matrix(size, size, 0.05);
+    let ell_uniform = EllMatrix::from_csr(&csr_uniform);
+    let x = random_dense_vector(size);
+
+    group.throughput(Throughput::Elements((csr_uniform.nnz() * 2) as u64));
+
+    group.bench_function("CSR_uniform", |b| {
+        b.iter(|| black_box(csr_uniform.spmv(&x.view()).unwrap()));
+    });
+
+    group.bench_function("ELL_uniform", |b| {
+        b.iter(|| black_box(ell_uniform.spmv(&x).unwrap()));
+    });
+
+    // Test 2: Banded structure (good for DIA)
+    let csr_banded = random_banded_matrix(size, 2);
+    let dia_banded = DiaMatrix::from_csr(&csr_banded);
+
+    group.throughput(Throughput::Elements((csr_banded.nnz() * 2) as u64));
+
+    group.bench_function("CSR_banded", |b| {
+        b.iter(|| black_box(csr_banded.spmv(&x.view()).unwrap()));
+    });
+
+    group.bench_function("DIA_banded", |b| {
+        b.iter(|| black_box(dia_banded.spmv(&x).unwrap()));
+    });
+
+    group.finish();
+}
+
+/// Benchmark element-wise operations (new operations)
+fn bench_element_wise_ops(c: &mut Criterion) {
+    use tenrso_sparse::ops::*;
+
+    let mut group = c.benchmark_group("element_wise_ops");
+
+    for size in [500, 1000].iter() {
+        for density in [0.01, 0.05].iter() {
+            let a = random_sparse_matrix(*size, *size, *density);
+            let b = random_sparse_matrix(*size, *size, *density);
+
+            let nnz = a.nnz();
+            group.throughput(Throughput::Elements(nnz as u64));
+
+            // Benchmark divide
+            group.bench_with_input(
+                BenchmarkId::new("divide", format!("{}x{}_d{}", size, size, density)),
+                &(&a, &b),
+                |bench, (a, b)| {
+                    bench.iter(|| {
+                        let result = sparse_divide_csr(black_box(a), black_box(b));
+                        let _ = black_box(result);
+                    });
+                },
+            );
+
+            // Benchmark clip
+            group.bench_with_input(
+                BenchmarkId::new("clip", format!("{}x{}_d{}", size, size, density)),
+                &a,
+                |bench, a| {
+                    bench.iter(|| {
+                        let result = sparse_clip_csr(black_box(a), 0.2, 0.8);
+                        let _ = black_box(result);
+                    });
+                },
+            );
+
+            // Benchmark floor
+            group.bench_with_input(
+                BenchmarkId::new("floor", format!("{}x{}_d{}", size, size, density)),
+                &a,
+                |bench, a| {
+                    bench.iter(|| {
+                        let result = sparse_floor_csr(black_box(a));
+                        let _ = black_box(result);
+                    });
+                },
+            );
+
+            // Benchmark ceil
+            group.bench_with_input(
+                BenchmarkId::new("ceil", format!("{}x{}_d{}", size, size, density)),
+                &a,
+                |bench, a| {
+                    bench.iter(|| {
+                        let result = sparse_ceil_csr(black_box(a));
+                        let _ = black_box(result);
+                    });
+                },
+            );
+
+            // Benchmark round
+            group.bench_with_input(
+                BenchmarkId::new("round", format!("{}x{}_d{}", size, size, density)),
+                &a,
+                |bench, a| {
+                    bench.iter(|| {
+                        let result = sparse_round_csr(black_box(a));
+                        let _ = black_box(result);
+                    });
+                },
+            );
+
+            // Benchmark atan2
+            group.bench_with_input(
+                BenchmarkId::new("atan2", format!("{}x{}_d{}", size, size, density)),
+                &(&a, &b),
+                |bench, (a, b)| {
+                    bench.iter(|| {
+                        let result = sparse_atan2_csr(black_box(a), black_box(b));
+                        let _ = black_box(result);
+                    });
+                },
+            );
+
+            // Benchmark hypot
+            group.bench_with_input(
+                BenchmarkId::new("hypot", format!("{}x{}_d{}", size, size, density)),
+                &(&a, &b),
+                |bench, (a, b)| {
+                    bench.iter(|| {
+                        let result = sparse_hypot_csr(black_box(a), black_box(b));
+                        let _ = black_box(result);
+                    });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_spmv,
@@ -671,6 +1018,14 @@ criterion_group!(
     bench_format_recommendation,
     bench_dense_to_sparse,
     bench_csf,
-    bench_reductions
+    bench_reductions,
+    bench_par_spmv,
+    bench_par_spmm,
+    bench_par_conversions,
+    bench_seq_vs_par,
+    bench_ell_spmv,
+    bench_dia_spmv,
+    bench_format_spmv_comparison,
+    bench_element_wise_ops
 );
 criterion_main!(benches);
