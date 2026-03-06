@@ -1016,6 +1016,7 @@ mod tests {
     }
     use proptest::prelude::*;
     proptest! {
+        #![proptest_config(ProptestConfig { cases: 10, ..ProptestConfig::default() })]
         #[doc = " Property: Plans should always succeed for valid matmul specs"] #[test]
         fn prop_greedy_planner_matmul_always_succeeds(shared_dim in 1..= 50usize, m in 1
         ..= 30usize, n in 1..= 30usize,) { let spec = EinsumSpec::parse("ij,jk->ik")

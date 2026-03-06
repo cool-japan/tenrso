@@ -39,22 +39,22 @@ impl tenrso_ooc::distributed::network::ChunkProvider for TestChunkProvider {
 
 #[test]
 fn test_protocol_serialization() {
-    let bincode_config = bincode::config::standard();
+    let oxicode_config = oxicode::config::standard();
 
     // Test ChunkRequest serialization
     let request = ChunkRequest::new("test_chunk".to_string(), NodeId(42));
-    let serialized = bincode::serde::encode_to_vec(&request, bincode_config).unwrap();
+    let serialized = oxicode::serde::encode_to_vec(&request, oxicode_config).unwrap();
     let (deserialized, _): (ChunkRequest, usize) =
-        bincode::serde::decode_from_slice(&serialized, bincode_config).unwrap();
+        oxicode::serde::decode_from_slice(&serialized, oxicode_config).unwrap();
 
     assert_eq!(request.chunk_id, deserialized.chunk_id);
     assert_eq!(request.requester, deserialized.requester);
 
     // Test ChunkMetadata serialization
     let metadata = ChunkMetadata::new_f64("chunk_1".to_string(), vec![10, 20, 30]);
-    let serialized = bincode::serde::encode_to_vec(&metadata, bincode_config).unwrap();
+    let serialized = oxicode::serde::encode_to_vec(&metadata, oxicode_config).unwrap();
     let (deserialized, _): (ChunkMetadata, usize) =
-        bincode::serde::decode_from_slice(&serialized, bincode_config).unwrap();
+        oxicode::serde::decode_from_slice(&serialized, oxicode_config).unwrap();
 
     assert_eq!(metadata.chunk_id, deserialized.chunk_id);
     assert_eq!(metadata.shape, deserialized.shape);

@@ -1,6 +1,6 @@
 [package]
 name = "tenrso-exec"
-version = "0.1.0-alpha.2"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -22,7 +22,9 @@ log.workspace = true
 scirs2-core.workspace = true
 scirs2-linalg.workspace = true
 # Type-safe byte conversions for memory pooling
-bytemuck = "1.24"
+bytemuck = "1.25"
+# Parallel execution
+rayon.workspace = true
 
 [features]
 default = ["ooc"]

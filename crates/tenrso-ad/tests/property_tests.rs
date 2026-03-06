@@ -4,6 +4,7 @@
 
 use proptest::prelude::*;
 use scirs2_core::ndarray_ext::{Array1, Array2};
+use tenrso_ad::grad::TtReconstructionGrad;
 use tenrso_ad::gradcheck::{check_gradient, GradCheckConfig};
 use tenrso_ad::vjp::{EinsumVjp, ElementwiseUnaryVjp, ReductionType, ReductionVjp, VjpOp};
 use tenrso_core::DenseND;
@@ -45,7 +46,7 @@ proptest! {
         let grads2 = vjp_ctx.vjp(&v2).unwrap();
         let grads_combo = vjp_ctx.vjp(&v_combo).unwrap();
 
-        // Check linearity: vjp(f, a*v1 + b*v2) ≈ a*vjp(f,v1) + b*vjp(f,v2)
+        // Check linearity: vjp(f, a*v1 + b*v2) ~= a*vjp(f,v1) + b*vjp(f,v2)
         // Test for gradient w.r.t. first input
         let grad_x1_arr = grads1[0].as_array();
         let grad_x2_arr = grads2[0].as_array();
@@ -148,28 +149,55 @@ proptest! {
         }
     }
 
-    /// Test einsum VJP transpose symmetry
+    /// Test einsum VJP transpose symmetry: for y = A^T, verify gradient correctness
+    ///
+    /// For transpose ij->ji with two inputs (einsum requires 2 inputs),
+    /// we test the equivalent operation via matrix multiplication with identity:
+    /// Y = I @ A^T, which gives grad_A = I^T @ grad_Y^T = grad_Y^T
     #[test]
     fn test_einsum_vjp_transpose_symmetry(
-        size in 2..10usize,
+        size in 2..8usize,
     ) {
-        let x_arr = Array2::from_shape_fn((size, size), |(i, j)| (i * size + j) as f64);
+        // Build a matrix and its transpose via einsum matmul with identity
+        // C = A @ I_n where A is (size x size), effectively C = A
+        // Then grad_A = grad_C @ I_n^T = grad_C
+        let x_arr = Array2::from_shape_fn((size, size), |(i, j)| ((i * size + j) as f64) + 1.0);
         let x = DenseND::from_array(x_arr.clone().into_dyn());
 
-        // y = x^T using einsum: ij->ji
-        let spec = EinsumSpec::parse("ij->ji").unwrap();
-        let y = execute_dense_contraction(&spec, &x, &x).ok();
+        // Use identity matrix as second input
+        let eye = DenseND::from_array(Array2::eye(size).into_dyn());
 
-        // Gradient should be cotangent^T
-        let cotangent_arr: Array2<f64> = Array2::ones((size, size));
-        let _cotangent: DenseND<f64> = DenseND::from_array(cotangent_arr.clone().into_dyn());
+        let spec = EinsumSpec::parse("ij,jk->ik").unwrap();
+        let result = execute_dense_contraction(&spec, &x, &eye).unwrap();
 
-        // For transpose, gradient of input is transpose of output gradient
-        let _expected_arr = cotangent_arr.t();
+        // Result should equal x (A @ I = A)
+        for i in 0..size {
+            for j in 0..size {
+                let r = *result.get(&[i, j]).unwrap();
+                let expected = *x.get(&[i, j]).unwrap();
+                prop_assert!((r - expected).abs() < 1e-10,
+                    "A @ I should equal A: got {} expected {}", r, expected);
+            }
+        }
 
-        // Since einsum("ij->ji") is unary, we need to test differently
-        // The adjoint should give us the transposed gradient
-        prop_assert!(y.is_none() || y.is_some(), "Transpose operation completed");
+        // Compute VJP: for C = A @ I, grad_A = grad_C @ I^T = grad_C
+        let grad_c_arr = Array2::from_shape_fn((size, size), |(i, j)| ((i + j) as f64) * 0.5 + 1.0);
+        let grad_c = DenseND::from_array(grad_c_arr.clone().into_dyn());
+
+        let vjp_ctx = EinsumVjp::new(spec, x.clone(), eye.clone());
+        let grads = vjp_ctx.vjp(&grad_c).unwrap();
+
+        // grad_A = grad_C @ I^T = grad_C (since I^T = I)
+        let grad_a = grads[0].as_array();
+        for i in 0..size {
+            for j in 0..size {
+                let actual = grad_a[[i, j].as_ref()];
+                let expected = grad_c_arr[[i, j]];
+                prop_assert!((actual - expected).abs() < 1e-10,
+                    "Transpose symmetry: grad_A should equal grad_C, got {} expected {}",
+                    actual, expected);
+            }
+        }
     }
 }
 
@@ -352,6 +380,121 @@ proptest! {
                 "grad_a[{}] = {} but expected {}", i, grad_a_val, b_val);
             prop_assert!((grad_b_val - a_val).abs() < 1e-10,
                 "grad_b[{}] = {} but expected {}", i, grad_b_val, a_val);
+        }
+    }
+
+    /// Test TT gradient correctness using finite differences
+    ///
+    /// Creates a small TT decomposition with random values and verifies that the
+    /// analytical gradient matches the numerical gradient computed via central differences.
+    #[test]
+    fn test_tt_gradient_finite_diff(
+        seed in 0u64..500,
+    ) {
+        use scirs2_core::random::{SeedableRng, StdRng};
+
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        // Create a 2-core TT with small dimensions for tractability
+        // Core0: (1, 3, 2), Core1: (2, 4, 1) => tensor shape (3, 4)
+        let n0 = 3usize;
+        let n1 = 4usize;
+        let r = 2usize;
+
+        let mut core0 = DenseND::<f64>::zeros(&[1, n0, r]);
+        let mut core1 = DenseND::<f64>::zeros(&[r, n1, 1]);
+
+        // Fill with random values in [-2, 2]
+        for i in 0..n0 {
+            for beta in 0..r {
+                *core0.get_mut(&[0, i, beta]).unwrap() = rng.gen_range(-2.0..2.0);
+            }
+        }
+        for alpha in 0..r {
+            for j in 0..n1 {
+                *core1.get_mut(&[alpha, j, 0]).unwrap() = rng.gen_range(-2.0..2.0);
+            }
+        }
+
+        // Random gradient output
+        let mut grad_data = Vec::with_capacity(n0 * n1);
+        for _ in 0..(n0 * n1) {
+            grad_data.push(rng.gen_range(-1.0..1.0));
+        }
+        let grad_output = DenseND::from_vec(grad_data, &[n0, n1]).unwrap();
+
+        // Compute analytical gradients
+        let ctx = TtReconstructionGrad::new(vec![core0.clone(), core1.clone()]);
+        let analytical = ctx.compute_core_gradients(&grad_output).unwrap();
+
+        // Verify gradient for core0 using finite differences
+        let epsilon = 1e-7;
+        for i in 0..n0 {
+            for beta in 0..r {
+                let mut c0_plus = core0.clone();
+                let mut c0_minus = core0.clone();
+
+                let val = *core0.get(&[0, i, beta]).unwrap();
+                *c0_plus.get_mut(&[0, i, beta]).unwrap() = val + epsilon;
+                *c0_minus.get_mut(&[0, i, beta]).unwrap() = val - epsilon;
+
+                let ctx_p = TtReconstructionGrad::new(vec![c0_plus, core1.clone()]);
+                let ctx_m = TtReconstructionGrad::new(vec![c0_minus, core1.clone()]);
+                let recon_p = ctx_p.reconstruct().unwrap();
+                let recon_m = ctx_m.reconstruct().unwrap();
+
+                // Numerical grad = sum of grad_output * (recon_p - recon_m) / (2*eps)
+                let mut num_grad = 0.0;
+                for fi in 0..n0 {
+                    for fj in 0..n1 {
+                        let vp = *recon_p.get(&[fi, fj]).unwrap();
+                        let vm = *recon_m.get(&[fi, fj]).unwrap();
+                        let g = *grad_output.get(&[fi, fj]).unwrap();
+                        num_grad += g * (vp - vm) / (2.0 * epsilon);
+                    }
+                }
+
+                let ana_val = *analytical[0].get(&[0, i, beta]).unwrap();
+                let diff = (ana_val - num_grad).abs();
+                let tol = 1e-4 * (1.0 + ana_val.abs().max(num_grad.abs()));
+                prop_assert!(diff < tol,
+                    "TT grad core0[0,{},{}]: analytical={}, numerical={}, diff={}",
+                    i, beta, ana_val, num_grad, diff);
+            }
+        }
+
+        // Verify gradient for core1 using finite differences
+        for alpha in 0..r {
+            for j in 0..n1 {
+                let mut c1_plus = core1.clone();
+                let mut c1_minus = core1.clone();
+
+                let val = *core1.get(&[alpha, j, 0]).unwrap();
+                *c1_plus.get_mut(&[alpha, j, 0]).unwrap() = val + epsilon;
+                *c1_minus.get_mut(&[alpha, j, 0]).unwrap() = val - epsilon;
+
+                let ctx_p = TtReconstructionGrad::new(vec![core0.clone(), c1_plus]);
+                let ctx_m = TtReconstructionGrad::new(vec![core0.clone(), c1_minus]);
+                let recon_p = ctx_p.reconstruct().unwrap();
+                let recon_m = ctx_m.reconstruct().unwrap();
+
+                let mut num_grad = 0.0;
+                for fi in 0..n0 {
+                    for fj in 0..n1 {
+                        let vp = *recon_p.get(&[fi, fj]).unwrap();
+                        let vm = *recon_m.get(&[fi, fj]).unwrap();
+                        let g = *grad_output.get(&[fi, fj]).unwrap();
+                        num_grad += g * (vp - vm) / (2.0 * epsilon);
+                    }
+                }
+
+                let ana_val = *analytical[1].get(&[alpha, j, 0]).unwrap();
+                let diff = (ana_val - num_grad).abs();
+                let tol = 1e-4 * (1.0 + ana_val.abs().max(num_grad.abs()));
+                prop_assert!(diff < tol,
+                    "TT grad core1[{},{},0]: analytical={}, numerical={}, diff={}",
+                    alpha, j, ana_val, num_grad, diff);
+            }
         }
     }
 }

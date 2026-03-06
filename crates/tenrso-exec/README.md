@@ -1,6 +1,12 @@
 # tenrso-exec
 
-Unified execution API for TenRSo tensor operations.
+[![Crates.io](https://img.shields.io/crates/v/tenrso-exec)](https://crates.io/crates/tenrso-exec)
+[![Documentation](https://docs.rs/tenrso-exec/badge.svg)](https://docs.rs/tenrso-exec)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
+**Unified execution API for TenRSo tensor operations.**
+
+Part of the [TenRSo](https://github.com/cool-japan/tenrso) tensor computing stack.
 
 ## Overview
 
@@ -10,6 +16,7 @@ Unified execution API for TenRSo tensor operations.
 - **TenrsoExecutor trait** - Backend abstraction (CPU, GPU)
 - **Execution hints** - Control representation, tiling, masking
 - **Auto-optimization** - Automatic planner integration
+- **Memory pooling** - Thread-local buffer pools with smart heuristics
 
 All tensor operations (dense, sparse, low-rank) go through this unified interface.
 
@@ -17,34 +24,42 @@ All tensor operations (dense, sparse, low-rank) go through this unified interfac
 
 - Single API for all tensor representations
 - Automatic optimization via planner
-- Memory pooling and device management
+- Memory pooling (phases 1-5.1): thread-local, smart heuristics, auto pooling
+- SIMD operations: vectorized element-wise, 2-8x speedup
+- Tiled reductions: cache-friendly blocked reductions
+- Vectorized broadcasting: pattern-aware kernels
+- Conv1d/2d/3d with pooling layers
+- Shape manipulation: concat, tile, pad, flip, squeeze, unsqueeze, stack, repeat, roll
+- Advanced indexing: gather, scatter, fancy (boolean mask) indexing
 - Parallel execution
 - Custom execution hints
 
-## Usage
+## Installation
 
 ```toml
 [dependencies]
-tenrso-exec = "0.1"
+tenrso-exec = "0.1.0-rc.1"
 ```
 
-### Basic Einsum (TODO: M4)
+## Quick Start
+
+### Basic Einsum
 
 ```rust
 use tenrso_exec::{einsum_ex, ExecHints};
 
 // Simple matrix multiplication
-let C = einsum_ex::<f32>("ij,jk->ik")
-    .inputs(&[A, B])
+let c = einsum_ex::<f32>("ij,jk->ik")
+    .inputs(&[a, b])
     .run()?;
 ```
 
-### With Hints (TODO: M4)
+### With Hints
 
 ```rust
 // Tensor contraction with optimization hints
 let result = einsum_ex::<f32>("bij,bjk->bik")
-    .inputs(&[A, B])
+    .inputs(&[a, b])
     .hints(&ExecHints {
         prefer_lowrank: true,
         prefer_sparse: true,
@@ -68,9 +83,20 @@ let abs_tensor = exec.elem_op(ElemOp::Abs, &tensor)?;
 let sum = exec.reduce(ReduceOp::Sum, &tensor, &[0, 1])?;
 ```
 
-### Performance Configuration
+### Convolutions
 
-`tenrso-exec` includes advanced optimization features that can be configured per executor:
+```rust
+let result = exec.conv2d(
+    &input,    // [batch, height, width, channels]
+    &kernel,   // [out_channels, kH, kW, in_channels]
+    stride,
+    padding,
+)?;
+```
+
+## Performance Configuration
+
+`tenrso-exec` includes advanced optimization features configurable per executor:
 
 ```rust
 use tenrso_exec::CpuExecutor;
@@ -88,88 +114,49 @@ let mut exec = CpuExecutor::new()
 let mut exec = CpuExecutor::unoptimized();
 ```
 
-#### Optimization Features
+### Optimization Features
 
 - **SIMD Operations** (`enable_simd`):
   - Vectorized element-wise operations (neg, abs, exp, log, sin, cos, etc.)
   - Vectorized binary operations (add, sub, mul, div, etc.)
-  - Automatically activated for tensors ≥1024 elements
-  - Typical speedup: 2-4× for simple ops, up to 8× for expensive ops (exp, sin)
+  - Automatically activated for tensors >= 1024 elements
+  - Typical speedup: 2-4x for simple ops, up to 8x for expensive ops (exp, sin)
 
 - **Tiled Reductions** (`enable_tiled_reductions`):
   - Cache-friendly blocked reductions using 4KB tiles
   - Optimizes sum, mean, max, min operations
-  - Automatically activated for tensors ≥100K elements
-  - Typical speedup: 1.5-3× for large tensors (reduces cache misses)
+  - Automatically activated for tensors >= 100K elements
+  - Typical speedup: 1.5-3x for large tensors (reduces cache misses)
 
 - **Vectorized Broadcasting** (`enable_vectorized_broadcast`):
   - Pattern-aware broadcasting with specialized kernels
   - Detects common patterns (scalar, same-shape, axis-specific)
   - Parallel execution for large operations
-  - Typical speedup: 1.5-2× for broadcast-heavy workloads
+  - Typical speedup: 1.5-2x for broadcast-heavy workloads
 
-#### When to Use Each Optimization
+## Memory Pooling
 
-**Enable SIMD when**:
-- Working with large vectors/tensors (>1K elements)
-- Performing many element-wise operations
-- Using expensive math functions (exp, log, trigonometric)
+Automatic buffer pooling for common tensor operations with zero API changes:
 
-**Enable Tiled Reductions when**:
-- Reducing very large tensors (>100K elements)
-- Memory bandwidth is a bottleneck
-- Working with multi-dimensional reductions
+```rust
+// Pool automatically used for broadcasting, conv1d/2d/3d,
+// concatenate, max_pool_2d, avg_pool_2d, tile, pad, flip
+let result = exec.conv2d(&input, &kernel, stride, padding)?;
 
-**Disable optimizations when**:
-- Debugging numerical differences
-- Profiling baseline performance
-- Working with very small tensors (<1K elements)
-- Comparing against reference implementations
+// Manual pool management
+let buf = exec.acquire_f32(&[batch, height, width]);
+// ... use buf ...
+exec.release_f32(&[batch, height, width], buf);
 
-#### Performance Tuning Guidelines
-
-1. **Default configuration is optimal for most workloads**:
-   ```rust
-   let mut exec = CpuExecutor::new(); // All optimizations enabled
-   ```
-
-2. **For debugging or numerical verification**:
-   ```rust
-   let mut exec = CpuExecutor::unoptimized();
-   ```
-
-3. **For memory-constrained environments**:
-   ```rust
-   let mut exec = CpuExecutor::new()
-       .with_tiled_reductions(false); // Reduce memory footprint
-   ```
-
-4. **For maximum throughput on modern CPUs**:
-   ```rust
-   let mut exec = CpuExecutor::new(); // All optimizations enabled by default
-   ```
-
-#### Benchmarking
-
-Run comprehensive benchmarks to measure optimization impact:
-
-```bash
-# Run all benchmarks
-cargo bench
-
-# Run optimization-specific benchmarks
-cargo bench --bench optimization_benchmarks
-
-# Compare optimized vs unoptimized performance
-cargo bench --bench optimization_benchmarks -- simd
-cargo bench --bench optimization_benchmarks -- tiled
+// Pool statistics
+let stats = exec.get_pool_stats_f32();
+println!("Hit rate: {:.1}%", stats.hit_rate * 100.0);
 ```
 
-Benchmark results include:
-- SIMD element-wise operations at various tensor sizes
-- Tiled reductions vs standard reductions
-- Combined optimization pipeline performance
-- Automatic threshold detection verification
+**Pooled operations (10 total):**
+- Binary ops with broadcasting
+- Conv1d, Conv2d, Conv3d
+- Concatenate, MaxPool2d, AvgPool2d, Tile, Pad, Flip
 
 ## API Reference
 
@@ -206,8 +193,51 @@ pub trait TenrsoExecutor<T> {
     fn elem_op(&mut self, op: ElemOp, x: &TensorHandle<T>) -> Result<TensorHandle<T>>;
     fn reduce(&mut self, op: ReduceOp, x: &TensorHandle<T>, axes: &[Axis])
         -> Result<TensorHandle<T>>;
+    fn binary_op(&mut self, op: BinaryOp, a: &TensorHandle<T>, b: &TensorHandle<T>)
+        -> Result<TensorHandle<T>>;
+    fn matmul(&mut self, a: &TensorHandle<T>, b: &TensorHandle<T>)
+        -> Result<TensorHandle<T>>;
+    fn conv2d(&mut self, input: &TensorHandle<T>, kernel: &TensorHandle<T>,
+              stride: usize, padding: usize) -> Result<TensorHandle<T>>;
+    // ... and many more
 }
 ```
+
+### Supported Operations
+
+**Element-wise:** Neg, Abs, Exp, Log, Sqrt, Sin, Cos, Tanh, Sigmoid, ReLU, GELU, Recip, Sign
+
+**Binary:** Add, Sub, Mul, Div, Pow, Max, Min
+
+**Reductions:** Sum, Mean, Max, Min, Prod, All, Any, ArgMax, ArgMin
+
+**Shape:** Reshape, Permute, Squeeze, Unsqueeze, Expand, Stack, Repeat, Roll
+
+**Tensor manipulation:** Tile, Pad, Flip, Concatenate, Slice, Gather, Scatter
+
+**Convolutions:** Conv1d, Conv2d, Conv3d, MaxPool2d, AvgPool2d
+
+## Benchmarks
+
+```bash
+# Run all benchmarks
+cargo bench
+
+# Run optimization-specific benchmarks
+cargo bench --bench optimization_benchmarks
+
+# Compare optimized vs unoptimized performance
+cargo bench --bench optimization_benchmarks -- simd
+cargo bench --bench optimization_benchmarks -- tiled
+```
+
+## Testing
+
+```bash
+cargo test --package tenrso-exec
+```
+
+**Test Coverage:** 244 tests (100% passing)
 
 ## Dependencies
 
@@ -221,3 +251,14 @@ pub trait TenrsoExecutor<T> {
 ## License
 
 Apache-2.0
+
+## Related Projects
+
+- [`tenrso-core`](../tenrso-core) - Core tensor data structures
+- [`tenrso-planner`](../tenrso-planner) - Contraction planning
+- [`tenrso-ooc`](../tenrso-ooc) - Out-of-core processing
+- [`tenrso`](../tenrso) - Main TenRSo library
+
+---
+
+**Status:** Alpha (production-ready internals) | **Version:** 0.1.0-rc.1 | **Tests:** 244/244 passing

@@ -1,6 +1,6 @@
 [package]
 name = "tenrso-ooc"
-version = "0.1.0-alpha.2"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -38,7 +38,7 @@ crossbeam = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
-bincode = { workspace = true, optional = true }
+oxicode = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 crc32fast.workspace = true
@@ -60,7 +60,7 @@ prometheus-metrics = ["dep:prometheus", "dep:parking_lot", "dep:lazy_static"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 mimalloc-allocator = ["dep:mimalloc"]
 lock-free = ["dep:crossbeam", "dep:dashmap", "dep:parking_lot"]
-distributed = ["dep:tonic", "dep:prost", "dep:bincode", "dep:bytes", "dep:futures", "dep:tokio", "dep:parking_lot", "lock-free"]
+distributed = ["dep:tonic", "dep:prost", "dep:oxicode", "dep:bytes", "dep:futures", "dep:tokio", "dep:parking_lot", "lock-free"]
 
 [dev-dependencies]
 criterion.workspace = true

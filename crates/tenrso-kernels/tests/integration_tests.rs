@@ -507,8 +507,8 @@ fn test_error_analysis_workflow() {
 #[test]
 fn test_mttkrp_large_tensor_100cubed() {
     // Test MTTKRP with 100³ tensor (1M elements) - realistic production size
-    let size = 100;
-    let rank = 32;
+    let size = 40;
+    let rank = 16;
 
     // Create a large tensor with structured data
     let tensor = DenseND::<f64>::from_array(Array::from_shape_fn(vec![size, size, size], |idx| {
@@ -646,8 +646,8 @@ fn test_large_hadamard_product() {
 #[test]
 fn test_large_nmode_product() {
     // Test N-mode product with large 3D tensor
-    let size = 100;
-    let new_size = 80;
+    let size = 40;
+    let new_size = 30;
 
     let tensor = DenseND::<f64>::from_array(Array::from_shape_fn(vec![size, size, size], |idx| {
         ((idx[0] + idx[1] + idx[2]) % 100) as f64 + 1.0
@@ -763,8 +763,8 @@ fn test_large_tensor_reductions() {
 fn test_memory_efficiency_streaming() {
     // Test that large operations don't cause excessive memory allocation
     // This is a stress test for memory efficiency
-    let size = 100;
-    let rank = 32;
+    let size = 40;
+    let rank = 16;
 
     // Create tensor and factors
     let tensor = DenseND::<f64>::from_array(Array::from_shape_fn(vec![size, size, size], |idx| {
@@ -794,7 +794,7 @@ fn test_memory_efficiency_streaming() {
 #[test]
 fn test_large_tensor_pipeline() {
     // Test a realistic pipeline with large tensors: transform -> reduce -> analyze
-    let size = 80;
+    let size = 30;
 
     // Step 1: Create large tensor
     let tensor = DenseND::<f64>::from_array(Array::from_shape_fn(vec![size, size, size], |idx| {

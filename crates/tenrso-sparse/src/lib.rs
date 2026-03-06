@@ -63,6 +63,7 @@ pub mod indexing;
 pub mod io;
 pub mod iterators;
 pub mod mask;
+pub mod masked_einsum;
 pub mod norms;
 pub mod ops;
 pub mod parallel;

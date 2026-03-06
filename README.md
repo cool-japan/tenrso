@@ -24,15 +24,15 @@
 
 ## Installation
 
-**Version:** 0.1.0-alpha.2
+**Version:** 0.1.0-rc.1
 
 Add TenRSo crates to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tenrso-core = "0.1.0-alpha.2"
-tenrso-exec = "0.1.0-alpha.2"
-tenrso-decomp = "0.1.0-alpha.2"
+tenrso-core = "0.1.0-rc.1"
+tenrso-exec = "0.1.0-rc.1"
+tenrso-decomp = "0.1.0-rc.1"
 ```
 
 Or use the workspace in development:
@@ -128,30 +128,33 @@ API documentation: `cargo doc --workspace --no-deps --open`
 
 ### Latest Release
 
-**What's New in 0.1.0-alpha.2:**
-- ✅ Production-ready for alpha testing
-- ✅ Comprehensive doctests in all public APIs
-- ✅ Full test suite passing with --all-targets --all-features
-- ✅ Documentation improvements across all crates
-- ✅ Zero compiler/clippy warnings
-- ✅ Ready for wider testing and feedback
+**What's New in 0.1.0-rc.1:**
+- All milestones M0-M6 complete
+- 2,109 tests passing (100% pass rate, 14 skipped)
+- TT-SVD gradient backward pass fully implemented (tenrso-ad)
+- Masked einsum and subset reductions (tenrso-sparse)
+- CP decomposition regularization (L1/L2) and cross-validation rank selection (tenrso-decomp)
+- Executor element-wise and reduction operations (tenrso-exec)
+- Zero compiler/clippy warnings, zero slow tests (>30s)
+- Test suite runtime reduced 4.8x (963s to 198s)
 
 See [CHANGELOG.md](CHANGELOG.md) for complete release notes.
 
 ## Project Status
 
-**🎉 ALPHA.2 IN PREPARATION** - **Production-Ready Quality**
+**RC.1 RELEASED** - 2026-03-06 - Production-Ready Quality
 
-| Milestone | Status | Tests |
-|-----------|--------|-------|
-| M0: Repo hygiene | ✅ Complete | - |
-| M1: Kernels | ✅ Complete | 75 |
-| M2: Decompositions | ✅ **100% Complete** | 30 |
-| M3: Sparse & Masked | ✅ Complete | 128 |
-| M4: Planner | ✅ Complete | 125 |
-| M5: Out-of-Core | ✅ Complete | 96 |
-| M6: AD hooks | ✅ Complete | 164 |
-| **Alpha.2** | 🚀 **IN PREPARATION** | **524+** |
+| Crate | Tests | Status |
+|-------|-------|--------|
+| tenrso-core | 138 | Complete |
+| tenrso-kernels | 264 | Complete |
+| tenrso-decomp | 165 | Complete |
+| tenrso-sparse | 426 | Complete |
+| tenrso-planner | 271 | Complete |
+| tenrso-ooc | 238 | Complete |
+| tenrso-exec | 244 | Complete |
+| tenrso-ad | 154 | Complete |
+| **Total** | **2,109** | **All milestones M0-M6 complete** |
 
 See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md) for details.
 

@@ -1,8 +1,8 @@
 # TenRSo TODO
 
-> **Version:** 0.1.0-alpha.2
-> **Status:** 🎉 **ALPHA.2 RELEASED** - 1,820+ library tests passing (100%)
-> **Release Date:** 2025-12-16
+> **Version:** 0.1.0-rc.1
+> **Status:** 🎉 **RC.1 RELEASED** - 2,109 tests passing (100%)
+> **Release Date:** 2026-03-06
 
 This document tracks high-level tasks across the entire TenRSo project. For crate-specific tasks, see individual `crates/*/TODO.md` files.
 
@@ -28,6 +28,25 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
 - [x] Property-based tests passing
 - [x] Integration tests passing
 - [x] Core functionality verified
+
+---
+
+## RC.1 Release Highlights (2026-03-06)
+
+### New Features
+- [x] Executor element-wise operations: ScalarOp enum, parallel_elem_op, parallel_binary_op, full_reduce (tenrso-exec)
+- [x] TT-SVD gradient backward pass: TtReconstructionGrad, compute_core_gradients, numerically verified (tenrso-ad)
+- [x] Masked einsum operations: masked_einsum, specialized kernels, subset reductions (tenrso-sparse)
+- [x] CP decomposition regularization: L1 soft-thresholding, L2/Tikhonov, cross-validation rank selection (tenrso-decomp)
+- [x] CP module refactored from monolithic cp.rs (3212 lines) into cp/ submodules (tenrso-decomp)
+
+### Quality
+- [x] Version bumped from 0.1.0-alpha.2 to 0.1.0-rc.1
+- [x] 2,109 tests passing (was 1,820+ in alpha.2), 14 skipped
+- [x] Test suite runtime reduced 4.8x (963s to 198s) — zero tests >30s
+- [x] All 8 crates production-ready
+- [x] Zero compiler/clippy warnings (all targets, all features)
+- [x] Workspace policy: all subcrates use version.workspace = true
 
 ---
 
@@ -317,23 +336,22 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
 
 ---
 
-## Current Test Status - ALPHA.1 RELEASE ✅
+## Current Test Status - RC.1 RELEASE
 
-**Total Workspace Tests:** ✅ **524/524 tests passing (100%)** 🎉
+**Total Workspace Tests:** 2,109/2,109 tests passing (100%), 14 skipped
 
-### Breakdown by Crate (Alpha.1)
+### Breakdown by Crate (RC.1)
 
-- **tenrso-core:** 57 tests (unit) ✅
-- **tenrso-kernels:** 75 tests (unit) ✅
-- **tenrso-decomp:** 30 tests (17 unit + 13 property) ✅ **ALL BUGS FIXED**
-- **tenrso-sparse:** 128 tests (unit + property) ✅
-- **tenrso-planner:** 92 tests (unit) - **M4 COMPLETE** ✅
-- **tenrso-exec:** 33 tests (unit) - **M4 COMPLETE** ✅
-- **tenrso-ad:** 13 tests (unit) - **M6 CORE COMPLETE** ✅
-- **tenrso-ooc:** 96 tests (unit) - **M5 COMPLETE** ✅
-- **Doc tests:** ~60 additional (all passing)
+- **tenrso-core:** 138 tests
+- **tenrso-kernels:** 264 tests
+- **tenrso-decomp:** 165 tests
+- **tenrso-sparse:** 426 tests
+- **tenrso-planner:** 271 tests
+- **tenrso-ooc:** 238 tests
+- **tenrso-exec:** 244 tests
+- **tenrso-ad:** 154 tests
 
-**🎉 Alpha.1 Status:** 524/524 tests passing (100%) - Zero known issues, production-ready!
+**RC.1 Status:** 2,109/2,109 tests passing (100%) — Zero known issues, all milestones M0-M6 complete!
 
 ---
 
@@ -341,11 +359,11 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
 
 ### SciRS2 Integration
 
-- [x] scirs2-core (mandatory) - ✅ Policy established
-- [ ] scirs2-linalg (SVD, QR) - ⏳ Needed for M2
-- [ ] scirs2-optimize (ALS convergence) - ⏳ Needed for M2
-- [ ] scirs2-sparse (COO/CSR) - ⏳ Needed for M3
-- [ ] scirs2-parallel (threading) - ⏳ Needed for M4
+- [x] scirs2-core (mandatory) - Policy established
+- [x] scirs2-linalg (SVD, QR) - Used in M2 decompositions
+- [x] scirs2-optimize (ALS convergence) - Used in M2 CP-ALS
+- [x] scirs2-sparse (COO/CSR) - Used in M3 sparse formats
+- [x] scirs2-parallel (threading) - Used in M4 planner/exec
 
 ### External Crates
 

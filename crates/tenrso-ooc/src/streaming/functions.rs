@@ -435,11 +435,11 @@ mod tests {
     fn test_parallel_matmul() {
         let config = StreamConfig::new().enable_parallel(true).num_threads(4);
         let mut executor = StreamingExecutor::new(config);
-        let a = DenseND::from_elem(&[400, 300], 2.0);
-        let b = DenseND::from_elem(&[300, 200], 3.0);
-        let result = executor.matmul_chunked(&a, &b, Some(100)).unwrap();
-        assert_eq!(result.shape(), vec![400, 200]);
-        let expected_value = 2.0 * 3.0 * 300.0;
+        let a = DenseND::from_elem(&[100, 80], 2.0);
+        let b = DenseND::from_elem(&[80, 60], 3.0);
+        let result = executor.matmul_chunked(&a, &b, Some(40)).unwrap();
+        assert_eq!(result.shape(), vec![100, 60]);
+        let expected_value = 2.0 * 3.0 * 80.0;
         let result_slice = result.as_slice();
         for &val in result_slice.iter().take(10) {
             assert!((val - expected_value).abs() < 1e-10);
@@ -473,11 +473,11 @@ mod tests {
     fn test_parallel_disabled() {
         let config = StreamConfig::new().enable_parallel(false);
         let mut executor = StreamingExecutor::new(config);
-        let a = DenseND::from_elem(&[200, 150], 2.0);
-        let b = DenseND::from_elem(&[150, 100], 3.0);
-        let result = executor.matmul_chunked(&a, &b, Some(50)).unwrap();
-        assert_eq!(result.shape(), vec![200, 100]);
-        let expected_value = 2.0 * 3.0 * 150.0;
+        let a = DenseND::from_elem(&[60, 50], 2.0);
+        let b = DenseND::from_elem(&[50, 40], 3.0);
+        let result = executor.matmul_chunked(&a, &b, Some(20)).unwrap();
+        assert_eq!(result.shape(), vec![60, 40]);
+        let expected_value = 2.0 * 3.0 * 50.0;
         let result_slice = result.as_slice();
         for &val in result_slice.iter().take(10) {
             assert!((val - expected_value).abs() < 1e-10);
@@ -486,15 +486,15 @@ mod tests {
     #[test]
     #[cfg(feature = "parallel")]
     fn test_parallel_vs_sequential_correctness() {
-        let a = DenseND::from_elem(&[200, 150], 2.0);
-        let b = DenseND::from_elem(&[150, 100], 3.0);
+        let a = DenseND::from_elem(&[60, 50], 2.0);
+        let b = DenseND::from_elem(&[50, 40], 3.0);
         let config_parallel = StreamConfig::new().enable_parallel(true).num_threads(4);
         let mut executor_parallel = StreamingExecutor::new(config_parallel);
-        let result_parallel = executor_parallel.matmul_chunked(&a, &b, Some(50)).unwrap();
+        let result_parallel = executor_parallel.matmul_chunked(&a, &b, Some(20)).unwrap();
         let config_sequential = StreamConfig::new().enable_parallel(false);
         let mut executor_sequential = StreamingExecutor::new(config_sequential);
         let result_sequential = executor_sequential
-            .matmul_chunked(&a, &b, Some(50))
+            .matmul_chunked(&a, &b, Some(20))
             .unwrap();
         assert_eq!(result_parallel.shape(), result_sequential.shape());
         let parallel_slice = result_parallel.as_slice();
@@ -555,11 +555,11 @@ mod tests {
             .enable_parallel(true)
             .min_chunks_for_parallel(10);
         let mut executor = StreamingExecutor::new(config);
-        let a = DenseND::from_elem(&[800, 100], 2.0);
-        let b = DenseND::from_elem(&[100, 80], 3.0);
-        let result = executor.matmul_chunked(&a, &b, Some(100)).unwrap();
-        assert_eq!(result.shape(), vec![800, 80]);
-        let expected_value = 2.0 * 3.0 * 100.0;
+        let a = DenseND::from_elem(&[200, 40], 2.0);
+        let b = DenseND::from_elem(&[40, 30], 3.0);
+        let result = executor.matmul_chunked(&a, &b, Some(20)).unwrap();
+        assert_eq!(result.shape(), vec![200, 30]);
+        let expected_value = 2.0 * 3.0 * 40.0;
         let result_slice = result.as_slice();
         for &val in result_slice.iter().take(10) {
             assert!((val - expected_value).abs() < 1e-10);

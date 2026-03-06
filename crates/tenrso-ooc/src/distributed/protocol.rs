@@ -1,6 +1,6 @@
 //! Protocol definitions for distributed chunk communication.
 //!
-//! Uses bincode for efficient binary serialization.
+//! Uses oxicode for efficient binary serialization.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -320,10 +320,10 @@ mod tests {
     #[test]
     fn test_chunk_request_serialization() {
         let req = ChunkRequest::new("chunk_123".to_string(), NodeId(42));
-        let bincode_config = bincode::config::standard();
-        let serialized = bincode::serde::encode_to_vec(&req, bincode_config).unwrap();
+        let oxicode_config = oxicode::config::standard();
+        let serialized = oxicode::serde::encode_to_vec(&req, oxicode_config).unwrap();
         let (deserialized, _): (ChunkRequest, usize) =
-            bincode::serde::decode_from_slice(&serialized, bincode_config).unwrap();
+            oxicode::serde::decode_from_slice(&serialized, oxicode_config).unwrap();
 
         assert_eq!(req.chunk_id, deserialized.chunk_id);
         assert_eq!(req.requester, deserialized.requester);

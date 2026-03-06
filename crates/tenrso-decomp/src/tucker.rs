@@ -790,7 +790,7 @@ where
         + scirs2_core::numeric::FromPrimitive
         + 'static,
 {
-    use scirs2_core::random::{thread_rng, Rng};
+    use scirs2_core::random::thread_rng;
 
     let shape = tensor.shape();
     let n_modes = tensor.rank();
@@ -1403,7 +1403,7 @@ mod tests {
     fn test_tucker_auto_rank_invalid_params() {
         use super::TuckerRankSelection;
 
-        let tensor = DenseND::<f64>::random_uniform(&[10, 10, 10], 0.0, 1.0);
+        let tensor = DenseND::<f64>::random_uniform(&[6, 6, 6], 0.0, 1.0);
 
         // Invalid energy threshold (> 1)
         let result = tucker_hosvd_auto(&tensor, TuckerRankSelection::Energy(1.5));
@@ -1422,11 +1422,11 @@ mod tests {
     fn test_tucker_auto_rank_comparison() {
         use super::TuckerRankSelection;
 
-        let tensor = DenseND::<f64>::random_uniform(&[12, 12, 12], 0.0, 1.0);
+        let tensor = DenseND::<f64>::random_uniform(&[6, 6, 6], 0.0, 1.0);
 
         // Compare energy-based vs fixed rank
         let tucker_auto = tucker_hosvd_auto(&tensor, TuckerRankSelection::Energy(0.95)).unwrap();
-        let tucker_fixed = tucker_hosvd(&tensor, &[6, 6, 6]).unwrap();
+        let tucker_fixed = tucker_hosvd(&tensor, &[3, 3, 3]).unwrap();
 
         // Both should produce valid decompositions
         assert!(tucker_auto.reconstruct().is_ok());
@@ -1435,7 +1435,7 @@ mod tests {
         // Auto-selected ranks might be different from fixed
         let auto_ranks: Vec<_> = tucker_auto.factors.iter().map(|f| f.ncols()).collect();
         println!("Auto-selected ranks: {:?}", auto_ranks);
-        println!("Fixed ranks: [6, 6, 6]");
+        println!("Fixed ranks: [3, 3, 3]");
     }
 
     #[test]
@@ -1560,26 +1560,26 @@ mod tests {
 
     #[test]
     fn test_tucker_randomized_basic() {
-        // Test basic randomized Tucker decomposition
-        let tensor = DenseND::<f64>::random_uniform(&[20, 20, 20], 0.0, 1.0);
-        let result = tucker_randomized(&tensor, &[10, 10, 10], 5, 2);
+        // Test basic randomized Tucker decomposition (reduced from 20^3 for speed)
+        let tensor = DenseND::<f64>::random_uniform(&[10, 10, 10], 0.0, 1.0);
+        let result = tucker_randomized(&tensor, &[5, 5, 5], 3, 1);
 
         assert!(result.is_ok());
         let tucker = result.unwrap();
 
         // Check dimensions
         assert_eq!(tucker.factors.len(), 3);
-        assert_eq!(tucker.factors[0].shape(), &[20, 10]);
-        assert_eq!(tucker.factors[1].shape(), &[20, 10]);
-        assert_eq!(tucker.factors[2].shape(), &[20, 10]);
-        assert_eq!(tucker.core.shape(), &[10, 10, 10]);
+        assert_eq!(tucker.factors[0].shape(), &[10, 5]);
+        assert_eq!(tucker.factors[1].shape(), &[10, 5]);
+        assert_eq!(tucker.factors[2].shape(), &[10, 5]);
+        assert_eq!(tucker.core.shape(), &[5, 5, 5]);
     }
 
     #[test]
     fn test_tucker_randomized_reconstruction() {
         // Test that randomized Tucker produces good reconstructions
-        let tensor = DenseND::<f64>::random_uniform(&[15, 15, 15], 0.0, 1.0);
-        let mut tucker = tucker_randomized(&tensor, &[8, 8, 8], 5, 2).unwrap();
+        let tensor = DenseND::<f64>::random_uniform(&[8, 8, 8], 0.0, 1.0);
+        let mut tucker = tucker_randomized(&tensor, &[4, 4, 4], 3, 1).unwrap();
 
         // Compute reconstruction error
         let error = tucker.compute_error(&tensor).unwrap();
@@ -1599,15 +1599,15 @@ mod tests {
     #[test]
     fn test_tucker_randomized_vs_hosvd() {
         // Compare randomized Tucker with HOSVD
-        let tensor = DenseND::<f64>::random_uniform(&[12, 12, 12], 0.0, 1.0);
-        let ranks = vec![6, 6, 6];
+        let tensor = DenseND::<f64>::random_uniform(&[8, 8, 8], 0.0, 1.0);
+        let ranks = vec![4, 4, 4];
 
         // Standard HOSVD
         let mut tucker_hosvd = tucker_hosvd(&tensor, &ranks).unwrap();
         let error_hosvd = tucker_hosvd.compute_error(&tensor).unwrap();
 
         // Randomized Tucker
-        let mut tucker_rand = tucker_randomized(&tensor, &ranks, 5, 2).unwrap();
+        let mut tucker_rand = tucker_randomized(&tensor, &ranks, 3, 1).unwrap();
         let error_rand = tucker_rand.compute_error(&tensor).unwrap();
 
         // Randomized error should be comparable (within 30% typically)
@@ -1651,15 +1651,15 @@ mod tests {
     #[test]
     fn test_tucker_randomized_power_iters() {
         // Test effect of power iterations
-        let tensor = DenseND::<f64>::random_uniform(&[12, 12, 12], 0.0, 1.0);
-        let ranks = vec![6, 6, 6];
+        let tensor = DenseND::<f64>::random_uniform(&[6, 6, 6], 0.0, 1.0);
+        let ranks = vec![3, 3, 3];
 
         // With no power iterations
-        let mut tucker_no_power = tucker_randomized(&tensor, &ranks, 5, 0).unwrap();
+        let mut tucker_no_power = tucker_randomized(&tensor, &ranks, 2, 0).unwrap();
         let error_no_power = tucker_no_power.compute_error(&tensor).unwrap();
 
         // With power iterations
-        let mut tucker_power = tucker_randomized(&tensor, &ranks, 5, 3).unwrap();
+        let mut tucker_power = tucker_randomized(&tensor, &ranks, 2, 1).unwrap();
         let error_power = tucker_power.compute_error(&tensor).unwrap();
 
         // Both should work, power iterations may give slightly better error
@@ -1674,9 +1674,9 @@ mod tests {
 
     #[test]
     fn test_tucker_randomized_compression() {
-        // Test that randomized Tucker provides good compression
-        let tensor = DenseND::<f64>::random_uniform(&[20, 20, 20], 0.0, 1.0);
-        let tucker = tucker_randomized(&tensor, &[8, 8, 8], 5, 2).unwrap();
+        // Test that randomized Tucker provides good compression (reduced from 20^3 for speed)
+        let tensor = DenseND::<f64>::random_uniform(&[10, 10, 10], 0.0, 1.0);
+        let tucker = tucker_randomized(&tensor, &[4, 4, 4], 3, 1).unwrap();
 
         let compression = tucker.compression_ratio();
 

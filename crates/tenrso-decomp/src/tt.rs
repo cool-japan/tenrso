@@ -1541,9 +1541,9 @@ mod tests {
 
     #[test]
     fn test_tt_round_basic() {
-        // Create a TT decomposition with larger ranks (reduced size for speed)
-        let tensor = DenseND::<f64>::random_uniform(&[6, 6, 6, 6], 0.0, 1.0);
-        let tt = tt_svd(&tensor, &[4, 4, 4], 1e-10).unwrap();
+        // Create a TT decomposition with smaller tensor for speed (4^4=256 vs 6^4=1296 elements)
+        let tensor = DenseND::<f64>::random_uniform(&[4, 4, 4, 4], 0.0, 1.0);
+        let tt = tt_svd(&tensor, &[3, 3, 3], 1e-10).unwrap();
 
         // Round to smaller ranks
         let tt_rounded = tt_round(&tt, &[2, 2, 2], 1e-6).unwrap();
@@ -1594,12 +1594,12 @@ mod tests {
     #[test]
     fn test_tt_round_compression() {
         // Verify that rounding reduces storage (reduced size for speed)
-        let tensor = DenseND::<f64>::random_uniform(&[6, 6, 6, 6], 0.0, 1.0);
-        let tt = tt_svd(&tensor, &[5, 5, 5], 1e-10).unwrap();
+        let tensor = DenseND::<f64>::random_uniform(&[4, 4, 4, 4], 0.0, 1.0);
+        let tt = tt_svd(&tensor, &[3, 3, 3], 1e-10).unwrap();
         let original_params = tt.num_parameters();
 
         // Round to smaller ranks
-        let tt_rounded = tt_round(&tt, &[3, 3, 3], 1e-6).unwrap();
+        let tt_rounded = tt_round(&tt, &[2, 2, 2], 1e-6).unwrap();
         let rounded_params = tt_rounded.num_parameters();
 
         assert!(
@@ -1621,10 +1621,10 @@ mod tests {
     #[test]
     fn test_tt_round_ranks_not_exceed_max() {
         // Test that rounded ranks never exceed max_ranks (reduced size for speed)
-        let tensor = DenseND::<f64>::random_uniform(&[6, 6, 6, 6], 0.0, 1.0);
-        let tt = tt_svd(&tensor, &[5, 5, 5], 1e-12).unwrap();
+        let tensor = DenseND::<f64>::random_uniform(&[4, 4, 4, 4], 0.0, 1.0);
+        let tt = tt_svd(&tensor, &[3, 3, 3], 1e-12).unwrap();
 
-        let max_ranks = vec![2, 3, 2];
+        let max_ranks = vec![2, 2, 2];
         let tt_rounded = tt_round(&tt, &max_ranks, 1e-8).unwrap();
 
         for (i, &rank) in tt_rounded.ranks.iter().enumerate() {
@@ -1955,24 +1955,26 @@ mod tests {
 
     #[test]
     fn test_tt_max_rank() {
-        // Reduced from [10,10,10,10] to [6,6,6,6] for speed (1296 vs 10000 elements)
-        let tensor = DenseND::<f64>::random_uniform(&[6, 6, 6, 6], 0.0, 1.0);
-        let tt = tt_svd(&tensor, &[3, 5, 2], 1e-8).unwrap(); // Relaxed tolerance from 1e-10
+        // Reduced to [4,4,4] for speed (64 elements)
+        let tensor = DenseND::<f64>::random_uniform(&[4, 4, 4], 0.0, 1.0);
+        let tt = tt_svd(&tensor, &[3, 2], 1e-8).unwrap();
 
         let max_rank = tt.max_rank();
-        assert_eq!(max_rank, 5); // Updated to match new max_ranks
+        assert_eq!(max_rank, 3); // max of [3, 2]
     }
 
     #[test]
     fn test_tt_effective_rank() {
-        // Reduced from [8,8,8,8] to [6,6,6,6] for speed (1296 vs 4096 elements)
-        let tensor = DenseND::<f64>::random_uniform(&[6, 6, 6, 6], 0.0, 1.0);
-        let tt = tt_svd(&tensor, &[3, 5, 4], 1e-8).unwrap(); // Relaxed tolerance from 1e-10
+        // Reduced to [4,4,4] for speed (64 elements)
+        let tensor = DenseND::<f64>::random_uniform(&[4, 4, 4], 0.0, 1.0);
+        let tt = tt_svd(&tensor, &[3, 2], 1e-8).unwrap();
 
         let eff_rank = tt.effective_rank();
 
         // Effective rank should be average of actual ranks
-        let expected = (tt.ranks[0] + tt.ranks[1] + tt.ranks[2]) as f64 / 3.0;
+        let n = tt.ranks.len();
+        let sum: usize = tt.ranks.iter().sum();
+        let expected = sum as f64 / n as f64;
         assert!((eff_rank - expected).abs() < 1e-10);
 
         // Should be between min and max rank

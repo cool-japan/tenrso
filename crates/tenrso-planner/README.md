@@ -14,30 +14,39 @@ Part of the [TenRSo](https://github.com/cool-japan/tenrso) tensor computing stac
 
 ## Features
 
-✅ **6 Planning Algorithms**
+**6 Planning Algorithms**
 - Greedy heuristic (O(n³))
 - Beam search with configurable width
-- Dynamic programming (optimal for n ≤ 20)
+- Dynamic programming (optimal for n <= 20)
 - Simulated annealing
 - Genetic algorithm (evolutionary search)
 - Adaptive planner (auto-selects best algorithm)
 
-✅ **Cost Modeling**
+**Cost Modeling**
 - FLOPs estimation for dense and sparse operations
 - Memory usage prediction
 - Sparsity-aware cost models
+- ML-based cost models (linear + polynomial regression)
 
-✅ **Representation Selection**
+**Representation Selection**
 - Automatic dense/sparse/low-rank format selection
 - Conversion cost estimation
 
-✅ **Cache-Aware Tiling**
+**Cache-Aware Tiling**
 - L1/L2/L3 cache optimization
 - Multi-level blocking strategies
 - Memory budget constraints
 
-✅ **Production Ready**
-- 144 comprehensive tests (136 unit + 8 doc)
+**Plan Management**
+- Plan caching (LRU/LFU/ARC eviction policies)
+- Plan profiling and execution time tracking
+- Parallel planning support
+- Plan comparison and analysis
+- Plan refinement via local search
+- Serialization/deserialization (optional `serde` feature)
+
+**Production Ready**
+- 271 comprehensive tests (100% passing)
 - 14 benchmark suites
 - 4 detailed examples
 - Full rustdoc coverage
@@ -48,14 +57,14 @@ Part of the [TenRSo](https://github.com/cool-japan/tenrso) tensor computing stac
 
 ```toml
 [dependencies]
-tenrso-planner = "0.1.0-alpha.1"
+tenrso-planner = "0.1.0-rc.1"
 ```
 
 ### Optional Features
 
 ```toml
 [dependencies]
-tenrso-planner = { version = "0.1.0-alpha.1", features = ["serde"] }
+tenrso-planner = { version = "0.1.0-rc.1", features = ["serde"] }
 ```
 
 - `serde`: Enable serialization/deserialization of plans
@@ -83,7 +92,7 @@ println!("Contraction steps: {}", plan.nodes.len());
 
 ## Planning Algorithms
 
-### 1. Adaptive Planner (⭐ Recommended)
+### 1. Adaptive Planner (Recommended)
 
 Automatically selects the best algorithm based on problem characteristics:
 
@@ -101,8 +110,8 @@ let plan = planner.make_plan(
 ```
 
 **Algorithm Selection:**
-- Small networks (n ≤ 5): DP (optimal)
-- Medium networks (5 < n ≤ 20): Beam Search or DP
+- Small networks (n <= 5): DP (optimal)
+- Medium networks (5 < n <= 20): Beam Search or DP
 - Large networks (n > 20): Greedy, SA, or GA based on time budget
 
 ### 2. Greedy Planner
@@ -132,7 +141,7 @@ let plan = planner.make_plan(spec, shapes, hints)?;
 ```
 
 **When to use:** Medium networks (8-20 tensors), better quality than greedy
-**Complexity:** O(n³ × k) where k is beam width
+**Complexity:** O(n³ x k) where k is beam width
 **Quality:** Better (often within 1.5-2x of optimal)
 
 ### 4. Dynamic Programming Planner
@@ -146,8 +155,8 @@ let planner = DPPlanner::new();
 let plan = planner.make_plan(spec, shapes, hints)?;
 ```
 
-**When to use:** Small networks (≤ 20 tensors), need provably optimal plan
-**Complexity:** O(3ⁿ) time, O(2ⁿ) space
+**When to use:** Small networks (<= 20 tensors), need provably optimal plan
+**Complexity:** O(3^n) time, O(2^n) space
 **Quality:** Optimal (guarantees minimum FLOPs)
 
 ### 5. Simulated Annealing Planner
@@ -166,7 +175,7 @@ let plan = planner.make_plan(spec, shapes, hints)?;
 ```
 
 **When to use:** Large networks (> 20 tensors), quality more important than speed
-**Complexity:** O(iterations × n) time
+**Complexity:** O(iterations x n) time
 **Quality:** Variable (can escape local minima)
 
 ### 6. Genetic Algorithm Planner
@@ -187,7 +196,7 @@ let plan = planner.make_plan(spec, shapes, hints)?;
 ```
 
 **When to use:** Very large networks (> 20 tensors), complex topologies
-**Complexity:** O(generations × population × n³)
+**Complexity:** O(generations x population x n³)
 **Quality:** High (can find near-optimal solutions for complex problems)
 
 ## Planner Comparison
@@ -196,10 +205,10 @@ let plan = planner.make_plan(spec, shapes, hints)?;
 |-----------|------|-------|---------|----------|
 | **Greedy** | O(n³) | O(n) | Good | General purpose, fast |
 | **Beam Search** | O(n³k) | O(kn) | Better | Medium networks |
-| **DP** | O(3ⁿ) | O(2ⁿ) | Optimal | n ≤ 20 |
-| **Simulated Annealing** | O(iter·n) | O(n) | Variable | Large, quality focus |
-| **Genetic Algorithm** | O(gen·pop·n³) | O(pop·n) | High | Very large, complex |
-| **Adaptive** | Varies | Varies | Auto | All cases ⭐ |
+| **DP** | O(3^n) | O(2^n) | Optimal | n <= 20 |
+| **Simulated Annealing** | O(iter*n) | O(n) | Variable | Large, quality focus |
+| **Genetic Algorithm** | O(gen*pop*n³) | O(pop*n) | High | Very large, complex |
+| **Adaptive** | Varies | Varies | Auto | All cases |
 
 ## Examples
 
@@ -264,6 +273,10 @@ let plan = greedy_planner(&spec, &shapes, &hints)?;
 let refined = refine_plan(&plan, &spec, &shapes, &hints, 100)?;
 ```
 
+### ML-Based Cost Models
+
+Linear and polynomial regression cost models for improved FLOPs and memory estimation based on learned patterns from past executions.
+
 ### Serialization (with `serde` feature)
 
 ```rust
@@ -285,8 +298,8 @@ Planning overhead is typically negligible compared to execution:
 ```
 Network Size | Greedy | Beam(k=5) | DP    | SA     | GA
 -------------|--------|-----------|-------|--------|--------
-3 tensors    | 100μs  | 500μs     | 1ms   | 10ms   | 50ms
-5 tensors    | 200μs  | 1ms       | 10ms  | 20ms   | 100ms
+3 tensors    | 100us  | 500us     | 1ms   | 10ms   | 50ms
+5 tensors    | 200us  | 1ms       | 10ms  | 20ms   | 100ms
 10 tensors   | 1ms    | 5ms       | 1s    | 50ms   | 200ms
 20 tensors   | 10ms   | 50ms      | N/A   | 100ms  | 500ms
 ```
@@ -304,7 +317,7 @@ cargo test --package tenrso-planner -- --nocapture
 cargo test --package tenrso-planner test_ga_planner_struct
 ```
 
-**Test Coverage:** 144 tests (136 unit + 8 doc), 100% passing
+**Test Coverage:** 271 tests, 100% passing
 
 ## Documentation
 
@@ -338,4 +351,4 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](../../LICENSE) for
 
 ---
 
-**Status:** ✅ Production-ready • **Version:** 0.1.0-alpha.1 • **Tests:** 144/144 passing
+**Status:** Alpha (production-ready internals) | **Version:** 0.1.0-rc.1 | **Tests:** 271/271 passing
