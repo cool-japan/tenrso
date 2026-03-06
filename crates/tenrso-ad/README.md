@@ -1,10 +1,10 @@
 # tenrso-ad
 
-**Production-Grade Automatic Differentiation for TenRSo**
-
-[![Tests](https://img.shields.io/badge/tests-114%2F114%20passing-brightgreen)](https://github.com/cool-japan/tenrso)
+[![Tests](https://img.shields.io/badge/tests-154%2F154%20passing-brightgreen)](https://github.com/cool-japan/tenrso)
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/cool-japan/tenrso)
-[![Version](https://img.shields.io/badge/version-0.1.0--alpha.2-blue)](https://github.com/cool-japan/tenrso)
+[![Version](https://img.shields.io/badge/version-0.1.0--rc.1-blue)](https://github.com/cool-japan/tenrso)
+
+**Production-Grade Automatic Differentiation for TenRSo**
 
 Advanced automatic differentiation with custom VJP rules, decomposition gradients, gradient checkpointing, Hessian computation, sparse gradient support, and mixed precision training.
 
@@ -14,19 +14,22 @@ Advanced automatic differentiation with custom VJP rules, decomposition gradient
 
 - **Custom VJP rules** - Vector-Jacobian Products for tensor contractions, avoiding AD tape blow-up
 - **Decomposition gradients** - Backpropagation through CP, Tucker, and TT decompositions
-- **Gradient checkpointing** ✨ NEW - Trade computation for memory (O(n) → O(√n))
-- **Higher-order derivatives** ✨ NEW - Hessian-vector products and Newton's method
-- **Sparse gradients** ✨ NEW - Up to 98% memory savings for sparse gradients
+- **Gradient checkpointing** - Trade computation for memory (O(n) -> O(sqrt(n)))
+- **Higher-order derivatives** - Hessian-vector products and Newton's method
+- **Sparse gradients** - Up to 98% memory savings for sparse gradients
+- **Mixed precision** - FP16/BF16 with automatic loss scaling
+- **Graph-based AD** - PyTorch-style dynamic computation graphs
+- **Gradient monitoring** - Vanishing/exploding gradient detection
+- **Optimizers & LR schedulers** - SGD, Adam, AdamW, RMSprop, AdaGrad
 - **Parallel execution** - Multi-threaded gradient computation with configurable thread pools
 - **Integration hooks** - Connect to external AD frameworks
-- **Gradient verification** - Finite difference checking with configurable tolerances
 
 ## Features
 
 ### Core AD Capabilities
 
 - **Einsum VJP**: Automatic adjoint generation for generalized tensor contractions
-  - ✅ **NEW**: Special handling for scalar outputs (inner products, norms)
+  - Special handling for scalar outputs (inner products, norms)
   - Automatic adjoint spec generation for complex contractions
   - Zero tape overhead for backward pass
 - **Element-wise VJP**: Gradients for unary/binary operations with custom derivatives
@@ -35,38 +38,56 @@ Advanced automatic differentiation with custom VJP rules, decomposition gradient
 - **Tucker-HOOI gradients**: Core and factor matrix gradients via mode-n products
 - **TT-SVD gradients**: Efficient gradients through Tensor Train cores
 
-### Advanced Features ✨ NEW
+### Gradient Checkpointing
 
-- **Gradient Checkpointing**: Memory-efficient training via selective recomputation
-  - Configurable strategies: Uniform, MemoryAware, All, None
-  - Reduces memory from O(n) to O(√n) for deep networks
-  - Example: 50-layer network saves 60-90% memory
+Memory-efficient training via selective recomputation:
+- Configurable strategies: Uniform, MemoryAware, All, None
+- Reduces memory from O(n) to O(sqrt(n)) for deep networks
+- Example: 50-layer network saves 60-90% memory
 
-- **Higher-Order Derivatives**: Hessian computation and second-order optimization
-  - Hessian-vector products in O(n) time (no full Hessian materialization)
-  - Diagonal Hessian for preconditioning
-  - Support for Newton's method (10× faster convergence)
+### Higher-Order Derivatives
 
-- **Sparse Gradients**: Efficient handling of highly sparse gradients
-  - COO format sparse representation
-  - Automatic dense/sparse format selection
-  - Memory savings up to 98% for 99% sparse gradients
-  - Gradient compression to target sparsity
+Hessian computation and second-order optimization:
+- Hessian-vector products in O(n) time (no full Hessian materialization)
+- Diagonal Hessian for preconditioning
+- Support for Newton's method (10x faster convergence)
 
-### Performance Features
+### Sparse Gradients
 
-- **Parallel gradients**: Rayon-based parallelization with automatic fallback
-- **Memory optimization**: Smart tensor storage with Arc-based sharing
-- **Gradient utilities**: Statistics, clipping, normalization, sanitization
-- **Gradient checking**: Central/forward finite differences with detailed diagnostics
-- **Optimizers**: SGD, Adam, AdamW, RMSprop, AdaGrad with momentum and weight decay
-- **LR Schedulers**: StepLR, ExponentialLR, CosineAnnealing, ReduceLROnPlateau
+Efficient handling of highly sparse gradients:
+- COO format sparse representation
+- Automatic dense/sparse format selection
+- Memory savings up to 98% for 99% sparse gradients
+- Gradient compression to target sparsity
+
+### Mixed Precision Training
+
+- FP16 and BF16 gradient computation
+- Automatic loss scaling to prevent underflow
+- Configurable scale factor growth and decay
+
+### Graph-Based AD (PyTorch-style)
+
+- Dynamic computation graphs
+- Graph optimization passes: operation fusion, dead code elimination, memory planning
+- Eager execution with gradient accumulation
+
+### Gradient Monitoring
+
+- Vanishing gradient detection (configurable thresholds)
+- Exploding gradient detection
+- Gradient health statistics and reporting
+
+### Optimizers & LR Schedulers
+
+**Optimizers:** SGD (with momentum), Adam, AdamW, RMSprop, AdaGrad
+**Schedulers:** StepLR, ExponentialLR, CosineAnnealing, ReduceLROnPlateau
 
 ## Installation
 
 ```toml
 [dependencies]
-tenrso-ad = "0.1.0-alpha.2"
+tenrso-ad = "0.1.0-rc.1"
 ```
 
 ## Quick Start
@@ -85,13 +106,13 @@ let a = DenseND::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?;
 let b = DenseND::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2])?;
 let c = execute_dense_contraction(&spec, &a, &b)?;
 
-// Backward: compute ∂L/∂A and ∂L/∂B
+// Backward: compute dL/dA and dL/dB
 let grad_c = DenseND::ones(c.shape());
 let vjp = EinsumVjp::new(spec, a.clone(), b.clone());
 let grads = vjp.vjp(&grad_c)?;
 ```
 
-### Gradient Checkpointing ✨ NEW
+### Gradient Checkpointing
 
 ```rust
 use tenrso_ad::checkpoint::{CheckpointedSequence, CheckpointConfig, ElementwiseOp};
@@ -104,21 +125,18 @@ let config = CheckpointConfig {
 };
 
 let mut sequence = CheckpointedSequence::new(config);
-
-// Add operations to sequence
 sequence.add_operation(Arc::new(ElementwiseOp::new(
     |x: &f64| x * 2.0,    // Forward
     |_: &f64| 2.0,        // Derivative
 )));
 
-// Forward pass stores only checkpoints
+// Forward pass stores only checkpoints — O(sqrt(n)) memory
 let output = sequence.forward(&input)?;
-
 // Backward pass recomputes intermediate values
-// Memory: O(√n) instead of O(n)
+let grad = sequence.backward(&grad_output)?;
 ```
 
-### Hessian Computation ✨ NEW
+### Hessian Computation
 
 ```rust
 use tenrso_ad::hessian::{hessian_vector_product, compute_hessian_diagonal};
@@ -129,32 +147,27 @@ let hv = hessian_vector_product(&function, &x, &v, epsilon)?;
 // Diagonal of Hessian for preconditioning
 let diag = compute_hessian_diagonal(&function, &x, epsilon)?;
 
-// Use for Newton's method optimization
+// Newton's method optimization
 for _ in 0..iterations {
     let grad = function.grad(&x)?;
     let hess_diag = compute_hessian_diagonal(&function, &x, epsilon)?;
-
-    // Newton update: x -= H^{-1} * grad ≈ grad / diag(H)
     x = update_with_diagonal(&x, &grad, &hess_diag);
 }
 ```
 
-### Sparse Gradients ✨ NEW
+### Sparse Gradients
 
 ```rust
 use tenrso_ad::sparse_grad::{SparseGradient, SparsityConfig};
 
-// Automatic format selection based on sparsity
 let config = SparsityConfig {
     auto_sparse_threshold: 0.5,  // Use sparse if >50% zeros
     ..Default::default()
 };
 
 let grad = SparseGradient::from_dense_auto(&dense_grad, &config)?;
-
-// Memory comparison:
-// Dense: 1M parameters × 8 bytes = 7.63 MB
-// Sparse (99% zeros): 10K nonzeros × 16 bytes = 0.15 MB
+// Dense: 1M parameters x 8 bytes = 7.63 MB
+// Sparse (99% zeros): 10K nonzeros x 16 bytes = 0.15 MB
 // Savings: 98%
 
 // Gradient compression to target sparsity
@@ -188,6 +201,20 @@ let config = ParallelConfig {
 let grad = parallel_elementwise_vjp(&x, &cotangent, |x| 2.0 * x, &config)?;
 ```
 
+### Graph-Based AD
+
+```rust
+use tenrso_ad::graph::{ComputationGraph, Variable};
+
+let mut graph = ComputationGraph::new();
+let x = graph.variable("x", initial_value)?;
+let y = graph.matmul(&x, &weights)?;
+let loss = graph.reduce_sum(&y, None)?;
+
+graph.backward(&loss)?;
+let grad_x = graph.gradient(&x)?;
+```
+
 ## Examples
 
 Comprehensive examples demonstrating all features:
@@ -203,8 +230,8 @@ Comprehensive examples demonstrating all features:
 - **`sparse_gradients.rs`** - Large-scale sparse gradient handling
 - **`mixed_precision_training.rs`** - FP16/BF16 with automatic loss scaling
 - **`gradient_monitoring.rs`** - Vanishing/exploding gradient detection
-- **`optimizers_showcase.rs`** - Complete optimizer and scheduler demonstrations (10 examples)
-- **`graph_based_ad.rs`** - PyTorch-style dynamic computation graphs ✨ **NEW**
+- **`optimizers_showcase.rs`** - Complete optimizer and scheduler demonstrations
+- **`graph_based_ad.rs`** - PyTorch-style dynamic computation graphs
 
 ```bash
 cargo run --example gradient_checkpointing
@@ -218,11 +245,11 @@ cargo run --example graph_based_ad
 
 ## Testing
 
-Comprehensive test suite with **100% pass rate (154/154 tests)**: ⬆️ **+40 tests**
+Comprehensive test suite with **100% pass rate (154/154 tests)**:
 
 - **Unit tests** (134): Core VJP, gradient, checkpointing, Hessian, sparse, mixed precision, monitoring, optimizers, graph, graph optimizer, storage, utilities
 - **Integration tests** (10): End-to-end workflows including edge cases
-- **Property tests** (10/10): Mathematical properties via proptest ✨ **ALL PASSING**
+- **Property tests** (10): Mathematical properties via proptest
 
 ```bash
 cargo test                             # All tests
@@ -233,8 +260,8 @@ cargo bench --bench graph_benchmarks   # Graph-based AD benchmarks
 
 ### Test Breakdown
 
-- `graph.rs`: 15 tests ✨ **NEW** (computation graph, dynamic AD)
-- `graph_optimizer.rs`: 12 tests ✨ **NEW** (operation fusion, DCE, memory planning)
+- `graph.rs`: 15 tests (computation graph, dynamic AD)
+- `graph_optimizer.rs`: 12 tests (operation fusion, DCE, memory planning)
 - `monitoring.rs`: 15 tests (gradient health tracking)
 - `mixed_precision.rs`: 14 tests (FP16/BF16 training)
 - `sparse_grad.rs`: 13 tests (sparse gradient handling)
@@ -266,7 +293,7 @@ cargo bench --bench graph_benchmarks   # Graph-based AD benchmarks
 | `tucker_reconstruction_grad` | Tucker gradients | core 4-16 | Multi-mode products |
 | `gradcheck` | Finite differences | 10-30 | Verification overhead |
 
-**Graph Benchmarks** (`graph_benchmarks`) ✨ NEW:
+**Graph Benchmarks** (`graph_benchmarks`):
 | Benchmark | Operation | Size Range | Purpose |
 |-----------|-----------|------------|---------|
 | `graph_arithmetic` | Basic ops | 100-10K elements | Arithmetic operation overhead |
@@ -290,10 +317,10 @@ cargo bench --bench graph_benchmarks   # Graph-based AD benchmarks
 
 | Feature | Workload | Speedup |
 |---------|----------|---------|
-| Parallel VJP | 1M elements, 8 cores | 3-4× |
-| Parallel accumulation | Multiple gradients | 5-8× |
-| Hessian diagonal | vs full Hessian | 100-1000× |
-| Newton's method | vs gradient descent | 10× fewer iterations |
+| Parallel VJP | 1M elements, 8 cores | 3-4x |
+| Parallel accumulation | Multiple gradients | 5-8x |
+| Hessian diagonal | vs full Hessian | 100-1000x |
+| Newton's method | vs gradient descent | 10x fewer iterations |
 
 ## Architecture
 
@@ -301,8 +328,8 @@ cargo bench --bench graph_benchmarks   # Graph-based AD benchmarks
 tenrso-ad/
 ├── vjp.rs              # VJP rules (einsum, element-wise, reductions)
 ├── grad.rs             # Decomposition gradients (CP, Tucker, TT)
-├── graph.rs            # Graph-based AD (PyTorch-style) ✨ NEW
-├── graph_optimizer.rs  # Graph optimization passes ✨ NEW
+├── graph.rs            # Graph-based AD (PyTorch-style)
+├── graph_optimizer.rs  # Graph optimization passes
 ├── checkpoint.rs       # Gradient checkpointing
 ├── hessian.rs          # Higher-order derivatives
 ├── sparse_grad.rs      # Sparse gradient support
@@ -316,86 +343,20 @@ tenrso-ad/
 └── utils.rs            # Gradient manipulation utilities
 ```
 
-## Design Principles
-
-1. **Custom VJP rules** - Hand-crafted gradients avoid AD tape blow-up
-2. **Memory efficiency** - Checkpointing, sparse formats, smart storage
-3. **Composability** - VJP operations chain naturally
-4. **Correctness** - All gradients verified with finite differences
-5. **Performance** - Parallel execution, SIMD acceleration
-6. **Flexibility** - Support for first and second-order methods
-
 ## SciRS2 Policy
 
 **100% compliant** - All operations use `scirs2-core` for scientific computing:
 
 ```rust
-// ✅ REQUIRED
+// REQUIRED
 use scirs2_core::ndarray_ext::Array;
 use scirs2_core::random::thread_rng;
 use scirs2_core::numeric::Float;
 
-// ❌ FORBIDDEN
-use ndarray::Array;  // Never import directly
-use rand::thread_rng;  // Never import directly
+// FORBIDDEN
+use ndarray::Array;   // Never import directly
+use rand::thread_rng; // Never import directly
 ```
-
-Verification:
-```bash
-grep -r "use ndarray::" src/  # ✅ No matches
-grep -r "use rand::" src/     # ✅ No matches
-```
-
-## Status
-
-**✅ PRODUCTION READY** - Fully Enhanced (2025-12-07)
-
-### Completed Features
-- ✅ All core VJP rules implemented
-- ✅ All decomposition gradients working
-- ✅ **Graph-based AD with dynamic computation graphs** ✨ NEW
-- ✅ **Graph optimization passes (fusion, DCE, memory planning)** ✨ NEW
-- ✅ Gradient checkpointing operational
-- ✅ Hessian computation implemented
-- ✅ Sparse gradient support complete
-- ✅ Mixed precision training (FP16/BF16 with automatic loss scaling)
-- ✅ Gradient monitoring & analysis (vanishing/exploding detection)
-- ✅ Optimizers and LR schedulers (SGD, Adam, AdamW, RMSprop, AdaGrad)
-- ✅ Parallel computation support
-- ✅ Memory-optimized storage system
-- ✅ Gradient manipulation utilities
-- ✅ Comprehensive test suite (154/154 passing)
-- ✅ Property-based testing (10/10 passing)
-- ✅ Performance benchmarks (15 benchmarks)
-- ✅ Integration hooks (GenericAdAdapter)
-- ⏳ Tensorlogic integration (awaiting API)
-
-### Quality Metrics
-- **Lines of Code**: 8,927 (source), 13,161 (total)
-- **Test Coverage**: 100% pass rate (154/154 tests)
-- **Documentation**: 1,856+ lines of docs
-- **Examples**: 10 comprehensive examples
-- **Benchmarks**: 15 performance benchmarks (7 VJP/decomp + 8 graph)
-
-## Roadmap
-
-### Completed (v0.1.0-alpha.1) ✅
-- ✅ Core VJP rules (einsum, element-wise, reductions)
-- ✅ Decomposition gradients (CP, Tucker, TT)
-- ✅ Gradient checkpointing
-- ✅ Higher-order derivatives (Hessian)
-- ✅ Sparse gradient support
-- ✅ Mixed precision training (fp16/bf16)
-- ✅ Gradient monitoring & analysis
-- ✅ Parallel computation
-- ✅ Memory-optimized storage
-
-### Future Enhancements (v0.2.0+)
-- Tensorlogic integration (awaiting API stabilization)
-- Distributed gradients (AllReduce, gradient bucketing, communication-computation overlap)
-- Hardware accelerators (GPU kernels via scirs2-gpu, TPU/NPU support)
-- Advanced optimization algorithms (L-BFGS, conjugate gradients)
-- Additional graph optimizations (constant folding, common subexpression elimination)
 
 ## Dependencies
 
@@ -407,10 +368,17 @@ grep -r "use rand::" src/     # ✅ No matches
 - **scirs2-linalg** - Linear algebra operations
 - **rayon** - Parallel execution
 
-## Contributing
-
-See `CLAUDE.md` for development guidelines and SciRS2 integration policy.
-
 ## License
 
 Apache-2.0 or MIT (dual licensed)
+
+## Related Projects
+
+- [`tenrso-core`](../tenrso-core) - Core tensor data structures
+- [`tenrso-exec`](../tenrso-exec) - Execution engine
+- [`tenrso-decomp`](../tenrso-decomp) - Decomposition algorithms
+- [`tenrso`](../tenrso) - Main TenRSo library
+
+---
+
+**Status:** Alpha (production-ready internals) | **Version:** 0.1.0-rc.1 | **Tests:** 154/154 passing

@@ -1,10 +1,26 @@
 # tenrso-decomp TODO
 
 > **Milestone:** M2
-> **Version:** 0.1.0-alpha.2
-> **Status:** ✅ **M2 COMPLETE!** All decomposition algorithms implemented and tested
-> **Tests:** 158 passing (100%)
-> **Last Updated:** 2025-12-16 (Alpha.2 Release)
+> **Version:** 0.1.0-rc.1
+> **Status:** RC.1 — 165 tests passing (2 ignored), 100% pass rate
+> **Tests:** 165 passing (2 ignored, 100%)
+> **Last Updated:** 2026-03-06 (RC.1 Release)
+
+---
+
+## RC.1 Status — 2026-03-06
+
+- **Tests:** 165 passing (2 ignored), 100% pass rate
+- **Zero `todo!()` / `unimplemented!()` macros** in the entire crate
+- **Milestone M2: COMPLETE** — all CP/Tucker/TT/rank-selection items implemented
+- **CP family:** cp_als, cp_als_constrained, cp_als_accelerated, cp_completion, cp_randomized, cp_als_incremental
+- **Tucker family:** tucker_hosvd, tucker_hosvd_auto, tucker_hooi, tucker_randomized, tucker_nonnegative, tucker_completion
+- **TT family:** tt_svd, tt_round, tt_add, tt_dot, tt_hadamard, TTMatrix::matvec, tt_matrix_from_diagonal
+- **Rank selection:** compute_information_criterion, select_rank_auto, cp_rank_cross_validation
+- **Property tests:** 19 (proptest framework)
+- **Integration tests:** 14
+- **Benchmarks:** 27 benchmark functions across all decomposition methods
+- **Examples:** 4 comprehensive example programs (all compile and run)
 
 ---
 

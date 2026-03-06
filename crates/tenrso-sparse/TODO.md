@@ -1,23 +1,48 @@
 # tenrso-sparse TODO
 
 > **Milestone:** M3 + Advanced Enhancements + Graph Algorithms & Solvers
-> **Version:** 0.1.0-alpha.2
-> **Status:** ✅ **PRODUCTION READY!** (243 library tests passing - 100%)
-> **Last Updated:** 2025-12-16 (Alpha.2 Release)
+> **Version:** 0.1.0-rc.1
+> **Status:** RC.1 — 426 tests passing (3 ignored), 100% pass rate
+> **Tests:** 426 passing (3 ignored, 100%)
+> **Last Updated:** 2026-03-06 (RC.1 Release)
 
-## 📊 Latest Statistics (Alpha.2)
+---
+
+## RC.1 Status — 2026-03-06
+
+- **Tests:** 426 passing (3 ignored), 100% pass rate
+  - Note: 3 MINRES tests ignored pending algorithm refinement for symmetric indefinite edge cases
+- **Zero `todo!()` / `unimplemented!()` macros** in the entire crate
+- **Milestone M3: COMPLETE** — all sparse formats, operations, and algorithms implemented
+- **Sparse Formats (8):** COO, CSR, CSC, BCSR, ELL, DIA, CSF (feature-gated), HiCOO (feature-gated)
+- **Operations (36):** element-wise, transcendentals, binary, reductions, SpMV/SpMM/SpSpMM
+- **Linear Solvers (6):** CG, BiCGSTAB, GMRES, MINRES, CGNE, CGNR
+- **Preconditioners (4):** Identity, ILU(0), Jacobi, SSOR
+- **Eigensolvers (3):** Power Iteration, Inverse Power, Lanczos
+- **Graph Algorithms (14):** BFS, DFS, Dijkstra, Bellman-Ford, SCC, PageRank, MST, Graph Coloring, MIS, Bipartite, Topological Sort, Has Cycle, Vertex Degrees, Connected Components
+- **Constructors (5):** Graph Laplacian, Adjacency, 2D Poisson, Tridiagonal, Identity
+- **Factorizations (2):** ILU(0), IC(0)
+- **Reordering (2):** RCM, AMD
+- **I/O:** Matrix Market format
+- **Property tests:** 22 (proptest framework)
+- **Benchmark groups:** 21
+- **Nextest validated:** 426 tests passing
+
+---
+
+## Latest Statistics (RC.1)
 
 ### Code Metrics
-- **Library Tests:** 243 passing (100%)
+- **Library Tests:** 426 passing (3 ignored, 100%)
 - **Documentation:** Comprehensive with examples
 - **Quality:** Zero warnings
-  - Doc Tests: 150 (all passing ✅)
+  - Doc Tests: 150+ (all passing)
   - Property Tests: 22 (included in library tests)
 - **Quality Checks:** All passing ✅
   - ✅ Zero clippy warnings (`cargo clippy -- -D warnings`)
   - ✅ Formatting validated (`cargo fmt -- --check`)
   - ✅ SciRS2 policy compliant (no direct ndarray/rand imports)
-  - ✅ Nextest validated (all 418 tests passing)
+  - ✅ Nextest validated (all 426 tests passing)
 - **New Features:** 6 major algorithms (MINRES, PageRank, MST, Graph Coloring, Bellman-Ford, MIS)
 - **Code Lines:** ~14,600 (added ~700 production lines this session)
 
