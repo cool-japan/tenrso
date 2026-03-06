@@ -1,6 +1,6 @@
 //! Network communication layer for distributed chunk transfer.
 //!
-//! Uses tokio for async I/O and bincode for efficient serialization.
+//! Uses tokio for async I/O and oxicode for efficient serialization.
 
 use super::protocol::{
     ChunkRequest, ChunkResponse, HeartbeatRequest, HeartbeatResponse, MessageType,
@@ -192,16 +192,16 @@ impl NetworkServer {
             stats.messages_received.fetch_add(1, Ordering::Relaxed);
 
             // Deserialize message
-            let bincode_config = bincode::config::standard();
+            let oxicode_config = oxicode::config::standard();
             let (message, _): (MessageType, usize) =
-                bincode::serde::decode_from_slice(&data_buf, bincode_config)?;
+                oxicode::serde::decode_from_slice(&data_buf, oxicode_config)?;
 
             // Handle message and generate response
             let response = Self::handle_message(message, &registry, &chunk_provider).await?;
 
             // Serialize response
-            let bincode_config = bincode::config::standard();
-            let response_data = bincode::serde::encode_to_vec(&response, bincode_config)?;
+            let oxicode_config = oxicode::config::standard();
+            let response_data = oxicode::serde::encode_to_vec(&response, oxicode_config)?;
             let response_len = response_data.len() as u32;
 
             // Write response length
@@ -333,8 +333,8 @@ impl NetworkClient {
         let mut stream = self.get_connection(addr).await?;
 
         // Serialize message
-        let bincode_config = bincode::config::standard();
-        let data = bincode::serde::encode_to_vec(&message, bincode_config)?;
+        let oxicode_config = oxicode::config::standard();
+        let data = oxicode::serde::encode_to_vec(&message, oxicode_config)?;
         let len = data.len() as u32;
 
         if len as usize > self.config.max_message_size {
@@ -379,9 +379,9 @@ impl NetworkClient {
         self.stats.messages_received.fetch_add(1, Ordering::Relaxed);
 
         // Deserialize response
-        let bincode_config = bincode::config::standard();
+        let oxicode_config = oxicode::config::standard();
         let (response, _): (MessageType, usize) =
-            bincode::serde::decode_from_slice(&response_buf, bincode_config)?;
+            oxicode::serde::decode_from_slice(&response_buf, oxicode_config)?;
         Ok(response)
     }
 

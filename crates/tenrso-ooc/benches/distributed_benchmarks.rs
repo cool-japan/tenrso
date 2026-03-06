@@ -176,9 +176,9 @@ fn bench_protocol_serialization(c: &mut Criterion) {
 
     group.bench_function("chunk_request", |b| {
         let request = ChunkRequest::new("test_chunk".to_string(), NodeId(42));
-        let bincode_config = bincode::config::standard();
+        let oxicode_config = oxicode::config::standard();
         b.iter(|| {
-            let serialized = bincode::serde::encode_to_vec(&request, bincode_config).unwrap();
+            let serialized = oxicode::serde::encode_to_vec(&request, oxicode_config).unwrap();
             black_box(serialized);
         });
     });
@@ -187,19 +187,19 @@ fn bench_protocol_serialization(c: &mut Criterion) {
         let metadata = ChunkMetadata::new_f64("test".to_string(), vec![100, 100]);
         let data = vec![42u8; 1024 * 1024]; // 1MB
         let response = ChunkResponse::success("test".to_string(), metadata, data);
-        let bincode_config = bincode::config::standard();
+        let oxicode_config = oxicode::config::standard();
 
         b.iter(|| {
-            let serialized = bincode::serde::encode_to_vec(&response, bincode_config).unwrap();
+            let serialized = oxicode::serde::encode_to_vec(&response, oxicode_config).unwrap();
             black_box(serialized);
         });
     });
 
     group.bench_function("heartbeat", |b| {
         let request = HeartbeatRequest::new(NodeId(1));
-        let bincode_config = bincode::config::standard();
+        let oxicode_config = oxicode::config::standard();
         b.iter(|| {
-            let serialized = bincode::serde::encode_to_vec(&request, bincode_config).unwrap();
+            let serialized = oxicode::serde::encode_to_vec(&request, oxicode_config).unwrap();
             black_box(serialized);
         });
     });

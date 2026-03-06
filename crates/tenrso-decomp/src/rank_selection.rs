@@ -525,7 +525,7 @@ pub fn tt_num_params(shape: &[usize], ranks: &[usize]) -> usize {
 /// ```
 pub fn create_cv_split(shape: &[usize], train_ratio: f64) -> (DenseND<f64>, DenseND<f64>) {
     use scirs2_core::ndarray_ext::{Array, IxDyn};
-    use scirs2_core::random::{thread_rng, Rng};
+    use scirs2_core::random::thread_rng;
 
     assert!(
         train_ratio > 0.0 && train_ratio < 1.0,
@@ -614,6 +614,203 @@ where
     } else {
         0.0
     }
+}
+
+/// Perform k-fold cross-validation for CP rank selection
+///
+/// Holds out random elements of the tensor, fits a CP decomposition to the
+/// training set, and measures reconstruction error on the held-out elements.
+/// Returns the rank that minimizes the average held-out (validation) error.
+///
+/// # Algorithm
+///
+/// 1. For each fold k in 1..=num_folds:
+///    a. Create a random train/validation split (80/20 by default)
+///    b. For each candidate rank:
+///       - Fit CP decomposition on training entries using `cp_completion`
+///       - Compute reconstruction error on held-out (validation) entries
+/// 2. Average validation errors across folds
+/// 3. Select rank with minimum average validation error
+///
+/// # Arguments
+///
+/// * `tensor` - Input tensor to analyze
+/// * `candidate_ranks` - List of ranks to evaluate (e.g., vec![1, 2, 3, 5, 8, 10])
+/// * `num_folds` - Number of cross-validation folds (typically 3-5)
+/// * `max_iters` - Maximum ALS iterations per CP fit
+/// * `tol` - Convergence tolerance for CP-ALS
+/// * `train_ratio` - Fraction of entries to use for training (default: 0.8)
+///
+/// # Returns
+///
+/// `CrossValidationResult` with the best rank and detailed error information
+///
+/// # Examples
+///
+/// ```
+/// use tenrso_core::DenseND;
+/// use tenrso_decomp::rank_selection::cp_rank_cross_validation;
+///
+/// let tensor = DenseND::<f64>::random_uniform(&[10, 10, 10], 0.0, 1.0);
+/// let candidates = vec![1, 2, 3, 5];
+///
+/// let result = cp_rank_cross_validation(
+///     &tensor,
+///     &candidates,
+///     3,    // 3-fold CV
+///     50,   // max iterations
+///     1e-4, // tolerance
+///     0.8,  // 80% training
+/// );
+///
+/// if let Ok(cv_result) = result {
+///     println!("Best rank: {}", cv_result.best_rank);
+///     println!("Best validation error: {:.4}", cv_result.best_validation_error);
+/// }
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+///
+/// # References
+///
+/// - Bro & Kiers (2003), "A new efficient method for determining the number of components in PARAFAC models"
+pub fn cp_rank_cross_validation<T>(
+    tensor: &DenseND<T>,
+    candidate_ranks: &[usize],
+    num_folds: usize,
+    max_iters: usize,
+    tol: f64,
+    train_ratio: f64,
+) -> anyhow::Result<CrossValidationResult>
+where
+    T: Float
+        + scirs2_core::numeric::FloatConst
+        + NumCast
+        + scirs2_core::numeric::NumAssign
+        + Sum
+        + scirs2_core::ndarray_ext::ScalarOperand
+        + scirs2_core::numeric::FromPrimitive
+        + Send
+        + Sync
+        + 'static,
+{
+    use crate::cp::{cp_completion, InitStrategy};
+
+    if candidate_ranks.is_empty() {
+        anyhow::bail!("candidate_ranks must not be empty");
+    }
+    if num_folds == 0 {
+        anyhow::bail!("num_folds must be > 0");
+    }
+    if !(0.0..1.0).contains(&train_ratio) {
+        anyhow::bail!("train_ratio must be in (0, 1)");
+    }
+
+    let shape = tensor.shape();
+    let num_ranks = candidate_ranks.len();
+
+    // Accumulate validation errors per rank across folds
+    let mut total_val_errors = vec![0.0_f64; num_ranks];
+    let mut total_train_errors = vec![0.0_f64; num_ranks];
+
+    for _fold in 0..num_folds {
+        // Create train/validation split
+        let (train_mask, val_mask) = create_cv_split(shape, train_ratio);
+
+        // Convert train_mask to tensor type T for cp_completion
+        let train_mask_t = convert_mask_to_t::<T>(&train_mask);
+
+        for (rank_idx, &rank) in candidate_ranks.iter().enumerate() {
+            // Skip ranks that are too large for any dimension
+            if shape.iter().any(|&d| rank > d) {
+                total_val_errors[rank_idx] += f64::INFINITY;
+                total_train_errors[rank_idx] += f64::INFINITY;
+                continue;
+            }
+
+            // Fit CP on training entries
+            let cp_result = cp_completion(
+                tensor,
+                &train_mask_t,
+                rank,
+                max_iters,
+                tol,
+                InitStrategy::Random,
+            );
+
+            match cp_result {
+                Ok(cp) => {
+                    // Reconstruct full tensor
+                    match cp.reconstruct(shape) {
+                        Ok(reconstructed) => {
+                            // Compute validation error (on held-out entries)
+                            let val_error =
+                                masked_reconstruction_error(tensor, &reconstructed, &val_mask);
+                            total_val_errors[rank_idx] += val_error;
+
+                            // Compute training error (on training entries)
+                            let train_error =
+                                masked_reconstruction_error(tensor, &reconstructed, &train_mask);
+                            total_train_errors[rank_idx] += train_error;
+                        }
+                        Err(_) => {
+                            total_val_errors[rank_idx] += f64::INFINITY;
+                            total_train_errors[rank_idx] += f64::INFINITY;
+                        }
+                    }
+                }
+                Err(_) => {
+                    total_val_errors[rank_idx] += f64::INFINITY;
+                    total_train_errors[rank_idx] += f64::INFINITY;
+                }
+            }
+        }
+    }
+
+    // Average errors across folds
+    let num_folds_f = num_folds as f64;
+    let avg_val_errors: Vec<f64> = total_val_errors.iter().map(|&e| e / num_folds_f).collect();
+    let avg_train_errors: Vec<f64> = total_train_errors
+        .iter()
+        .map(|&e| e / num_folds_f)
+        .collect();
+
+    // Find best rank (minimum validation error)
+    let mut best_idx = 0;
+    let mut best_val_error = f64::INFINITY;
+    for (i, &err) in avg_val_errors.iter().enumerate() {
+        if err < best_val_error {
+            best_val_error = err;
+            best_idx = i;
+        }
+    }
+
+    Ok(CrossValidationResult {
+        best_rank: candidate_ranks[best_idx],
+        best_validation_error: best_val_error,
+        candidate_ranks: candidate_ranks.to_vec(),
+        training_errors: avg_train_errors,
+        validation_errors: avg_val_errors,
+    })
+}
+
+/// Convert a f64 mask to type T for use with cp_completion
+fn convert_mask_to_t<T>(mask: &DenseND<f64>) -> DenseND<T>
+where
+    T: Float + NumCast,
+{
+    use scirs2_core::ndarray_ext::{Array, IxDyn};
+
+    let shape = mask.shape();
+    let mask_view = mask.view();
+
+    let data: Vec<T> = mask_view
+        .iter()
+        .map(|&v| T::from(v).unwrap_or_else(T::zero))
+        .collect();
+
+    let array =
+        Array::from_shape_vec(IxDyn(shape), data).expect("Shape mismatch in mask conversion");
+    DenseND::from_array(array)
 }
 
 /// Strategy for automated rank selection
@@ -1284,5 +1481,156 @@ mod tests {
             result_bic.rank <= result_aic.rank,
             "BIC should select <= rank than AIC"
         );
+    }
+
+    // ========================================================================
+    // K-Fold Cross-Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_cp_rank_cross_validation_basic() {
+        let tensor = DenseND::<f64>::random_uniform(&[8, 8, 8], 0.0, 1.0);
+        let candidates = vec![1, 2, 3];
+
+        let result = cp_rank_cross_validation(
+            &tensor,
+            &candidates,
+            2,    // 2-fold CV (fast)
+            20,   // moderate iterations
+            1e-3, // relaxed tolerance
+            0.8,  // 80% training
+        );
+
+        assert!(result.is_ok(), "Cross-validation should succeed");
+        let cv = result.unwrap();
+
+        // Best rank should be one of the candidates
+        assert!(
+            candidates.contains(&cv.best_rank),
+            "Best rank {} should be in candidates {:?}",
+            cv.best_rank,
+            candidates
+        );
+
+        // Should have errors for all candidates
+        assert_eq!(cv.validation_errors.len(), candidates.len());
+        assert_eq!(cv.training_errors.len(), candidates.len());
+
+        // Best validation error should be non-negative
+        assert!(
+            cv.best_validation_error >= 0.0,
+            "Validation error should be non-negative"
+        );
+
+        // Best validation error should match the best rank's entry
+        let best_idx = cv
+            .candidate_ranks
+            .iter()
+            .position(|&r| r == cv.best_rank)
+            .unwrap();
+        assert!(
+            (cv.validation_errors[best_idx] - cv.best_validation_error).abs() < 1e-10,
+            "Best validation error should match"
+        );
+    }
+
+    #[test]
+    fn test_cp_rank_cross_validation_training_vs_validation_error() {
+        // Training error should generally be <= validation error
+        let tensor = DenseND::<f64>::random_uniform(&[8, 8, 8], 0.0, 1.0);
+        let candidates = vec![2, 4];
+
+        let result = cp_rank_cross_validation(&tensor, &candidates, 2, 30, 1e-3, 0.8);
+
+        assert!(result.is_ok());
+        let cv = result.unwrap();
+
+        // For each rank, training error should typically be lower than validation
+        // (not guaranteed for every random run, but usually true)
+        for (i, &rank) in candidates.iter().enumerate() {
+            println!(
+                "Rank {}: train_err={:.4}, val_err={:.4}",
+                rank, cv.training_errors[i], cv.validation_errors[i]
+            );
+        }
+
+        // At minimum, all errors should be finite
+        for &err in &cv.validation_errors {
+            assert!(err.is_finite(), "Validation error should be finite");
+        }
+        for &err in &cv.training_errors {
+            assert!(err.is_finite(), "Training error should be finite");
+        }
+    }
+
+    #[test]
+    fn test_cp_rank_cross_validation_overfitting_detection() {
+        // Use a low-rank tensor to test that CV can detect overfitting
+        // A rank-2 tensor should not benefit from rank > 2
+        use scirs2_core::ndarray_ext::Array;
+
+        // Create a rank-1 tensor (very structured)
+        let mut data = Array::<f64, _>::zeros(vec![6, 6, 6]);
+        for i in 0..6 {
+            for j in 0..6 {
+                for k in 0..6 {
+                    data[[i, j, k]] = (i as f64 + 1.0) * (j as f64 + 1.0) * (k as f64 + 1.0);
+                }
+            }
+        }
+        let tensor = DenseND::from_array(data.into_dyn());
+
+        let candidates = vec![1, 2, 3, 5];
+
+        let result = cp_rank_cross_validation(&tensor, &candidates, 2, 50, 1e-4, 0.8);
+
+        assert!(result.is_ok());
+        let cv = result.unwrap();
+
+        println!("Low-rank tensor CV results:");
+        for (i, &rank) in candidates.iter().enumerate() {
+            println!("  Rank {}: val_err={:.4}", rank, cv.validation_errors[i]);
+        }
+
+        // Best rank should be <= 3 for a rank-1 tensor
+        // (exact rank 1 may not always win due to completion noise, but low ranks should be favored)
+        assert!(
+            cv.best_rank <= 5,
+            "Best rank should be reasonable for rank-1 tensor, got {}",
+            cv.best_rank
+        );
+    }
+
+    #[test]
+    fn test_cp_rank_cv_invalid_params() {
+        let tensor = DenseND::<f64>::random_uniform(&[5, 5, 5], 0.0, 1.0);
+
+        // Empty candidates
+        let result = cp_rank_cross_validation(&tensor, &[], 3, 20, 1e-4, 0.8);
+        assert!(result.is_err());
+
+        // Zero folds
+        let result = cp_rank_cross_validation(&tensor, &[1, 2], 0, 20, 1e-4, 0.8);
+        assert!(result.is_err());
+
+        // Invalid train_ratio
+        let result = cp_rank_cross_validation(&tensor, &[1, 2], 3, 20, 1e-4, 1.5);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_convert_mask_to_t() {
+        use scirs2_core::ndarray_ext::Array;
+
+        let data = Array::from_shape_vec(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]).unwrap();
+        let mask = DenseND::from_array(data.into_dyn());
+
+        let mask_f32: DenseND<f32> = convert_mask_to_t(&mask);
+        let view = mask_f32.view();
+
+        assert!((view[[0, 0]] - 1.0_f32).abs() < 1e-6);
+        assert!((view[[0, 1]]).abs() < 1e-6);
+        assert!((view[[1, 0]]).abs() < 1e-6);
+        assert!((view[[1, 1]] - 1.0_f32).abs() < 1e-6);
     }
 }

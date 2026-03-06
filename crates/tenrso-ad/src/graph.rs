@@ -216,28 +216,40 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Enable gradient recording (training mode)
     pub fn train(&self) {
-        *self.recording.lock().unwrap() = true;
+        *self
+            .recording
+            .lock()
+            .expect("mutex poisoned - this is a bug") = true;
     }
 
     /// Disable gradient recording (inference mode)
     pub fn eval(&self) {
-        *self.recording.lock().unwrap() = false;
+        *self
+            .recording
+            .lock()
+            .expect("mutex poisoned - this is a bug") = false;
     }
 
     /// Check if currently recording
     pub fn is_recording(&self) -> bool {
-        *self.recording.lock().unwrap()
+        *self
+            .recording
+            .lock()
+            .expect("mutex poisoned - this is a bug")
     }
 
     /// Clear all nodes and reset the graph
     pub fn clear(&self) {
-        self.nodes.lock().unwrap().clear();
-        *self.next_id.lock().unwrap() = 0;
+        self.nodes
+            .lock()
+            .expect("mutex poisoned - this is a bug")
+            .clear();
+        *self.next_id.lock().expect("mutex poisoned - this is a bug") = 0;
     }
 
     /// Get next available node ID
     fn allocate_id(&self) -> NodeId {
-        let mut next_id = self.next_id.lock().unwrap();
+        let mut next_id = self.next_id.lock().expect("mutex poisoned - this is a bug");
         let id = NodeId(*next_id);
         *next_id += 1;
         id
@@ -248,7 +260,10 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
         let id = self.allocate_id();
         let node = GraphNode::new(id, Operation::Input, value, requires_grad, vec![]);
 
-        self.nodes.lock().unwrap().insert(id, node);
+        self.nodes
+            .lock()
+            .expect("mutex poisoned - this is a bug")
+            .insert(id, node);
         Ok(Variable::new(id))
     }
 
@@ -267,8 +282,12 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
         let id = self.allocate_id();
 
         // Check if any parent requires gradients
-        let requires_grad = if *self.recording.lock().unwrap() {
-            let nodes = self.nodes.lock().unwrap();
+        let requires_grad = if *self
+            .recording
+            .lock()
+            .expect("mutex poisoned - this is a bug")
+        {
+            let nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
             parents
                 .iter()
                 .any(|&parent_id| nodes.get(&parent_id).is_some_and(|n| n.requires_grad))
@@ -280,7 +299,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
         // Update parent nodes to add this as a child
         {
-            let mut nodes = self.nodes.lock().unwrap();
+            let mut nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
             for parent_id in &parents {
                 if let Some(parent) = nodes.get_mut(parent_id) {
                     parent.children.push(id);
@@ -294,7 +313,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Get the value of a variable
     pub fn value(&self, var: &Variable) -> Result<ArrayD<T>> {
-        let nodes = self.nodes.lock().unwrap();
+        let nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
         let node = nodes
             .get(&var.id)
             .ok_or_else(|| anyhow!("Variable not found in graph"))?;
@@ -305,7 +324,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Get the gradient of a variable
     pub fn gradient(&self, var: &Variable) -> Result<ArrayD<T>> {
-        let nodes = self.nodes.lock().unwrap();
+        let nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
         let node = nodes
             .get(&var.id)
             .ok_or_else(|| anyhow!("Variable not found in graph"))?;
@@ -316,7 +335,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Check if a variable has a gradient
     pub fn has_gradient(&self, var: &Variable) -> bool {
-        let nodes = self.nodes.lock().unwrap();
+        let nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
         nodes
             .get(&var.id)
             .is_some_and(|node| node.gradient.is_some())
@@ -324,7 +343,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Zero all gradients in the graph
     pub fn zero_grad(&self) {
-        let mut nodes = self.nodes.lock().unwrap();
+        let mut nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
         for node in nodes.values_mut() {
             node.gradient = None;
         }
@@ -572,7 +591,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Perform backward pass from the given output node
     pub fn backward(&self, output: &Variable) -> Result<()> {
-        let mut nodes = self.nodes.lock().unwrap();
+        let mut nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
 
         // Check that output is a scalar
         let output_node = nodes
@@ -815,7 +834,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
                     ArrayD::from_elem(IxDyn(input_shape), grad_output[[]])
                 } else {
                     // Partial reduction - add dimension back
-                    let ax = axis.unwrap();
+                    let ax = axis.expect("axis is Some - checked above");
                     let mut new_shape = grad_output.shape().to_vec();
                     new_shape.insert(ax, 1);
                     let reshaped = grad_output
@@ -845,7 +864,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
                     let grad = ArrayD::from_elem(IxDyn(input_shape), grad_output[[]]);
                     (grad, n)
                 } else {
-                    let ax = axis.unwrap();
+                    let ax = axis.expect("axis is Some - checked above");
                     let n = input_shape[ax];
                     let mut new_shape = grad_output.shape().to_vec();
                     new_shape.insert(ax, 1);
@@ -925,7 +944,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Get statistics about the computation graph
     pub fn stats(&self) -> GraphStats {
-        let nodes = self.nodes.lock().unwrap();
+        let nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
         let num_nodes = nodes.len();
         let num_edges: usize = nodes.values().map(|n| n.children.len()).sum();
 

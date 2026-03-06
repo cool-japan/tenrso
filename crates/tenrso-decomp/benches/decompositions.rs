@@ -708,7 +708,7 @@ fn bench_compression_efficiency(c: &mut Criterion) {
 
 fn bench_cp_completion_varying_observation_rates(c: &mut Criterion) {
     use scirs2_core::ndarray_ext::Array;
-    use scirs2_core::random::{thread_rng, Rng};
+    use scirs2_core::random::thread_rng;
     use tenrso_decomp::cp_completion;
 
     let mut group = c.benchmark_group("cp_completion_obs_rates");
@@ -754,7 +754,7 @@ fn bench_cp_completion_varying_observation_rates(c: &mut Criterion) {
 
 fn bench_cp_completion_varying_sizes(c: &mut Criterion) {
     use scirs2_core::ndarray_ext::Array;
-    use scirs2_core::random::{thread_rng, Rng};
+    use scirs2_core::random::thread_rng;
     use tenrso_decomp::cp_completion;
 
     let mut group = c.benchmark_group("cp_completion_sizes");
@@ -802,7 +802,7 @@ fn bench_cp_completion_varying_sizes(c: &mut Criterion) {
 
 fn bench_cp_completion_varying_ranks(c: &mut Criterion) {
     use scirs2_core::ndarray_ext::Array;
-    use scirs2_core::random::{thread_rng, Rng};
+    use scirs2_core::random::thread_rng;
     use tenrso_decomp::cp_completion;
 
     let mut group = c.benchmark_group("cp_completion_ranks");
@@ -848,7 +848,7 @@ fn bench_cp_completion_varying_ranks(c: &mut Criterion) {
 
 fn bench_cp_completion_vs_full(c: &mut Criterion) {
     use scirs2_core::ndarray_ext::Array;
-    use scirs2_core::random::{thread_rng, Rng};
+    use scirs2_core::random::thread_rng;
     use tenrso_decomp::cp_completion;
 
     let mut group = c.benchmark_group("cp_completion_vs_full");
@@ -964,7 +964,7 @@ criterion_group!(compression_benches, bench_compression_efficiency,);
 
 fn bench_tucker_completion_varying_observation_rates(c: &mut Criterion) {
     use scirs2_core::ndarray_ext::Array;
-    use scirs2_core::random::{thread_rng, Rng};
+    use scirs2_core::random::thread_rng;
     use tenrso_decomp::tucker_completion;
 
     let mut group = c.benchmark_group("tucker_completion_obs_rates");
@@ -1009,7 +1009,7 @@ fn bench_tucker_completion_varying_observation_rates(c: &mut Criterion) {
 
 fn bench_tucker_completion_varying_sizes(c: &mut Criterion) {
     use scirs2_core::ndarray_ext::Array;
-    use scirs2_core::random::{thread_rng, Rng};
+    use scirs2_core::random::thread_rng;
     use tenrso_decomp::tucker_completion;
 
     let mut group = c.benchmark_group("tucker_completion_sizes");
@@ -1056,7 +1056,7 @@ fn bench_tucker_completion_varying_sizes(c: &mut Criterion) {
 
 fn bench_tucker_completion_varying_ranks(c: &mut Criterion) {
     use scirs2_core::ndarray_ext::Array;
-    use scirs2_core::random::{thread_rng, Rng};
+    use scirs2_core::random::thread_rng;
     use tenrso_decomp::tucker_completion;
 
     let mut group = c.benchmark_group("tucker_completion_ranks");
@@ -1101,7 +1101,7 @@ fn bench_tucker_completion_varying_ranks(c: &mut Criterion) {
 
 fn bench_tucker_completion_vs_full(c: &mut Criterion) {
     use scirs2_core::ndarray_ext::Array;
-    use scirs2_core::random::{thread_rng, Rng};
+    use scirs2_core::random::thread_rng;
     use tenrso_decomp::{tucker_completion, tucker_hooi};
 
     let mut group = c.benchmark_group("tucker_completion_vs_full");

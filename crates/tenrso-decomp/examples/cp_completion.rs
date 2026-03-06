@@ -6,7 +6,7 @@
 //! Run with: cargo run --release --example cp_completion
 
 use scirs2_core::ndarray_ext::Array;
-use scirs2_core::random::{thread_rng, Rng};
+use scirs2_core::random::thread_rng;
 use tenrso_core::DenseND;
 use tenrso_decomp::{cp_als, cp_completion, InitStrategy};
 

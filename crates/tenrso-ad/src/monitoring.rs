@@ -39,7 +39,7 @@
 //! }
 //! ```
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use num_traits::Float;
 use scirs2_core::ndarray_ext::{Array, IxDyn};
 use std::collections::{HashMap, VecDeque};
@@ -459,8 +459,14 @@ impl GradientMonitor {
         layer_magnitudes.sort_by(|a, b| a.0.cmp(&b.0));
 
         let flow_ratio = if layer_magnitudes.len() >= 2 {
-            let first = layer_magnitudes.first().unwrap().1;
-            let last = layer_magnitudes.last().unwrap().1;
+            let first = layer_magnitudes
+                .first()
+                .ok_or_else(|| anyhow!("layer_magnitudes is empty"))?
+                .1;
+            let last = layer_magnitudes
+                .last()
+                .ok_or_else(|| anyhow!("layer_magnitudes is empty"))?
+                .1;
             if last > 1e-10 {
                 first / last
             } else {

@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn test_orthogonality_error_random() {
-        use scirs2_core::random::{thread_rng, Rng};
+        use scirs2_core::random::thread_rng;
 
         // Random matrix should have non-zero orthogonality error
         let mut rng = thread_rng();

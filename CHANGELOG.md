@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-rc.1] - 2026-03-06
+
+### Added
+- **Executor element-wise operations** (`tenrso-exec`)
+  - `ScalarOp` enum: Add, Sub, Mul, Div, Pow for tensor-scalar operations
+  - `CpuExecutor::scalar_op()` - tensor-scalar operations
+  - `CpuExecutor::parallel_elem_op()` - unary element-wise with auto parallel dispatch
+  - `CpuExecutor::parallel_binary_op()` - binary tensor-tensor with auto parallel dispatch
+  - `CpuExecutor::full_reduce()` / `parallel_reduce()` - reduction operations
+  - Parallel threshold: 10,000 elements (automatic Rayon dispatch)
+- **TT-SVD gradient backward pass** (`tenrso-ad`)
+  - Full `TtReconstructionGrad` implementation replacing TODO stub
+  - `reconstruct()`: full tensor from TT cores via sequential matrix products
+  - `compute_core_gradients()`: backward pass with left/right chain products
+  - Numerically verified via central finite differences
+- **Masked einsum operations** (`tenrso-sparse`)
+  - `masked_einsum(spec_str, inputs, mask)` → sparse `CooTensor`
+  - Specialized kernels: masked matmul, masked element-wise, masked outer product
+  - Generic fallback for arbitrary einsum patterns
+  - Subset reductions: `masked_sum`, `masked_mean`, `masked_max`, `masked_min`, `masked_variance`, `masked_extract`
+- **CP decomposition regularization** (`tenrso-decomp`)
+  - L1 regularization via soft-thresholding
+  - L2 (Tikhonov/ridge) regularization
+  - Enhanced non-negative CP-ALS with input validation
+  - Cross-validation for rank selection in `rank_selection.rs`
+- **CP module refactoring** (`tenrso-decomp`)
+  - Refactored monolithic `cp.rs` (3212 lines) into `cp/` module
+  - Submodules: `core`, `advanced`, `helpers`, `types`, `tests`
+
+### Fixed
+- All slow tests (>30s) reduced to <10s across workspace
+  - `tenrso-kernels` integration tests: reduced tensor sizes
+  - `tenrso-ooc` streaming tests: reduced matrix dimensions
+  - `tenrso-decomp` property tests: reduced proptest cases and tensor sizes
+  - `tenrso-decomp` unit tests: reduced TT and Tucker tensor dimensions
+- Clippy: removed redundant casts (`as f64`) in CP tests
+- Clippy: converted loop-index patterns to `enumerate()` in rank selection
+- Unused import warnings across `Rng` imports
+
+### Changed
+- **Workspace policy**: All subcrates use `version.workspace = true`
+- **Version**: Bumped from `0.1.0-alpha.2` to `0.1.0-rc.1`
+- **Test performance**: Total suite runtime reduced from ~963s to ~198s (4.8× faster)
+- Total test count: 2036 → 2109 (+73 new tests)
+
+### Quality Metrics
+- **Test Pass Rate**: 100% (2109+ tests with all features)
+- **Code Quality**: Zero warnings (compiler + clippy with all targets)
+- **Slow Tests**: Zero tests >30s
+- **Production Readiness**: RC.1 quality standards met
+
 ## [0.1.0-alpha.2] - 2025-12-16
 
 ### Added
