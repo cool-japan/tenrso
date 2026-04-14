@@ -34,7 +34,6 @@
 //! ```
 
 use anyhow::{anyhow, Result};
-use std::io::{Read, Write};
 
 /// Compression codec for spilled chunks
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,8 +167,8 @@ pub fn compress_bytes(data: &[u8], codec: CompressionCodec) -> Result<Vec<u8>> {
         }
         #[cfg(feature = "lz4-compression")]
         CompressionCodec::Lz4 => {
-            let compressed =
-                lz4::block::compress(data, Some(lz4::block::CompressionMode::FAST(1)), false)?;
+            let compressed = oxiarc_lz4::compress_block(data)
+                .map_err(|e| anyhow!("LZ4 compression failed: {e}"))?;
             let mut output = Vec::with_capacity(compressed.len() + 9);
             output.push(1u8); // Magic byte for "Lz4"
             output.extend_from_slice(&(data.len() as u64).to_le_bytes());
@@ -178,9 +177,8 @@ pub fn compress_bytes(data: &[u8], codec: CompressionCodec) -> Result<Vec<u8>> {
         }
         #[cfg(feature = "zstd-compression")]
         CompressionCodec::Zstd { level } => {
-            let mut encoder = zstd::Encoder::new(Vec::new(), level)?;
-            encoder.write_all(data)?;
-            let compressed = encoder.finish()?;
+            let compressed = oxiarc_zstd::compress_with_level(data, level)
+                .map_err(|e| anyhow!("Zstd compression failed: {e}"))?;
             let mut output = Vec::with_capacity(compressed.len() + 9);
             output.push(2u8); // Magic byte for "Zstd"
             output.extend_from_slice(&(data.len() as u64).to_le_bytes());
@@ -226,7 +224,8 @@ pub fn decompress_bytes(data: &[u8]) -> Result<Vec<u8>> {
                 }
                 let original_size = u64::from_le_bytes(data[1..9].try_into()?) as usize;
                 let compressed = &data[9..];
-                lz4::block::decompress(compressed, Some(original_size as i32))?
+                oxiarc_lz4::decompress_block(compressed, original_size)
+                    .map_err(|e| anyhow!("LZ4 decompression failed: {e}"))?
             }
             #[cfg(not(feature = "lz4-compression"))]
             {
@@ -242,10 +241,8 @@ pub fn decompress_bytes(data: &[u8]) -> Result<Vec<u8>> {
                 }
                 let _original_size = u64::from_le_bytes(data[1..9].try_into()?);
                 let compressed = &data[9..];
-                let mut decoder = zstd::Decoder::new(compressed)?;
-                let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed)?;
-                decompressed
+                oxiarc_zstd::decompress(compressed)
+                    .map_err(|e| anyhow!("Zstd decompression failed: {e}"))?
             }
             #[cfg(not(feature = "zstd-compression"))]
             {

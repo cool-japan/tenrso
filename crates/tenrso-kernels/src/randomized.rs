@@ -58,7 +58,7 @@
 use crate::error::{KernelError, KernelResult};
 use scirs2_core::ndarray_ext::{s, Array1, Array2, ArrayView2, ScalarOperand};
 use scirs2_core::num_traits::{Float, NumAssign};
-use scirs2_core::random::{thread_rng, Rng, SeedableRng};
+use scirs2_core::random::{thread_rng, SeedableRng};
 use scirs2_core::StandardNormal;
 use std::iter::Sum;
 
@@ -169,7 +169,7 @@ where
     let full_density = <T as From<f64>>::from(density);
 
     Array2::from_shape_fn((rows, cols), |_| {
-        let p: f64 = rng.random();
+        let p: f64 = rng.random_f64();
         let p_t = <T as From<f64>>::from(p);
 
         if p_t < half_density {

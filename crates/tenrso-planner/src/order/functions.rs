@@ -6,7 +6,7 @@ use crate::api::{ContractionSpec, Plan, PlanHints, PlanNode, ReprHint};
 use crate::cost::{estimate_flops, TensorStats};
 use crate::parser::EinsumSpec;
 use anyhow::{anyhow, Result};
-use scirs2_core::random::{Rng, SeedableRng, StdRng};
+use scirs2_core::random::{RngExt, SeedableRng, StdRng};
 use std::collections::HashMap;
 
 use super::types::IntermediateTensor;
@@ -549,8 +549,8 @@ pub fn simulated_annealing_planner(
         if current_plan.nodes.len() < 2 {
             break;
         }
-        let i = rng.gen_range(0..current_plan.nodes.len());
-        let j = rng.gen_range(0..current_plan.nodes.len());
+        let i = rng.random_range(0..current_plan.nodes.len());
+        let j = rng.random_range(0..current_plan.nodes.len());
         if i == j {
             continue;
         }
@@ -647,7 +647,7 @@ pub fn genetic_algorithm_planner(
 
         // Fisher-Yates shuffle of nodes
         for i in (1..plan.nodes.len()).rev() {
-            let j = rng.gen_range(0..=i);
+            let j = rng.random_range(0..=i);
             plan.nodes.swap(i, j);
         }
 
@@ -682,7 +682,7 @@ pub fn genetic_algorithm_planner(
         while offspring.len() < population_size {
             // Tournament selection (size 3)
             let parent1_idx = (0..3)
-                .map(|_| rng.gen_range(0..population.len()))
+                .map(|_| rng.random_range(0..population.len()))
                 .min_by(|&a, &b| {
                     population[a]
                         .estimated_flops
@@ -692,7 +692,7 @@ pub fn genetic_algorithm_planner(
                 .unwrap();
 
             let parent2_idx = (0..3)
-                .map(|_| rng.gen_range(0..population.len()))
+                .map(|_| rng.random_range(0..population.len()))
                 .min_by(|&a, &b| {
                     population[a]
                         .estimated_flops
@@ -705,7 +705,7 @@ pub fn genetic_algorithm_planner(
             let mut child = population[parent1_idx].clone();
             if child.nodes.len() > 1 {
                 let crossover_point = rng
-                    .gen_range(1..child.nodes.len())
+                    .random_range(1..child.nodes.len())
                     .max(1)
                     .min(child.nodes.len() - 1);
 
@@ -723,7 +723,7 @@ pub fn genetic_algorithm_planner(
 
             // Mutation: swap random adjacent nodes
             if rng.random::<f64>() < mutation_rate && child.nodes.len() > 1 {
-                let swap_idx = rng.gen_range(0..child.nodes.len() - 1);
+                let swap_idx = rng.random_range(0..child.nodes.len() - 1);
                 child.nodes.swap(swap_idx, swap_idx + 1);
             }
 

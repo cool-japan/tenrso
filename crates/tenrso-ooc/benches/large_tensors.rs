@@ -5,7 +5,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use scirs2_core::ndarray_ext::Array;
-use scirs2_core::random::{rngs::StdRng, RngCore, SeedableRng};
+use scirs2_core::random::{rngs::StdRng, Rng, SeedableRng};
 use std::hint::black_box;
 use tenrso_core::DenseND;
 use tenrso_ooc::{ChunkSpec, PrefetchStrategy, Prefetcher, StreamConfig, StreamingExecutor};

@@ -27,7 +27,7 @@
 
 use anyhow::Result;
 use scirs2_core::ndarray_ext::Array2;
-use scirs2_core::random::{rngs::StdRng, Rng, SeedableRng};
+use scirs2_core::random::{rngs::StdRng, RngExt, SeedableRng};
 use std::time::Instant;
 use tenrso_core::DenseND;
 use tenrso_kernels::mttkrp;

@@ -205,7 +205,7 @@ fn generate_mps_network(
     physical_dim: usize,
     depth: usize,
 ) -> anyhow::Result<Vec<DenseND<f64>>> {
-    use scirs2_core::random::{Rng, SeedableRng, StdRng};
+    use scirs2_core::random::{RngExt, SeedableRng, StdRng};
 
     let mut rng = StdRng::seed_from_u64(42);
     let mut tensors = Vec::new();

@@ -115,7 +115,7 @@ proptest! {
         chunk_size in chunk_size_strategy(20),
         seed in any::<u64>(),
     ) {
-        use scirs2_core::random::{rngs::StdRng, SeedableRng, RngCore};
+        use scirs2_core::random::{rngs::StdRng, Rng, SeedableRng};
 
         // Create deterministic random tensors
         let mut rng = StdRng::seed_from_u64(seed);
@@ -160,7 +160,7 @@ proptest! {
         chunk_size in chunk_size_strategy(20),
         seed in any::<u64>(),
     ) {
-        use scirs2_core::random::{rngs::StdRng, SeedableRng, RngCore};
+        use scirs2_core::random::{rngs::StdRng, Rng, SeedableRng};
 
         let mut rng = StdRng::seed_from_u64(seed);
         let a_data: Vec<f64> = (0..rows * cols)
@@ -204,7 +204,7 @@ proptest! {
         chunk_size in chunk_size_strategy(20),
         seed in any::<u64>(),
     ) {
-        use scirs2_core::random::{rngs::StdRng, SeedableRng, RngCore};
+        use scirs2_core::random::{rngs::StdRng, Rng, SeedableRng};
 
         let mut rng = StdRng::seed_from_u64(seed);
         let a_data: Vec<f64> = (0..rows * cols)
@@ -255,7 +255,7 @@ proptest! {
         chunk_size in 2usize..6,
         seed in any::<u64>(),
     ) {
-        use scirs2_core::random::{rngs::StdRng, SeedableRng, RngCore};
+        use scirs2_core::random::{rngs::StdRng, Rng, SeedableRng};
 
         let mut rng = StdRng::seed_from_u64(seed);
         let a_data: Vec<f64> = (0..m * k)

@@ -197,6 +197,21 @@ cargo bench --workspace
 - `ooc` - Out-of-core processing
 - `csf` - CSF/HiCOO sparse formats
 
+## Sponsorship
+
+TenRSo is developed and maintained by **COOLJAPAN OU (Team Kitasan)**.
+
+If you find TenRSo useful, please consider sponsoring the project to support continued development of the Pure Rust ecosystem.
+
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-red?logo=github)](https://github.com/sponsors/cool-japan)
+
+**[https://github.com/sponsors/cool-japan](https://github.com/sponsors/cool-japan)**
+
+Your sponsorship helps us:
+- Maintain and improve the COOLJAPAN ecosystem
+- Keep the entire ecosystem (OxiBLAS, OxiFFT, SciRS2, etc.) 100% Pure Rust
+- Provide long-term support and security updates
+
 ## License
 
 Apache-2.0

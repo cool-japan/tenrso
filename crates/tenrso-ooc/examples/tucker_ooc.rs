@@ -161,7 +161,7 @@ fn main() -> anyhow::Result<()> {
 /// Generate a synthetic low-rank tensor by constructing factor matrices
 fn generate_low_rank_tensor(shape: &[usize], ranks: &[usize]) -> anyhow::Result<DenseND<f64>> {
     use scirs2_core::ndarray_ext::Array2;
-    use scirs2_core::random::{Rng, SeedableRng, StdRng};
+    use scirs2_core::random::{RngExt, SeedableRng, StdRng};
 
     let mut rng = StdRng::seed_from_u64(42);
 

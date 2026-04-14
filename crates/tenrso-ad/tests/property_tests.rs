@@ -347,8 +347,8 @@ proptest! {
 
         // Create random vectors with reproducible seed
         let mut rng = StdRng::seed_from_u64(seed);
-        let a_vec: Vec<f64> = (0..size).map(|_| rng.gen_range(-10.0..10.0)).collect();
-        let b_vec: Vec<f64> = (0..size).map(|_| rng.gen_range(-10.0..10.0)).collect();
+        let a_vec: Vec<f64> = (0..size).map(|_| rng.random_range(-10.0..10.0)).collect();
+        let b_vec: Vec<f64> = (0..size).map(|_| rng.random_range(-10.0..10.0)).collect();
 
         let a = DenseND::from_vec(a_vec.clone(), &[size]).unwrap();
         let b = DenseND::from_vec(b_vec.clone(), &[size]).unwrap();
@@ -407,19 +407,19 @@ proptest! {
         // Fill with random values in [-2, 2]
         for i in 0..n0 {
             for beta in 0..r {
-                *core0.get_mut(&[0, i, beta]).unwrap() = rng.gen_range(-2.0..2.0);
+                *core0.get_mut(&[0, i, beta]).unwrap() = rng.random_range(-2.0..2.0);
             }
         }
         for alpha in 0..r {
             for j in 0..n1 {
-                *core1.get_mut(&[alpha, j, 0]).unwrap() = rng.gen_range(-2.0..2.0);
+                *core1.get_mut(&[alpha, j, 0]).unwrap() = rng.random_range(-2.0..2.0);
             }
         }
 
         // Random gradient output
         let mut grad_data = Vec::with_capacity(n0 * n1);
         for _ in 0..(n0 * n1) {
-            grad_data.push(rng.gen_range(-1.0..1.0));
+            grad_data.push(rng.random_range(-1.0..1.0));
         }
         let grad_output = DenseND::from_vec(grad_data, &[n0, n1]).unwrap();
 

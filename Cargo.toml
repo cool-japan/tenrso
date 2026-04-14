@@ -25,25 +25,25 @@ anyhow = "1.0.102"
 thiserror = "2.0.18"
 log = "0.4.29"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "json"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-indexmap = "2.13.0"
+indexmap = "2.14.0"
 smallvec = "1.15.1"
-arrow = { version = "58.0.0", default-features = false, features = ["ipc"] }
-parquet = "58.0.0"
+arrow = { version = "58.1.0", default-features = false, features = ["ipc"] }
+parquet = "58.1.0"
 memmap2 = "0.9.10"
-lz4 = "1.28.1"
-zstd = "0.13.3"
+oxiarc-lz4 = "0.2"
+oxiarc-zstd = "0.2"
 criterion = { version = "0.8.2", features = ["html_reports"] }
-proptest = "1.10"
-rayon = "1.11"
+proptest = "1.11"
+rayon = "1.12"
 opentelemetry = "0.31.0"
 opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.31.0", features = ["tokio"] }
+opentelemetry-otlp = { version = "0.31.1", features = ["tokio"] }
 opentelemetry-semantic-conventions = "0.31.0"
 prometheus = "0.14.0"
-tokio = { version = "1.50.0", features = ["rt", "macros"] }
+tokio = { version = "1.51.1", features = ["rt", "macros"] }
 parking_lot = "0.12.5"
 lazy_static = "1.5.0"
 tikv-jemallocator = "0.6.1"
@@ -55,17 +55,17 @@ dashmap = "6.1.0"
 tonic = { version = "0.14.5", features = ["transport"] }
 tonic-build = "0.14.5"
 prost = "0.14.3"
-oxicode = { version = "0.1.1", features = ["serde"] }
+oxicode = { version = "0.2", features = ["serde"] }
 bytes = "1.11.1"
 futures = "0.3.32"
 crc32fast = "1.5.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh64"] }
-blake3 = "1.8.3"
+blake3 = "1.8.4"
 
 # SciRS2 ecosystem (MANDATORY - see SCIRS2_INTEGRATION_POLICY.md)
-scirs2-core = { version = "0.3.0", features = ["array", "random", "parallel"] }
-scirs2-linalg = { version = "0.3.0" }
-scirs2-fft = { version = "0.3.0" }
+scirs2-core = { version = "0.4.2", features = ["array", "random", "parallel"] }
+scirs2-linalg = { version = "0.4.2" }
+scirs2-fft = { version = "0.4.2" }
 
 # TenRSo internal crates
 tenrso = { version = "0.1.0-rc.1", path = "crates/tenrso" }
