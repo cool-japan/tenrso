@@ -338,9 +338,11 @@ pub struct PlanSimulation {
 impl PlanSimulation {
     /// Get the critical path (slowest step)
     pub fn critical_step(&self) -> Option<&StepSimulation> {
-        self.steps
-            .iter()
-            .max_by(|a, b| a.total_time_ms.partial_cmp(&b.total_time_ms).unwrap())
+        self.steps.iter().max_by(|a, b| {
+            a.total_time_ms
+                .partial_cmp(&b.total_time_ms)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// Get the total computation time (excluding memory transfers)
@@ -503,13 +505,13 @@ fn simulate_step(node: &PlanNode, hardware: &HardwareModel) -> StepSimulation {
     };
 
     // GPU-specific: PCIe transfer time (CPU ↔ GPU)
-    let pcie_transfer_time_ms = if hardware.is_gpu() && hardware.pcie_bandwidth.is_some() {
-        let pcie_bw = hardware.pcie_bandwidth.unwrap();
-        // Assume data needs to be transferred to GPU and results back to CPU
-        let pcie_transfer_s = (bytes_transferred as f64) / pcie_bw;
-        pcie_transfer_s * 1000.0
-    } else {
-        0.0
+    let pcie_transfer_time_ms = match (hardware.is_gpu(), hardware.pcie_bandwidth) {
+        (true, Some(pcie_bw)) => {
+            // Assume data needs to be transferred to GPU and results back to CPU
+            let pcie_transfer_s = (bytes_transferred as f64) / pcie_bw;
+            pcie_transfer_s * 1000.0
+        }
+        _ => 0.0,
     };
 
     // Check if operation fits in cache (largest cache level)

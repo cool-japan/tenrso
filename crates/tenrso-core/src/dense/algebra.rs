@@ -678,8 +678,12 @@ where
                 }
             }
 
-            // Check for singularity
-            if max_val < T::from(1e-10).unwrap() {
+            // Check for singularity; the 1e-10 tolerance is representable
+            // in any reasonable numeric `T`. Fall back to `T::zero()` so we
+            // still check `max_val < 0` conservatively (any singular-ish
+            // pivot will still be caught below).
+            let eps: T = T::from(1e-10).unwrap_or_else(T::zero);
+            if max_val < eps {
                 anyhow::bail!("Matrix is singular and cannot be inverted");
             }
 
@@ -794,8 +798,10 @@ where
                 }
             }
 
-            // Check for singularity
-            if u[&[k, k]].abs() < T::from(1e-10).unwrap() {
+            // Check for singularity. See note in `inv()` about the 1e-10
+            // tolerance and the `T::zero()` fallback.
+            let eps: T = T::from(1e-10).unwrap_or_else(T::zero);
+            if u[&[k, k]].abs() < eps {
                 anyhow::bail!("Matrix is singular, LU decomposition failed");
             }
 
@@ -922,7 +928,9 @@ where
         let (m, n) = (self.shape()[0], self.shape()[1]);
         let mut a = self.clone();
         let mut rank = 0;
-        let tol = T::from(1e-10).unwrap();
+        // Rank tolerance; fall back to zero if the cast fails (strict
+        // non-zero check).
+        let tol: T = T::from(1e-10).unwrap_or_else(T::zero);
 
         for col in 0..n.min(m) {
             // Find pivot

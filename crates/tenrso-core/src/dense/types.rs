@@ -100,6 +100,35 @@ where
         Ok(Self { data: array })
     }
 
+    /// Construct a `DenseND` from a flat buffer whose length is guaranteed to
+    /// match the target shape (a shape-preserving operation).
+    ///
+    /// This is an internal helper intended for use inside shape-preserving
+    /// elementwise or reduction operations where the output vector is obtained
+    /// by iterating the input buffer (so the length trivially matches). It
+    /// consolidates what would otherwise be scattered `from_vec(...).unwrap()`
+    /// call sites into a single location with a documented invariant.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal invariant is violated (i.e. `data.len()`
+    /// does not equal the product of `shape`). Callers must guarantee this
+    /// precondition. Because this is reachable only via a logic bug in the
+    /// caller, a panic here indicates a broken invariant rather than a
+    /// user-facing error.
+    #[inline]
+    pub(crate) fn from_vec_unchecked(data: Vec<T>, shape: &[usize]) -> Self {
+        debug_assert_eq!(
+            data.len(),
+            shape.iter().product::<usize>(),
+            "from_vec_unchecked: data length does not match shape"
+        );
+        Self {
+            data: Array::from_shape_vec(IxDyn(shape), data)
+                .expect("shape-preserving op: data length matches shape"),
+        }
+    }
+
     /// Get the rank (number of dimensions) of this tensor
     ///
     /// # Examples

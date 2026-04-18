@@ -145,8 +145,9 @@ impl ScreePlotData {
         variance_threshold_90: f64,
         variance_threshold_95: f64,
     ) -> Self {
-        // Sort descending
-        singular_values.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        // Sort descending; `partial_cmp` only returns `None` for NaN, in which
+        // case we treat the values as equal to avoid panicking.
+        singular_values.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
         // Compute variance explained (singular value squared)
         let total_variance: f64 = singular_values.iter().map(|s| s * s).sum();
@@ -602,8 +603,10 @@ where
         .zip(mask_view.iter())
     {
         if *m > 0.5 {
-            // Entry is included in mask
-            let diff = (*o - *r).to_f64().unwrap();
+            // Entry is included in mask. `T: Float` guarantees `to_f64`
+            // succeeds for all supported scalar types (f32, f64); zero is a
+            // safe fallback if a future type ever fails the conversion.
+            let diff = (*o - *r).to_f64().unwrap_or(0.0);
             error_sq += diff * diff;
             count += 1.0;
         }

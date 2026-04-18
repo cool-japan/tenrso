@@ -25,12 +25,35 @@
 
 use anyhow::Result;
 use scirs2_core::ndarray_ext::{Array2, ScalarOperand};
-use scirs2_core::numeric::{Float, FloatConst, NumAssign, NumCast};
+use scirs2_core::numeric::{Float, FloatConst, NumAssign, NumCast, ToPrimitive};
 use scirs2_linalg::svd;
 use std::iter::Sum;
 use tenrso_core::DenseND;
 use tenrso_kernels::nmode_product;
 use thiserror::Error;
+
+/// Infallibly cast a literal / well-bounded numeric value to `T`.
+///
+/// SAFETY: all call sites use numeric literals or non-negative `usize`
+/// values that are representable in any supported `T: Float` (f32, f64).
+/// Returning `T::zero()` in the unreachable failure path preserves
+/// numerical safety without a panic and respects the no-unwrap policy.
+#[inline]
+fn cast_lit<T: NumCast, V: ToPrimitive>(v: V) -> T {
+    T::from(v).unwrap_or_else(|| {
+        T::from(0u8).unwrap_or_else(|| {
+            unreachable!("NumCast::from(0u8) must succeed for primitive numeric T")
+        })
+    })
+}
+
+/// Convert an `f64` tolerance/threshold scalar to `T` with a typed error.
+#[inline]
+fn cast_f64<T: NumCast>(val: f64, ctx: &'static str) -> Result<T, TuckerError> {
+    NumCast::from(val).ok_or_else(|| {
+        TuckerError::ShapeMismatch(format!("could not convert {ctx}={val} to scalar type"))
+    })
+}
 
 #[derive(Error, Debug)]
 pub enum TuckerError {
@@ -71,7 +94,7 @@ where
 
 impl<T> TuckerDecomp<T>
 where
-    T: Float + NumCast,
+    T: Float + NumCast + 'static,
 {
     /// Reconstruct the original tensor from Tucker decomposition
     ///
@@ -219,7 +242,7 @@ where
 
                 // Compute cumulative energy
                 let total_energy: T = s.iter().map(|&sigma| sigma * sigma).sum();
-                let target_energy = total_energy * NumCast::from(threshold).unwrap();
+                let target_energy = total_energy * cast_f64::<T>(threshold, "energy threshold")?;
 
                 let mut cumulative_energy = T::zero();
                 let mut rank = 1;
@@ -244,7 +267,7 @@ where
                 }
 
                 let s_max = s[0];
-                let cutoff = s_max * NumCast::from(threshold).unwrap();
+                let cutoff = s_max * cast_f64::<T>(threshold, "singular value threshold")?;
 
                 let mut rank = 1;
                 for (i, &sigma) in s.iter().enumerate() {
@@ -290,6 +313,8 @@ where
 /// Compute Tucker-HOSVD decomposition
 ///
 /// One-pass algorithm based on SVD of mode-n unfoldings.
+/// Automatically uses randomized SVD for large matrices where
+/// the target rank is much smaller than the matrix dimension.
 ///
 /// # Arguments
 ///
@@ -309,7 +334,7 @@ where
 ///
 /// # Complexity
 ///
-/// Time: O(N × Imax² × ∏ᵢ Iᵢ) for SVD computations
+/// Time: O(N × Imax × ∏ᵢ Iᵢ × Rᵢ) with randomized SVD (much faster than full SVD)
 /// Space: O(Imax² + ∏ᵢ Rᵢ) for unfolding and core tensor
 ///
 /// # Examples
@@ -364,13 +389,25 @@ where
             .unfold(mode)
             .map_err(|e| TuckerError::ShapeMismatch(format!("Unfold failed: {}", e)))?;
 
-        // Compute SVD: X_(mode) = U Σ Vᵀ
-        // We only need the first 'rank' left singular vectors
-        let (u, _s, _vt) = svd(&unfolded.view(), false, None)
-            .map_err(|e| TuckerError::SvdError(format!("SVD failed for mode {}: {}", mode, e)))?;
+        let (rows, cols) = (unfolded.shape()[0], unfolded.shape()[1]);
 
-        // Extract first 'rank' columns of U
-        let factor = extract_columns(&u, rank);
+        // Use randomized SVD when the matrix is large relative to target rank
+        let factor = if crate::utils::should_use_randomized_svd(rows, cols, rank) {
+            let (u, _s, _vt) = crate::utils::randomized_svd_truncated(
+                &unfolded.view(), rank, 10, 2,
+            ).map_err(|e| TuckerError::SvdError(format!(
+                "Randomized SVD failed for mode {}: {}", mode, e
+            )))?;
+            u
+        } else {
+            // Full SVD for small matrices
+            let (u, _s, _vt) = svd(&unfolded.view(), false, None)
+                .map_err(|e| TuckerError::SvdError(format!(
+                    "SVD failed for mode {}: {}", mode, e
+                )))?;
+            extract_columns(&u, rank)
+        };
+
         factors.push(factor);
     }
 
@@ -388,6 +425,8 @@ where
 /// Compute Tucker-HOOI decomposition
 ///
 /// Iterative refinement of HOSVD using alternating least squares.
+/// Uses randomized SVD for large unfolded matrices, and tracks convergence
+/// via core tensor norm change (much cheaper than full reconstruction).
 ///
 /// # Arguments
 ///
@@ -418,14 +457,14 @@ pub fn tucker_hooi<T>(
 where
     T: Float + NumCast + NumAssign + Sum + Send + Sync + ScalarOperand + std::fmt::Debug + 'static,
 {
-    // Initialize with HOSVD
+    // Initialize with HOSVD (already uses randomized SVD for large matrices)
     let mut decomp = tucker_hosvd(tensor, ranks)?;
     let n_modes = tensor.rank();
+    let tol_t: T = cast_f64(tol, "tol")?;
 
-    // Compute initial error
-    let mut prev_error = decomp
-        .compute_error(tensor)
-        .map_err(|e| TuckerError::ShapeMismatch(format!("Error computation failed: {}", e)))?;
+    // Track convergence via core tensor Frobenius norm (much cheaper than full
+    // reconstruction error). The core norm is monotonically related to fit quality.
+    let mut prev_core_norm = core_frob_norm(&decomp.core);
 
     // HOOI iterations
     let mut actual_iters = 0;
@@ -438,35 +477,61 @@ where
             // Compute Y = X ×₁ U₁ᵀ ... ×ₘ₋₁ Uₘ₋₁ᵀ ×ₘ₊₁ Uₘ₊₁ᵀ ... ×ₙ Uₙᵀ
             let y = compute_mode_unfolding_contraction(tensor, &decomp.factors, mode)?;
 
-            // Unfold Y along mode and compute SVD
+            // Unfold Y along mode
             let y_unfolded = y
                 .unfold(mode)
                 .map_err(|e| TuckerError::ShapeMismatch(format!("Unfold failed: {}", e)))?;
 
-            let (u, _s, _vt) = svd(&y_unfolded.view(), false, None)
-                .map_err(|e| TuckerError::SvdError(format!("SVD failed: {}", e)))?;
+            let (rows, cols) = (y_unfolded.shape()[0], y_unfolded.shape()[1]);
+            let rank = ranks[mode];
 
-            decomp.factors[mode] = extract_columns(&u, ranks[mode]);
+            // Use randomized SVD for large matrices
+            let factor = if crate::utils::should_use_randomized_svd(rows, cols, rank) {
+                let (u, _s, _vt) = crate::utils::randomized_svd_truncated(
+                    &y_unfolded.view(), rank, 10, 1,
+                ).map_err(|e| TuckerError::SvdError(format!(
+                    "Randomized SVD failed: {}", e
+                )))?;
+                u
+            } else {
+                let (u, _s, _vt) = svd(&y_unfolded.view(), false, None)
+                    .map_err(|e| TuckerError::SvdError(format!("SVD failed: {}", e)))?;
+                extract_columns(&u, rank)
+            };
+
+            decomp.factors[mode] = factor;
         }
 
         // Recompute core tensor
         decomp.core = compute_core_tensor(tensor, &decomp.factors)?;
 
-        // Check convergence
-        let error = decomp
-            .compute_error(tensor)
-            .map_err(|e| TuckerError::ShapeMismatch(format!("Error computation failed: {}", e)))?;
+        // Check convergence via core norm change (cheap proxy for fit improvement)
+        let core_norm = core_frob_norm(&decomp.core);
+        let norm_change = (core_norm - prev_core_norm).abs()
+            / (prev_core_norm + T::epsilon());
 
-        let error_change = (prev_error - error).abs() / prev_error;
-        if error_change < NumCast::from(tol).unwrap() {
+        if iter > 0 && norm_change < tol_t {
             break;
         }
 
-        prev_error = error;
+        prev_core_norm = core_norm;
     }
 
     decomp.iters = actual_iters;
     Ok(decomp)
+}
+
+/// Compute Frobenius norm of a DenseND tensor using only Float (no FromPrimitive).
+fn core_frob_norm<T>(tensor: &DenseND<T>) -> T
+where
+    T: Float,
+{
+    let view = tensor.view();
+    let mut norm_sq = T::zero();
+    for &val in view.iter() {
+        norm_sq = norm_sq + val * val;
+    }
+    norm_sq.sqrt()
 }
 
 /// Extract first k columns from a matrix
@@ -487,21 +552,27 @@ where
 }
 
 /// Compute core tensor: G = X ×₁ U₁ᵀ ×₂ U₂ᵀ ... ×ₙ Uₙᵀ
+///
+/// Applies transposed factor matrices sorted by ascending output rank
+/// to shrink the intermediate tensor as quickly as possible.
 fn compute_core_tensor<T>(
     tensor: &DenseND<T>,
     factors: &[Array2<T>],
 ) -> Result<DenseND<T>, TuckerError>
 where
-    T: Float + NumCast,
+    T: Float + NumCast + 'static,
 {
     let mut result = tensor.clone();
 
-    // Apply transposed factor matrices in sequence
-    for (mode, factor) in factors.iter().enumerate() {
+    // Sort modes by ascending output rank for fastest shrinkage
+    let mut mode_order: Vec<usize> = (0..factors.len()).collect();
+    mode_order.sort_by_key(|&m| factors[m].ncols());
+
+    for mode in mode_order {
         let result_view = result.view();
 
         // Transpose factor matrix (Uᵀ)
-        let factor_t = transpose_matrix(factor);
+        let factor_t = transpose_matrix(&factors[mode]);
 
         let contracted = nmode_product(&result_view, &factor_t.view(), mode)
             .map_err(|e| TuckerError::ShapeMismatch(format!("N-mode product failed: {}", e)))?;
@@ -512,43 +583,41 @@ where
     Ok(result)
 }
 
-/// Transpose a matrix
+/// Transpose a matrix (using ndarray's efficient transpose)
 fn transpose_matrix<T>(matrix: &Array2<T>) -> Array2<T>
 where
     T: Clone + Float,
 {
-    let (rows, cols) = (matrix.shape()[0], matrix.shape()[1]);
-    let mut result = Array2::<T>::zeros((cols, rows));
-
-    for i in 0..rows {
-        for j in 0..cols {
-            result[[j, i]] = matrix[[i, j]];
-        }
-    }
-    result
+    matrix.t().to_owned()
 }
 
 /// Compute Y = X ×₁ U₁ᵀ ... ×ₘ₋₁ Uₘ₋₁ᵀ ×ₘ₊₁ Uₘ₊₁ᵀ ... ×ₙ Uₙᵀ (skip mode m)
+///
+/// Contracts with factor matrices sorted by ascending output rank, so that
+/// the intermediate tensor shrinks as quickly as possible. This reduces
+/// the total number of floating-point operations significantly for
+/// heterogeneous ranks (e.g. [64, 64, 32]).
 fn compute_mode_unfolding_contraction<T>(
     tensor: &DenseND<T>,
     factors: &[Array2<T>],
     skip_mode: usize,
 ) -> Result<DenseND<T>, TuckerError>
 where
-    T: Float + NumCast,
+    T: Float + NumCast + 'static,
 {
     let mut result = tensor.clone();
 
-    for (mode, factor) in factors.iter().enumerate() {
-        if mode == skip_mode {
-            continue;
-        }
+    // Sort modes by ascending output rank (factor.nrows() is I_k, ncols() is R_k).
+    // Contracting the mode with smallest R_k first shrinks the tensor fastest.
+    let mut mode_order: Vec<usize> = (0..factors.len())
+        .filter(|&m| m != skip_mode)
+        .collect();
+    mode_order.sort_by_key(|&m| factors[m].ncols());
 
+    for mode in mode_order {
         let result_view = result.view();
-        let factor_t = transpose_matrix(factor);
+        let factor_t = transpose_matrix(&factors[mode]);
 
-        // nmode_product doesn't remove dimensions, it just changes their size
-        // So mode indices don't shift - we always contract along the same mode index
         let contracted = nmode_product(&result_view, &factor_t.view(), mode)
             .map_err(|e| TuckerError::ShapeMismatch(format!("Contraction failed: {}", e)))?;
 
@@ -666,11 +735,13 @@ where
         let target_rank = (rank + oversampling).min(rows).min(cols);
 
         // Generate random Gaussian matrix: Ω ∈ ℝ^(cols × target_rank)
-        let normal = Normal::new(0.0, 1.0).unwrap();
+        let normal = Normal::new(0.0, 1.0).map_err(|e| {
+            TuckerError::ShapeMismatch(format!("failed to construct Normal(0.0, 1.0): {e}"))
+        })?;
         let mut omega = Array2::<T>::zeros((cols, target_rank));
         for i in 0..cols {
             for j in 0..target_rank {
-                omega[[i, j]] = T::from(normal.sample(&mut rng)).unwrap();
+                omega[[i, j]] = cast_lit(normal.sample(&mut rng));
             }
         }
 
@@ -828,12 +899,13 @@ where
     let mut rng = thread_rng();
     let mut factors: Vec<Array2<T>> = Vec::with_capacity(n_modes);
 
+    let base: T = cast_lit(0.01_f64);
     for mode in 0..n_modes {
         let mut factor = Array2::<T>::zeros((shape[mode], ranks[mode]));
         for i in 0..shape[mode] {
             for j in 0..ranks[mode] {
                 // Small random initialization in [0.01, 1.01]
-                factor[[i, j]] = T::from(0.01).unwrap() + T::from(rng.random::<f64>()).unwrap();
+                factor[[i, j]] = base + cast_lit::<T, _>(rng.random::<f64>());
             }
         }
         factors.push(factor);
@@ -849,8 +921,8 @@ where
         }
     }
 
-    let eps = T::from(1e-10).unwrap(); // Small constant to avoid division by zero
-    let tol_t = T::from(tol).unwrap();
+    let eps: T = cast_lit(1e-10_f64); // Small constant to avoid division by zero
+    let tol_t: T = cast_f64(tol, "tol")?;
 
     // Track error for convergence
     let tensor_norm = tensor.frobenius_norm();
@@ -1106,7 +1178,7 @@ where
         factors.push(factor);
     }
 
-    let tol_t = T::from(tol).unwrap();
+    let tol_t: T = cast_f64(tol, "tol")?;
     let mut prev_fit = T::zero();
 
     let mut actual_iters = 0;
@@ -1163,7 +1235,7 @@ where
 
         // Check convergence
         let fit_change = if iter > 0 {
-            (fit - prev_fit).abs() / (prev_fit + T::from(1e-10).unwrap())
+            (fit - prev_fit).abs() / (prev_fit + cast_lit::<T, _>(1e-10_f64))
         } else {
             T::one()
         };
@@ -1240,7 +1312,7 @@ where
     }
 
     // Fit = 1 - ||X - R||_F^2 / ||X||_F^2 (for observed entries)
-    let fit = T::one() - norm_diff_sq / (norm_tensor_sq + T::from(1e-10).unwrap());
+    let fit = T::one() - norm_diff_sq / (norm_tensor_sq + cast_lit::<T, _>(1e-10_f64));
 
     Ok(fit)
 }
@@ -1269,8 +1341,14 @@ where
     let shape = tensor1.shape();
     let mut result_data = ArrayD::<T>::zeros(shape);
 
+    // Freshly allocated `ArrayD::zeros` produces contiguous memory, so
+    // `as_slice_mut` is expected to succeed. Propagate a typed error if
+    // the layout ever changes instead of panicking.
+    let slice = result_data
+        .as_slice_mut()
+        .ok_or_else(|| TuckerError::ShapeMismatch("result_data is not contiguous".to_string()))?;
     for (i, (&v1, &v2)) in view1.iter().zip(view2.iter()).enumerate() {
-        result_data.as_slice_mut().unwrap()[i] = v1 * v2;
+        slice[i] = v1 * v2;
     }
 
     Ok(DenseND::from_array(result_data))

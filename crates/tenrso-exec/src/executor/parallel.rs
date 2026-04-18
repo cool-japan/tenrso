@@ -119,7 +119,9 @@ where
         let input_view = input.view();
         let total_elements = input_view.len();
         let sum: T = input_view.iter().cloned().sum();
-        let mean = sum / T::from_usize(total_elements).unwrap();
+        let divisor = T::from_usize(total_elements)
+            .ok_or_else(|| anyhow::anyhow!("parallel mean: cannot convert element count to T"))?;
+        let mean = sum / divisor;
 
         let result_array = Array::from_elem(IxDyn(&[]), mean);
         return Ok(DenseND::from_array(result_array));

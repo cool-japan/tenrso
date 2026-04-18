@@ -365,7 +365,9 @@ where
                         grad.shape()
                     ));
                 }
-                let scalar = grad.get(&vec![0; grad.rank()]).unwrap();
+                let scalar = grad
+                    .get(&vec![0; grad.rank()])
+                    .ok_or_else(|| anyhow!("Failed to read scalar gradient element"))?;
 
                 // Apply scaling for mean reduction
                 let scaled_scalar = match self.reduction_type {

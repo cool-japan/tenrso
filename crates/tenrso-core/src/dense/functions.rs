@@ -267,9 +267,12 @@ mod tests {
     }
     #[test]
     fn test_squeeze_all_ones() {
+        // When every axis has size 1, squeeze collapses to a rank-0 scalar.
         let tensor = DenseND::<f64>::zeros(&[1, 1, 1]);
         let squeezed = tensor.squeeze();
-        assert_eq!(squeezed.shape(), &[1]);
+        assert_eq!(squeezed.shape(), &[] as &[usize]);
+        assert_eq!(squeezed.rank(), 0);
+        assert_eq!(squeezed.len(), 1);
     }
     #[test]
     fn test_squeeze_no_singletons() {

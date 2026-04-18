@@ -2,7 +2,7 @@
 
 Sparse tensor formats, operations, linear solvers, graph algorithms, and more for TenRSo.
 
-**Version:** 0.1.0-rc.1 | **Status:** RC.1 — 426 tests passing (3 ignored), 100% pass rate | **Last Updated:** 2026-03-06
+**Version:** 0.1.0 | **Status:** Stable — 429 tests passing (0 ignored), 100% pass rate | **Last Updated:** 2026-04-14
 
 ## Overview
 
@@ -329,7 +329,7 @@ See `examples/` directory:
 
 ## Testing
 
-**RC.1 test coverage:** 426 passing (3 ignored), 100% pass rate
+**0.1.0 test coverage:** 429 passing (0 ignored), 100% pass rate
 - Property tests: 22 (proptest framework)
 - Benchmark groups: 21
 - Zero `todo!()` / `unimplemented!()` macros

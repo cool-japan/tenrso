@@ -9,7 +9,7 @@ use super::registry::DistributedRegistry;
 use anyhow::{anyhow, Result};
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,8 +36,9 @@ pub struct NetworkConfig {
 
 impl Default for NetworkConfig {
     fn default() -> Self {
+        // Construct 127.0.0.1:8000 from literals — infallible, no parsing.
         Self {
-            bind_address: "127.0.0.1:8000".parse().unwrap(),
+            bind_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8000),
             max_message_size: 1024 * 1024 * 1024, // 1GB
             connection_timeout: Duration::from_secs(10),
             read_timeout: Duration::from_secs(30),

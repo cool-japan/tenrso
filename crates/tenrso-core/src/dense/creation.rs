@@ -43,8 +43,10 @@ where
                 <T as From<f64>>::from(sample)
             })
             .collect();
+        // `data.len() == shape.iter().product()` by construction above.
         Self {
-            data: Array::from_shape_vec(IxDyn(shape), data).unwrap(),
+            data: Array::from_shape_vec(IxDyn(shape), data)
+                .expect("random_uniform: generated data length matches shape"),
         }
     }
 
@@ -86,8 +88,10 @@ where
             })
             .take(total)
             .collect();
+        // `data.len() == total` by construction of the Box-Muller loop above.
         Self {
-            data: Array::from_shape_vec(IxDyn(shape), data).unwrap(),
+            data: Array::from_shape_vec(IxDyn(shape), data)
+                .expect("random_normal: generated data length matches shape"),
         }
     }
 }
@@ -172,7 +176,8 @@ where
     {
         let n = ((stop - start) / step).ceil() as usize;
         let data: Vec<T> = (0..n).map(|i| T::from(start + step * i as f64)).collect();
-        Self::from_vec(data, &[n]).unwrap()
+        // `data.len() == n` by construction.
+        Self::from_vec_unchecked(data, &[n])
     }
 
     /// Create a 1D tensor with linearly spaced values
@@ -199,15 +204,17 @@ where
         T: From<f64>,
     {
         if num == 0 {
-            return Self::from_vec(vec![], &[0]).unwrap();
+            // Zero-length data in a [0] shape is trivially consistent.
+            return Self::from_vec_unchecked(vec![], &[0]);
         }
         if num == 1 {
-            return Self::from_vec(vec![T::from(start)], &[1]).unwrap();
+            return Self::from_vec_unchecked(vec![T::from(start)], &[1]);
         }
 
         let step = (stop - start) / (num - 1) as f64;
         let data: Vec<T> = (0..num).map(|i| T::from(start + step * i as f64)).collect();
-        Self::from_vec(data, &[num]).unwrap()
+        // `data.len() == num` by construction.
+        Self::from_vec_unchecked(data, &[num])
     }
 
     /// Create a one-hot encoded tensor from indices.

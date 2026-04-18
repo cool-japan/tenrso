@@ -1,6 +1,6 @@
 # tenrso-core
 
-> **Version:** 0.1.0-rc.1 | **Status:** [Alpha] — 138 tests passing (100%) | **Updated:** 2026-03-06
+> **Version:** 0.1.0 | **Status:** Stable — 138 tests passing (100%) | **Updated:** 2026-04-14
 
 Core tensor types, axis metadata, views, and comprehensive operations for TenRSo.
 

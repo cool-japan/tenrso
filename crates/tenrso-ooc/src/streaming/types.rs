@@ -16,6 +16,19 @@ use scirs2_core::parallel_ops::*;
 use crate::prefetch::{PrefetchStrategy, Prefetcher};
 use crate::profiling::{ProfileSummary, Profiler};
 
+/// Obtain the mutable contiguous slice of a freshly-allocated DenseND.
+///
+/// Arrays produced by `DenseND::zeros(shape)` are standard-layout by
+/// construction, so `as_slice_mut` always succeeds. This helper converts
+/// the hard invariant into a `Result` so any future divergence surfaces as
+/// an error rather than a panic.
+#[inline]
+fn contiguous_slice_mut(t: &mut DenseND<f64>) -> Result<&mut [f64]> {
+    t.as_array_mut()
+        .as_slice_mut()
+        .ok_or_else(|| anyhow!("internal: freshly-allocated DenseND is not contiguous"))
+}
+
 /// Element-wise operation types for optimized SIMD paths
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ElementwiseOp {
@@ -494,10 +507,7 @@ impl StreamingExecutor {
             let a_slice = a.as_slice();
             let b_slice = b.as_slice();
             let c_slice = c.as_slice();
-            let result_slice = result
-                .as_array_mut()
-                .as_slice_mut()
-                .expect("Contiguous array");
+            let result_slice = contiguous_slice_mut(&mut result)?;
             for i in 0..a_slice.len() {
                 result_slice[i] = a_slice[i].mul_add(b_slice[i], c_slice[i]);
             }
@@ -517,68 +527,43 @@ impl StreamingExecutor {
         let b_chunks = b.chunk(chunk_size, 0)?;
         let c_chunks = c.chunk(chunk_size, 0)?;
         let chunk_count = a_chunks.len();
+        let fma_chunk = |a_chunk: DenseND<f64>,
+                         b_chunk: DenseND<f64>,
+                         c_chunk: DenseND<f64>|
+         -> Result<DenseND<f64>> {
+            let mut result_chunk = DenseND::<f64>::zeros(a_chunk.shape());
+            let a_slice = a_chunk.as_slice();
+            let b_slice = b_chunk.as_slice();
+            let c_slice = c_chunk.as_slice();
+            let result_slice = contiguous_slice_mut(&mut result_chunk)?;
+            for i in 0..a_slice.len() {
+                result_slice[i] = a_slice[i].mul_add(b_slice[i], c_slice[i]);
+            }
+            Ok(result_chunk)
+        };
         #[cfg(feature = "parallel")]
         let result_chunks = if self.should_use_parallel(chunk_count) {
             a_chunks
                 .into_par_iter()
                 .zip(b_chunks.into_par_iter())
                 .zip(c_chunks.into_par_iter())
-                .map(|((a_chunk, b_chunk), c_chunk)| {
-                    let mut result_chunk = DenseND::<f64>::zeros(a_chunk.shape());
-                    let a_slice = a_chunk.as_slice();
-                    let b_slice = b_chunk.as_slice();
-                    let c_slice = c_chunk.as_slice();
-                    let result_slice = result_chunk
-                        .as_array_mut()
-                        .as_slice_mut()
-                        .expect("Contiguous array");
-                    for i in 0..a_slice.len() {
-                        result_slice[i] = a_slice[i].mul_add(b_slice[i], c_slice[i]);
-                    }
-                    result_chunk
-                })
-                .collect::<Vec<_>>()
+                .map(|((a_chunk, b_chunk), c_chunk)| fma_chunk(a_chunk, b_chunk, c_chunk))
+                .collect::<Result<Vec<_>>>()?
         } else {
             a_chunks
                 .into_iter()
                 .zip(b_chunks)
                 .zip(c_chunks)
-                .map(|((a_chunk, b_chunk), c_chunk)| {
-                    let mut result_chunk = DenseND::<f64>::zeros(a_chunk.shape());
-                    let a_slice = a_chunk.as_slice();
-                    let b_slice = b_chunk.as_slice();
-                    let c_slice = c_chunk.as_slice();
-                    let result_slice = result_chunk
-                        .as_array_mut()
-                        .as_slice_mut()
-                        .expect("Contiguous array");
-                    for i in 0..a_slice.len() {
-                        result_slice[i] = a_slice[i].mul_add(b_slice[i], c_slice[i]);
-                    }
-                    result_chunk
-                })
-                .collect::<Vec<_>>()
+                .map(|((a_chunk, b_chunk), c_chunk)| fma_chunk(a_chunk, b_chunk, c_chunk))
+                .collect::<Result<Vec<_>>>()?
         };
         #[cfg(not(feature = "parallel"))]
         let result_chunks: Vec<DenseND<f64>> = a_chunks
             .into_iter()
             .zip(b_chunks.into_iter())
             .zip(c_chunks.into_iter())
-            .map(|((a_chunk, b_chunk), c_chunk)| {
-                let mut result_chunk = DenseND::<f64>::zeros(a_chunk.shape());
-                let a_slice = a_chunk.as_slice();
-                let b_slice = b_chunk.as_slice();
-                let c_slice = c_chunk.as_slice();
-                let result_slice = result_chunk
-                    .as_array_mut()
-                    .as_slice_mut()
-                    .expect("Contiguous array");
-                for i in 0..a_slice.len() {
-                    result_slice[i] = a_slice[i].mul_add(b_slice[i], c_slice[i]);
-                }
-                result_chunk
-            })
-            .collect::<Vec<_>>();
+            .map(|((a_chunk, b_chunk), c_chunk)| fma_chunk(a_chunk, b_chunk, c_chunk))
+            .collect::<Result<Vec<_>>>()?;
         let result = DenseND::concatenate(&result_chunks, 0)?;
         let elapsed = start_time.elapsed();
         let element_count = a.shape().iter().product::<usize>();
@@ -605,46 +590,52 @@ impl StreamingExecutor {
                 b.shape()
             ));
         }
+        // Helper: apply the selected elementwise operation across two contiguous
+        // input slices, writing into the provided output slice. The output slice
+        // is obtained from a freshly-allocated `DenseND::zeros`, which guarantees
+        // a standard layout so the conversion is infallible in practice.
+        let apply_elementwise =
+            |a_slice: &[f64], b_slice: &[f64], out_slice: &mut [f64], op: ElementwiseOp| match op {
+                ElementwiseOp::Add => {
+                    for i in 0..a_slice.len() {
+                        out_slice[i] = a_slice[i] + b_slice[i];
+                    }
+                }
+                ElementwiseOp::Subtract => {
+                    for i in 0..a_slice.len() {
+                        out_slice[i] = a_slice[i] - b_slice[i];
+                    }
+                }
+                ElementwiseOp::Multiply => {
+                    for i in 0..a_slice.len() {
+                        out_slice[i] = a_slice[i] * b_slice[i];
+                    }
+                }
+                ElementwiseOp::Divide => {
+                    for i in 0..a_slice.len() {
+                        out_slice[i] = a_slice[i] / b_slice[i];
+                    }
+                }
+                ElementwiseOp::Min => {
+                    for i in 0..a_slice.len() {
+                        out_slice[i] = a_slice[i].min(b_slice[i]);
+                    }
+                }
+                ElementwiseOp::Max => {
+                    for i in 0..a_slice.len() {
+                        out_slice[i] = a_slice[i].max(b_slice[i]);
+                    }
+                }
+            };
+
         let shape = a.shape();
         if a.rank() == 1 {
             let mut result = DenseND::<f64>::zeros(shape);
             let a_slice = a.as_slice();
             let b_slice = b.as_slice();
-            let result_slice = result
-                .as_array_mut()
-                .as_slice_mut()
-                .expect("Contiguous array");
-            match op {
-                ElementwiseOp::Add => {
-                    for i in 0..a_slice.len() {
-                        result_slice[i] = a_slice[i] + b_slice[i];
-                    }
-                }
-                ElementwiseOp::Subtract => {
-                    for i in 0..a_slice.len() {
-                        result_slice[i] = a_slice[i] - b_slice[i];
-                    }
-                }
-                ElementwiseOp::Multiply => {
-                    for i in 0..a_slice.len() {
-                        result_slice[i] = a_slice[i] * b_slice[i];
-                    }
-                }
-                ElementwiseOp::Divide => {
-                    for i in 0..a_slice.len() {
-                        result_slice[i] = a_slice[i] / b_slice[i];
-                    }
-                }
-                ElementwiseOp::Min => {
-                    for i in 0..a_slice.len() {
-                        result_slice[i] = a_slice[i].min(b_slice[i]);
-                    }
-                }
-                ElementwiseOp::Max => {
-                    for i in 0..a_slice.len() {
-                        result_slice[i] = a_slice[i].max(b_slice[i]);
-                    }
-                }
+            {
+                let result_slice = contiguous_slice_mut(&mut result)?;
+                apply_elementwise(a_slice, b_slice, result_slice, op);
             }
             return Ok(result);
         }
@@ -656,149 +647,37 @@ impl StreamingExecutor {
         let a_chunks = a.chunk(chunk_size, 0)?;
         let b_chunks = b.chunk(chunk_size, 0)?;
         let chunk_count = a_chunks.len();
+        let elementwise_chunk =
+            |a_chunk: DenseND<f64>, b_chunk: DenseND<f64>| -> Result<DenseND<f64>> {
+                let mut result_chunk = DenseND::<f64>::zeros(a_chunk.shape());
+                let a_slice = a_chunk.as_slice();
+                let b_slice = b_chunk.as_slice();
+                {
+                    let result_slice = contiguous_slice_mut(&mut result_chunk)?;
+                    apply_elementwise(a_slice, b_slice, result_slice, op);
+                }
+                Ok(result_chunk)
+            };
         #[cfg(feature = "parallel")]
         let result_chunks = if self.should_use_parallel(chunk_count) {
             a_chunks
                 .into_par_iter()
                 .zip(b_chunks.into_par_iter())
-                .map(|(a_chunk, b_chunk)| {
-                    let mut result_chunk = DenseND::<f64>::zeros(a_chunk.shape());
-                    let a_slice = a_chunk.as_slice();
-                    let b_slice = b_chunk.as_slice();
-                    let result_slice = result_chunk
-                        .as_array_mut()
-                        .as_slice_mut()
-                        .expect("Contiguous array");
-                    match op {
-                        ElementwiseOp::Add => {
-                            for i in 0..a_slice.len() {
-                                result_slice[i] = a_slice[i] + b_slice[i];
-                            }
-                        }
-                        ElementwiseOp::Subtract => {
-                            for i in 0..a_slice.len() {
-                                result_slice[i] = a_slice[i] - b_slice[i];
-                            }
-                        }
-                        ElementwiseOp::Multiply => {
-                            for i in 0..a_slice.len() {
-                                result_slice[i] = a_slice[i] * b_slice[i];
-                            }
-                        }
-                        ElementwiseOp::Divide => {
-                            for i in 0..a_slice.len() {
-                                result_slice[i] = a_slice[i] / b_slice[i];
-                            }
-                        }
-                        ElementwiseOp::Min => {
-                            for i in 0..a_slice.len() {
-                                result_slice[i] = a_slice[i].min(b_slice[i]);
-                            }
-                        }
-                        ElementwiseOp::Max => {
-                            for i in 0..a_slice.len() {
-                                result_slice[i] = a_slice[i].max(b_slice[i]);
-                            }
-                        }
-                    }
-                    result_chunk
-                })
-                .collect::<Vec<_>>()
+                .map(|(a_chunk, b_chunk)| elementwise_chunk(a_chunk, b_chunk))
+                .collect::<Result<Vec<_>>>()?
         } else {
             a_chunks
                 .into_iter()
                 .zip(b_chunks)
-                .map(|(a_chunk, b_chunk)| {
-                    let mut result_chunk = DenseND::<f64>::zeros(a_chunk.shape());
-                    let a_slice = a_chunk.as_slice();
-                    let b_slice = b_chunk.as_slice();
-                    let result_slice = result_chunk
-                        .as_array_mut()
-                        .as_slice_mut()
-                        .expect("Contiguous array");
-                    match op {
-                        ElementwiseOp::Add => {
-                            for i in 0..a_slice.len() {
-                                result_slice[i] = a_slice[i] + b_slice[i];
-                            }
-                        }
-                        ElementwiseOp::Subtract => {
-                            for i in 0..a_slice.len() {
-                                result_slice[i] = a_slice[i] - b_slice[i];
-                            }
-                        }
-                        ElementwiseOp::Multiply => {
-                            for i in 0..a_slice.len() {
-                                result_slice[i] = a_slice[i] * b_slice[i];
-                            }
-                        }
-                        ElementwiseOp::Divide => {
-                            for i in 0..a_slice.len() {
-                                result_slice[i] = a_slice[i] / b_slice[i];
-                            }
-                        }
-                        ElementwiseOp::Min => {
-                            for i in 0..a_slice.len() {
-                                result_slice[i] = a_slice[i].min(b_slice[i]);
-                            }
-                        }
-                        ElementwiseOp::Max => {
-                            for i in 0..a_slice.len() {
-                                result_slice[i] = a_slice[i].max(b_slice[i]);
-                            }
-                        }
-                    }
-                    result_chunk
-                })
-                .collect::<Vec<_>>()
+                .map(|(a_chunk, b_chunk)| elementwise_chunk(a_chunk, b_chunk))
+                .collect::<Result<Vec<_>>>()?
         };
         #[cfg(not(feature = "parallel"))]
         let result_chunks: Vec<DenseND<f64>> = a_chunks
             .into_iter()
             .zip(b_chunks.into_iter())
-            .map(|(a_chunk, b_chunk)| {
-                let mut result_chunk = DenseND::<f64>::zeros(a_chunk.shape());
-                let a_slice = a_chunk.as_slice();
-                let b_slice = b_chunk.as_slice();
-                let result_slice = result_chunk
-                    .as_array_mut()
-                    .as_slice_mut()
-                    .expect("Contiguous array");
-                match op {
-                    ElementwiseOp::Add => {
-                        for i in 0..a_slice.len() {
-                            result_slice[i] = a_slice[i] + b_slice[i];
-                        }
-                    }
-                    ElementwiseOp::Subtract => {
-                        for i in 0..a_slice.len() {
-                            result_slice[i] = a_slice[i] - b_slice[i];
-                        }
-                    }
-                    ElementwiseOp::Multiply => {
-                        for i in 0..a_slice.len() {
-                            result_slice[i] = a_slice[i] * b_slice[i];
-                        }
-                    }
-                    ElementwiseOp::Divide => {
-                        for i in 0..a_slice.len() {
-                            result_slice[i] = a_slice[i] / b_slice[i];
-                        }
-                    }
-                    ElementwiseOp::Min => {
-                        for i in 0..a_slice.len() {
-                            result_slice[i] = a_slice[i].min(b_slice[i]);
-                        }
-                    }
-                    ElementwiseOp::Max => {
-                        for i in 0..a_slice.len() {
-                            result_slice[i] = a_slice[i].max(b_slice[i]);
-                        }
-                    }
-                }
-                result_chunk
-            })
-            .collect::<Vec<_>>();
+            .map(|(a_chunk, b_chunk)| elementwise_chunk(a_chunk, b_chunk))
+            .collect::<Result<Vec<_>>>()?;
         let result = DenseND::concatenate(&result_chunks, 0)?;
         Ok(result)
     }
@@ -830,12 +709,11 @@ impl StreamingExecutor {
             let mut result = DenseND::<f64>::zeros(shape);
             let a_slice = a.as_slice();
             let b_slice = b.as_slice();
-            let result_slice = result
-                .as_array_mut()
-                .as_slice_mut()
-                .expect("Contiguous array");
-            for i in 0..a_slice.len() {
-                result_slice[i] = op(a_slice[i], b_slice[i]);
+            {
+                let result_slice = contiguous_slice_mut(&mut result)?;
+                for i in 0..a_slice.len() {
+                    result_slice[i] = op(a_slice[i], b_slice[i]);
+                }
             }
             return Ok(result);
         }
@@ -847,62 +725,39 @@ impl StreamingExecutor {
         let a_chunks = a.chunk(chunk_size, 0)?;
         let b_chunks = b.chunk(chunk_size, 0)?;
         let chunk_count = a_chunks.len();
+        let generic_chunk =
+            |a_chunk: DenseND<f64>, b_chunk: DenseND<f64>| -> Result<DenseND<f64>> {
+                let mut result_chunk = DenseND::<f64>::zeros(a_chunk.shape());
+                let a_slice = a_chunk.as_slice();
+                let b_slice = b_chunk.as_slice();
+                {
+                    let result_slice = contiguous_slice_mut(&mut result_chunk)?;
+                    for i in 0..a_slice.len() {
+                        result_slice[i] = op(a_slice[i], b_slice[i]);
+                    }
+                }
+                Ok(result_chunk)
+            };
         #[cfg(feature = "parallel")]
         let result_chunks = if self.should_use_parallel(chunk_count) {
             a_chunks
                 .into_par_iter()
                 .zip(b_chunks.into_par_iter())
-                .map(|(a_chunk, b_chunk)| {
-                    let mut result_chunk = DenseND::<f64>::zeros(a_chunk.shape());
-                    let a_slice = a_chunk.as_slice();
-                    let b_slice = b_chunk.as_slice();
-                    let result_slice = result_chunk
-                        .as_array_mut()
-                        .as_slice_mut()
-                        .expect("Contiguous array");
-                    for i in 0..a_slice.len() {
-                        result_slice[i] = op(a_slice[i], b_slice[i]);
-                    }
-                    result_chunk
-                })
-                .collect::<Vec<_>>()
+                .map(|(a_chunk, b_chunk)| generic_chunk(a_chunk, b_chunk))
+                .collect::<Result<Vec<_>>>()?
         } else {
             a_chunks
                 .into_iter()
                 .zip(b_chunks)
-                .map(|(a_chunk, b_chunk)| {
-                    let mut result_chunk = DenseND::<f64>::zeros(a_chunk.shape());
-                    let a_slice = a_chunk.as_slice();
-                    let b_slice = b_chunk.as_slice();
-                    let result_slice = result_chunk
-                        .as_array_mut()
-                        .as_slice_mut()
-                        .expect("Contiguous array");
-                    for i in 0..a_slice.len() {
-                        result_slice[i] = op(a_slice[i], b_slice[i]);
-                    }
-                    result_chunk
-                })
-                .collect::<Vec<_>>()
+                .map(|(a_chunk, b_chunk)| generic_chunk(a_chunk, b_chunk))
+                .collect::<Result<Vec<_>>>()?
         };
         #[cfg(not(feature = "parallel"))]
         let result_chunks: Vec<DenseND<f64>> = a_chunks
             .into_iter()
             .zip(b_chunks.into_iter())
-            .map(|(a_chunk, b_chunk)| {
-                let mut result_chunk = DenseND::<f64>::zeros(a_chunk.shape());
-                let a_slice = a_chunk.as_slice();
-                let b_slice = b_chunk.as_slice();
-                let result_slice = result_chunk
-                    .as_array_mut()
-                    .as_slice_mut()
-                    .expect("Contiguous array");
-                for i in 0..a_slice.len() {
-                    result_slice[i] = op(a_slice[i], b_slice[i]);
-                }
-                result_chunk
-            })
-            .collect::<Vec<_>>();
+            .map(|(a_chunk, b_chunk)| generic_chunk(a_chunk, b_chunk))
+            .collect::<Result<Vec<_>>>()?;
         let result = DenseND::concatenate(&result_chunks, 0)?;
         Ok(result)
     }

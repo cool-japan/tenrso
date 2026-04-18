@@ -21,14 +21,14 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tenrso = "0.1.0-alpha.2"
+tenrso = "0.1.0"
 ```
 
 To enable all features:
 
 ```toml
 [dependencies]
-tenrso = { version = "0.1.0-alpha.2", features = ["full"] }
+tenrso = { version = "0.1.0", features = ["full"] }
 ```
 
 ## Feature Flags
@@ -122,7 +122,7 @@ println!("Estimated FLOPs: {:.2e}", plan.estimated_flops);
 
 ```rust
 // [dependencies]
-// tenrso = { version = "0.1.0-alpha.2", features = ["ad"] }
+// tenrso = { version = "0.1.0", features = ["ad"] }
 
 use tenrso::ad::graph::{ComputationGraph, Variable};
 

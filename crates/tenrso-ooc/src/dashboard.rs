@@ -38,8 +38,26 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
+
+/// Acquire a read guard, transparently recovering from poisoning.
+#[inline]
+fn read_state<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    match lock.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Acquire a write guard, transparently recovering from poisoning.
+#[inline]
+fn write_state<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    match lock.write() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// Dashboard configuration
 #[derive(Debug, Clone)]
@@ -392,7 +410,7 @@ impl Dashboard {
 
     /// Record a tensor operation
     pub fn record_operation(&self, name: &str, bytes: usize, duration_secs: f64) {
-        let mut state = self.state.write().unwrap();
+        let mut state = write_state(&self.state);
         state
             .operation_stats
             .entry(name.to_string())
@@ -402,7 +420,7 @@ impl Dashboard {
 
     /// Record memory usage for a tier
     pub fn record_memory(&self, tier: &str, bytes: usize) {
-        let mut state = self.state.write().unwrap();
+        let mut state = write_state(&self.state);
         let timestamp = state.start_time.elapsed().as_secs();
 
         match tier.to_lowercase().as_str() {
@@ -427,7 +445,7 @@ impl Dashboard {
 
     /// Record an I/O read operation
     pub fn record_io_read(&self, bytes: usize, duration_secs: f64) {
-        let mut state = self.state.write().unwrap();
+        let mut state = write_state(&self.state);
         state.io_counters.reads_total += 1;
         state.io_counters.read_bytes += bytes;
         state
@@ -438,7 +456,7 @@ impl Dashboard {
 
     /// Record an I/O write operation
     pub fn record_io_write(&self, bytes: usize, duration_secs: f64) {
-        let mut state = self.state.write().unwrap();
+        let mut state = write_state(&self.state);
         state.io_counters.writes_total += 1;
         state.io_counters.write_bytes += bytes;
         state
@@ -449,7 +467,7 @@ impl Dashboard {
 
     /// Get current snapshot
     pub fn snapshot(&self) -> DashboardSnapshot {
-        let state = self.state.read().unwrap();
+        let state = read_state(&self.state);
         let timestamp = state.start_time.elapsed().as_secs();
 
         let avg_read_latency = if !state.io_counters.read_latencies.is_empty() {
@@ -546,8 +564,11 @@ impl Dashboard {
             return 0.0;
         }
 
-        let first = history.front().unwrap();
-        let last = history.back().unwrap();
+        // `len() >= 2` guarantees both ends exist; fall back to 0.0 otherwise.
+        let (first, last) = match (history.front(), history.back()) {
+            (Some(f), Some(l)) => (f, l),
+            _ => return 0.0,
+        };
         let time_diff_secs = (last.timestamp - first.timestamp) as f64;
         if time_diff_secs <= 0.0 {
             return 0.0;
@@ -565,7 +586,7 @@ impl Dashboard {
 
     /// Reset all statistics
     pub fn reset(&self) {
-        let mut state = self.state.write().unwrap();
+        let mut state = write_state(&self.state);
         state.memory_history.clear();
         state.io_history.clear();
         state.operation_stats.clear();

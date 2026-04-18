@@ -148,14 +148,14 @@ where
     // Determine which is scalar
     let (scalar_val, tensor_view, op_flipped) = if a.view().len() == 1 || a.shape().is_empty() {
         let scalar = if a.view().len() == 1 {
-            a_view.iter().next().cloned().unwrap()
+            a_view.iter().next().cloned().unwrap_or_else(T::zero)
         } else {
             T::zero()
         };
         (scalar, b_view, false)
     } else {
         let scalar = if b.view().len() == 1 {
-            b_view.iter().next().cloned().unwrap()
+            b_view.iter().next().cloned().unwrap_or_else(T::zero)
         } else {
             T::zero()
         };

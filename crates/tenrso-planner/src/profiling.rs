@@ -32,8 +32,19 @@
 use crate::api::Plan;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
+
+/// Acquire a `Mutex` guard, recovering from lock poisoning.
+///
+/// The profiler's protected state (an event log and an `enabled` bool)
+/// is always left in a well-formed state because the critical sections
+/// never panic. Recovering the guard lets profiling keep working even
+/// after a caller thread panicked while holding the lock.
+#[inline]
+fn lock_profiler<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 
 /// A single profiling event for a planning operation
 #[derive(Debug, Clone)]
@@ -144,19 +155,19 @@ impl PlanProfiler {
 
     /// Enable profiling
     pub fn enable(&self) {
-        let mut enabled = self.enabled.lock().unwrap();
+        let mut enabled = lock_profiler(&self.enabled);
         *enabled = true;
     }
 
     /// Disable profiling (no-op for profile calls)
     pub fn disable(&self) {
-        let mut enabled = self.enabled.lock().unwrap();
+        let mut enabled = lock_profiler(&self.enabled);
         *enabled = false;
     }
 
     /// Check if profiling is enabled
     pub fn is_enabled(&self) -> bool {
-        let enabled = self.enabled.lock().unwrap();
+        let enabled = lock_profiler(&self.enabled);
         *enabled
     }
 
@@ -210,7 +221,7 @@ impl PlanProfiler {
             },
         };
 
-        let mut events = self.events.lock().unwrap();
+        let mut events = lock_profiler(&self.events);
         events.push(event);
 
         result
@@ -260,7 +271,7 @@ impl PlanProfiler {
             },
         };
 
-        let mut events = self.events.lock().unwrap();
+        let mut events = lock_profiler(&self.events);
         events.push(event);
 
         result
@@ -272,19 +283,19 @@ impl PlanProfiler {
             return;
         }
 
-        let mut events = self.events.lock().unwrap();
+        let mut events = lock_profiler(&self.events);
         events.push(event);
     }
 
     /// Get all recorded events
     pub fn events(&self) -> Vec<PlanEvent> {
-        let events = self.events.lock().unwrap();
+        let events = lock_profiler(&self.events);
         events.clone()
     }
 
     /// Get aggregated profiling metrics
     pub fn metrics(&self) -> ProfilingMetrics {
-        let events = self.events.lock().unwrap();
+        let events = lock_profiler(&self.events);
 
         if events.is_empty() {
             return ProfilingMetrics::default();
@@ -295,7 +306,7 @@ impl PlanProfiler {
         let failed_plans = total_plans - successful_plans;
 
         let mut times: Vec<f64> = events.iter().map(|e| e.duration_ms).collect();
-        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let total_time_ms: f64 = times.iter().sum();
         let avg_planning_time_ms = total_time_ms / total_plans as f64;
@@ -355,13 +366,13 @@ impl PlanProfiler {
 
     /// Clear all recorded events
     pub fn clear(&self) {
-        let mut events = self.events.lock().unwrap();
+        let mut events = lock_profiler(&self.events);
         events.clear();
     }
 
     /// Get the number of recorded events
     pub fn len(&self) -> usize {
-        let events = self.events.lock().unwrap();
+        let events = lock_profiler(&self.events);
         events.len()
     }
 
@@ -387,7 +398,7 @@ impl PlanProfiler {
             error: Option<String>,
         }
 
-        let events = self.events.lock().unwrap();
+        let events = lock_profiler(&self.events);
         let exports: Vec<EventExport> = events
             .iter()
             .map(|e| EventExport {

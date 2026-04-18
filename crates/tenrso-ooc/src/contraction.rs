@@ -245,7 +245,9 @@ impl StreamingContractionExecutor {
 
         // Execute nodes in order
         for &node_id in order {
-            let node = graph.get_node(node_id).unwrap();
+            let node = graph
+                .get_node(node_id)
+                .ok_or_else(|| anyhow!("Scheduled node {node_id} missing from graph"))?;
 
             match &node.op {
                 ChunkOp::Input => {
@@ -258,12 +260,22 @@ impl StreamingContractionExecutor {
                         return Err(anyhow!("MatMul requires exactly 2 inputs"));
                     }
 
-                    let a_node = graph.get_node(node.inputs[0]).unwrap();
-                    let b_node = graph.get_node(node.inputs[1]).unwrap();
+                    let a_node = graph
+                        .get_node(node.inputs[0])
+                        .ok_or_else(|| anyhow!("MatMul input A node {} missing", node.inputs[0]))?;
+                    let b_node = graph
+                        .get_node(node.inputs[1])
+                        .ok_or_else(|| anyhow!("MatMul input B node {} missing", node.inputs[1]))?;
 
                     // Extract chunk indices
-                    let a_idx = a_node.chunk_idx.as_ref().unwrap();
-                    let b_idx = b_node.chunk_idx.as_ref().unwrap();
+                    let a_idx = a_node
+                        .chunk_idx
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("MatMul input A has no chunk index"))?;
+                    let b_idx = b_node
+                        .chunk_idx
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("MatMul input B has no chunk index"))?;
 
                     // Get chunk bounds
                     let a_spec = ChunkSpec::tile_size(
@@ -331,13 +343,20 @@ impl StreamingContractionExecutor {
 
             // Clean up inputs if aggressive GC is enabled
             if self.config.aggressive_gc {
+                // `node_id` was just iterated from `order`, so its position is
+                // always Some; fall back to the end-of-schedule otherwise.
+                let cur_pos = order
+                    .iter()
+                    .position(|&x| x == node_id)
+                    .unwrap_or(order.len().saturating_sub(1));
                 for &input_id in &node.inputs {
                     // Check if this input is no longer needed
                     let mut still_needed = false;
-                    for future_node_id in
-                        &order[order.iter().position(|&x| x == node_id).unwrap() + 1..]
-                    {
-                        let future_node = graph.get_node(*future_node_id).unwrap();
+                    for future_node_id in &order[cur_pos + 1..] {
+                        let future_node = match graph.get_node(*future_node_id) {
+                            Some(n) => n,
+                            None => continue,
+                        };
                         if future_node.inputs.contains(&input_id) {
                             still_needed = true;
                             break;

@@ -30,3 +30,7 @@ criterion.workspace = true
 [[bench]]
 name = "sparse_ops"
 harness = false
+
+[[bench]]
+name = "masked_einsum_bench"
+harness = false

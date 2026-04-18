@@ -179,11 +179,13 @@ impl AccessHistory {
         features.time_since_last_access = (current_time - self.last_access).max(0.0);
 
         // Access frequency (accesses per unit time)
-        if self.timestamps.len() >= 2 {
-            let first_time = self.timestamps[0];
-            let last_time = *self.timestamps.last().unwrap();
-            let duration = (last_time - first_time).max(1.0);
-            features.access_frequency = self.timestamps.len() as f64 / duration;
+        if let (Some(&first_time), Some(&last_time)) =
+            (self.timestamps.first(), self.timestamps.last())
+        {
+            if self.timestamps.len() >= 2 {
+                let duration = (last_time - first_time).max(1.0);
+                features.access_frequency = self.timestamps.len() as f64 / duration;
+            }
         }
 
         // Access regularity (coefficient of variation of inter-access times)

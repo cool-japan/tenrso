@@ -86,11 +86,11 @@ where
     let mut prev_factors: Vec<Array2<T>> = factors.to_vec();
 
     // Extrapolation parameters
-    let mut alpha = T::from(0.5).unwrap();
-    let alpha_max = T::from(0.9).unwrap();
-    let alpha_min = T::from(0.1).unwrap();
+    let mut alpha: T = cast_lit(0.5_f64);
+    let alpha_max: T = cast_lit(0.9_f64);
+    let alpha_min: T = cast_lit(0.1_f64);
 
-    let tol_t = T::from(tol).unwrap();
+    let tol_t: T = cast_f64(tol, "tol")?;
     let tensor_norm = tensor.frobenius_norm();
     let tensor_norm_sq = tensor_norm * tensor_norm;
     let mut prev_fit = T::zero();
@@ -133,7 +133,7 @@ where
                 &prev_factors,
                 mode,
                 &factor_new,
-                T::from(0.5).unwrap(),
+                cast_lit(0.5_f64),
                 5,
             );
 
@@ -162,9 +162,9 @@ where
         // Adaptive extrapolation strength
         if iter > 0 {
             if fit > prev_fit {
-                alpha = (alpha * T::from(1.05).unwrap()).min(alpha_max);
+                alpha = (alpha * cast_lit::<T, _>(1.05_f64)).min(alpha_max);
             } else {
-                alpha = (alpha * T::from(0.7).unwrap()).max(alpha_min);
+                alpha = (alpha * cast_lit::<T, _>(0.7_f64)).max(alpha_min);
                 oscillation_count += 1;
 
                 if oscillation_count > 5 && iter > 10 {
@@ -177,7 +177,7 @@ where
         // Check convergence
         if iter > 0 {
             final_fit_change = (fit - prev_fit).abs();
-            let relative_change = final_fit_change / (prev_fit.abs() + T::from(1e-10).unwrap());
+            let relative_change = final_fit_change / (prev_fit.abs() + cast_lit::<T, _>(1e-10_f64));
 
             if relative_change < tol_t {
                 convergence_reason = ConvergenceReason::FitTolerance;
@@ -282,7 +282,7 @@ where
         return Err(CpError::InvalidTolerance(tol));
     }
 
-    let tol_t = T::from(tol).unwrap();
+    let tol_t: T = cast_f64(tol, "tol")?;
 
     // Initialize factors
     let mut factors = initialize_factors(tensor, rank, init)?;
@@ -383,7 +383,7 @@ where
         // Check convergence
         if iter > 0 {
             let fit_change = (fit - prev_fit).abs();
-            let relative_change = fit_change / (prev_fit.abs() + T::from(1e-10).unwrap());
+            let relative_change = fit_change / (prev_fit.abs() + cast_lit::<T, _>(1e-10_f64));
 
             if relative_change < tol_t {
                 break;
@@ -450,7 +450,7 @@ where
         + std::fmt::Display
         + 'static,
 {
-    use scirs2_core::random::{thread_rng, Distribution, RandNormal as Normal};
+    use scirs2_core::random::Distribution;
 
     let shape = tensor.shape();
     let n_modes = tensor.rank();
@@ -482,7 +482,8 @@ where
     let mut iters = 0;
 
     let mut rng = thread_rng();
-    let normal = Normal::new(0.0, 1.0).unwrap();
+    let normal = make_normal(0.0, 1.0)?;
+    let tol_t: T = cast_f64(tol, "tol")?;
 
     // ALS iterations with randomized sketching
     for iter in 0..max_iters {
@@ -495,7 +496,7 @@ where
             let mut omega = Array2::<T>::zeros((kr_rows, sketch_size));
             for i in 0..kr_rows {
                 for j in 0..sketch_size {
-                    omega[[i, j]] = T::from(normal.sample(&mut rng)).unwrap();
+                    omega[[i, j]] = cast_lit(normal.sample(&mut rng));
                 }
             }
 
@@ -531,7 +532,7 @@ where
             fit = compute_fit(tensor, &factors, tensor_norm_sq)?;
 
             let fit_change = (fit - prev_fit).abs();
-            if iter > 0 && fit_change < NumCast::from(tol).unwrap() {
+            if iter > 0 && fit_change < tol_t {
                 break;
             }
 
@@ -660,15 +661,16 @@ where
             }
 
             let mut rng = thread_rng();
+            let old_rows_t: T = cast_lit(old_rows);
             for i in old_rows..total_rows {
                 for j in 0..rank {
                     let mut col_mean = T::zero();
                     for k in 0..old_rows {
                         col_mean += current.factors[update_mode][[k, j]];
                     }
-                    col_mean /= T::from(old_rows).unwrap();
+                    col_mean /= old_rows_t;
 
-                    let noise = T::from(rng.random::<f64>() * 0.1 - 0.05).unwrap();
+                    let noise: T = cast_lit(rng.random::<f64>() * 0.1 - 0.05);
                     extended_factor[[i, j]] = col_mean + noise;
                 }
             }
@@ -696,6 +698,7 @@ where
     let tensor_norm_sq = compute_norm_squared(&combined_tensor);
     let mut fit = T::zero();
     let mut iters = 0;
+    let tol_t: T = cast_f64(tol, "tol")?;
 
     for iter in 0..refine_iters {
         iters = iter + 1;
@@ -715,7 +718,7 @@ where
 
         if iter > 0 {
             let fit_change = (fit - prev_fit).abs() / (prev_fit + T::epsilon());
-            if fit_change < T::from(tol).unwrap() {
+            if fit_change < tol_t {
                 break;
             }
         }

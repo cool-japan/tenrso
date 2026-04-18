@@ -364,7 +364,9 @@ where
 
             // Compute weighted outer product
             let weight = weights.map(|w| w[r].clone()).unwrap_or_else(T::one);
-            outer_product_weighted(&vector_views, weight).expect("outer product failed")
+            outer_product_weighted(&vector_views, weight).expect(
+                "invariant: factors validated non-empty with consistent rank before par_iter",
+            )
         })
         .collect();
 

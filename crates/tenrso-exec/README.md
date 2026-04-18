@@ -38,7 +38,7 @@ All tensor operations (dense, sparse, low-rank) go through this unified interfac
 
 ```toml
 [dependencies]
-tenrso-exec = "0.1.0-rc.1"
+tenrso-exec = "0.1.0"
 ```
 
 ## Quick Start
@@ -261,4 +261,4 @@ Apache-2.0
 
 ---
 
-**Status:** Alpha (production-ready internals) | **Version:** 0.1.0-rc.1 | **Tests:** 244/244 passing
+**Status:** Stable | **Version:** 0.1.0 | **Tests:** 244/244 passing

@@ -5,12 +5,59 @@
 use super::types::*;
 use anyhow::Result;
 use scirs2_core::ndarray_ext::{Array2, ArrayView1};
-use scirs2_core::numeric::{Float, FloatConst, NumAssign, NumCast};
+use scirs2_core::numeric::{Float, FloatConst, NumAssign, NumCast, ToPrimitive};
 use scirs2_core::random::{thread_rng, Distribution, RandNormal as Normal};
-use scirs2_linalg::lstsq;
+// lstsq replaced by inv for batch solve — see solve_least_squares
 use std::iter::Sum;
 use tenrso_core::DenseND;
 use tenrso_kernels::mttkrp;
+
+/// Infallibly cast a literal / well-bounded numeric value to `T`.
+///
+/// SAFETY: all call sites use numeric literals or non-negative `usize`
+/// values that are representable in any supported `T: Float` (f32, f64).
+/// Returning `T::zero()` in the unreachable failure path preserves
+/// numerical safety without a panic and respects the no-unwrap policy.
+#[inline]
+pub(crate) fn cast_lit<T: NumCast, V: ToPrimitive>(v: V) -> T {
+    // SAFETY: `T: NumCast` is bounded by `Float` at all call sites
+    // (f32/f64 at minimum), and `V` is a numeric literal or well-bounded
+    // integer, so the conversion is infallible. In the unreachable failure
+    // path we fall back to a zero-valued `T` via `T::from(0u8)`, which is
+    // guaranteed by `NumCast` for primitive numeric types.
+    T::from(v).unwrap_or_else(|| {
+        T::from(0u8).unwrap_or_else(|| {
+            unreachable!("NumCast::from(0u8) must succeed for primitive numeric T")
+        })
+    })
+}
+
+/// Create a standard normal distribution with fixed parameters.
+///
+/// SAFETY: `(mean, std_dev)` pairs used in this crate are literal
+/// constants (e.g. `(0.0, 1.0)`, `(0.0, 0.01)`) that satisfy the
+/// `Normal::new` precondition `std_dev > 0`. We surface the fallible
+/// constructor through `Result` so callers can propagate via `?` and
+/// avoid panicking unwraps.
+#[inline]
+pub(crate) fn make_normal(mean: f64, std_dev: f64) -> Result<Normal<f64>, CpError> {
+    Normal::new(mean, std_dev).map_err(|e| {
+        CpError::ShapeMismatch(format!(
+            "failed to construct Normal({mean}, {std_dev}): {e}"
+        ))
+    })
+}
+
+/// Convert an `f64` tolerance/regularization scalar to `T` with a typed error.
+///
+/// SAFETY net: all call sites pass user-facing `f64` values (`tol`, `lambda`, ...)
+/// that are always representable in the `T: Float` types supported by this crate.
+#[inline]
+pub(crate) fn cast_f64<T: NumCast>(val: f64, ctx: &'static str) -> Result<T, CpError> {
+    NumCast::from(val).ok_or_else(|| {
+        CpError::ShapeMismatch(format!("could not convert {ctx}={val} to scalar type"))
+    })
+}
 
 /// Concatenate two tensors along a specified mode
 pub(crate) fn concatenate_tensors<T>(
@@ -155,11 +202,11 @@ where
 
     // Try different step sizes
     let alphas = [
-        T::from(0.25).unwrap(),
-        T::from(0.5).unwrap(),
-        T::from(0.75).unwrap(),
+        cast_lit::<T, _>(0.25),
+        cast_lit::<T, _>(0.5),
+        cast_lit::<T, _>(0.75),
         T::one(),
-        T::from(1.25).unwrap(),
+        cast_lit::<T, _>(1.25),
     ];
 
     for &alpha in &alphas {
@@ -215,16 +262,16 @@ where
         InitStrategy::Random => {
             for &mode_size in shape.iter() {
                 let factor = Array2::from_shape_fn((mode_size, rank), |_| {
-                    T::from(rng.random::<f64>()).unwrap()
+                    cast_lit::<T, _>(rng.random::<f64>())
                 });
                 factors.push(factor);
             }
         }
         InitStrategy::RandomNormal => {
             for &mode_size in shape.iter() {
-                let normal = Normal::new(0.0, 1.0).unwrap();
+                let normal = make_normal(0.0, 1.0)?;
                 let factor = Array2::from_shape_fn((mode_size, rank), |_| {
-                    T::from(normal.sample(&mut rng)).unwrap()
+                    cast_lit::<T, _>(normal.sample(&mut rng))
                 });
                 factors.push(factor);
             }
@@ -250,10 +297,10 @@ where
                 }
 
                 if rank > actual_rank {
-                    let normal = Normal::new(0.0, 0.01).unwrap();
+                    let normal = make_normal(0.0, 0.01)?;
                     for j in actual_rank..rank {
                         for i in 0..mode_size {
-                            factor[[i, j]] = T::from(normal.sample(&mut rng)).unwrap();
+                            factor[[i, j]] = cast_lit::<T, _>(normal.sample(&mut rng));
                         }
                     }
                 }
@@ -304,10 +351,10 @@ where
                 }
 
                 if rank > actual_rank {
-                    let normal = Normal::new(0.0, 0.01).unwrap();
+                    let normal = make_normal(0.0, 0.01)?;
                     for j in actual_rank..rank {
                         for i in 0..mode_size {
-                            let val = T::from(normal.sample(&mut rng)).unwrap();
+                            let val = cast_lit::<T, _>(normal.sample(&mut rng));
                             factor[[i, j]] = val.abs();
                         }
                     }
@@ -330,13 +377,20 @@ where
                 let actual_rank = rank.min(u.shape()[1]).min(s.len());
 
                 let mut leverage_scores = vec![T::zero(); mode_size];
+                // SAFETY: actual_rank is always a positive usize (bounded by SVD dims);
+                // representable in f32/f64, the crate's supported `T: Float` types.
+                let actual_rank_t = T::from(actual_rank).ok_or_else(|| {
+                    CpError::ShapeMismatch(format!(
+                        "could not convert actual_rank={actual_rank} to scalar type",
+                    ))
+                })?;
                 for i in 0..mode_size {
                     let mut score = T::zero();
                     for j in 0..actual_rank {
                         let val = u[[i, j]];
                         score += val * val;
                     }
-                    leverage_scores[i] = score / T::from(actual_rank).unwrap();
+                    leverage_scores[i] = score / actual_rank_t;
                 }
 
                 let total_score: T = leverage_scores.iter().copied().sum();
@@ -348,20 +402,26 @@ where
 
                 let mut factor = Array2::<T>::zeros((mode_size, rank));
 
+                // SAFETY: mode_size is always a positive usize (tensor dimension);
+                // representable in any supported `T: Float`.
+                let mode_size_t = T::from(mode_size).ok_or_else(|| {
+                    CpError::ShapeMismatch(format!(
+                        "could not convert mode_size={mode_size} to scalar type",
+                    ))
+                })?;
                 for r in 0..actual_rank {
                     let weight = s[r].sqrt();
                     for i in 0..mode_size {
-                        let leverage_weight =
-                            (leverage_scores[i] * T::from(mode_size).unwrap()).sqrt();
+                        let leverage_weight = (leverage_scores[i] * mode_size_t).sqrt();
                         factor[[i, r]] = u[[i, r]] * weight * leverage_weight;
                     }
                 }
 
                 if rank > actual_rank {
-                    let normal = Normal::new(0.0, 0.01).unwrap();
+                    let normal = make_normal(0.0, 0.01)?;
                     for j in actual_rank..rank {
                         for i in 0..mode_size {
-                            let base_val = T::from(normal.sample(&mut rng)).unwrap();
+                            let base_val = cast_lit::<T, _>(normal.sample(&mut rng));
                             let leverage_weight = leverage_scores[i];
                             factor[[i, j]] = base_val * leverage_weight;
                         }
@@ -451,7 +511,11 @@ where
     gram
 }
 
-/// Solve least squares problem: X = A * gram^(-1)
+/// Solve least squares problem: X = MTTKRP × gram⁻¹
+///
+/// Instead of solving per-row via `lstsq` (which repeats O(R³) work for each
+/// of the I_mode rows), we invert the small R×R Gram matrix *once* and multiply.
+/// This reduces the solve from O(I_mode × R³) to O(R³ + I_mode × R²).
 pub(crate) fn solve_least_squares<T>(
     mttkrp_result: &Array2<T>,
     gram: &Array2<T>,
@@ -459,37 +523,29 @@ pub(crate) fn solve_least_squares<T>(
 where
     T: Float + NumAssign + Sum + scirs2_core::ndarray_ext::ScalarOperand + Send + Sync + 'static,
 {
-    let (rows, rank) = (mttkrp_result.shape()[0], mttkrp_result.shape()[1]);
+    use scirs2_linalg::inv;
 
-    let gram_t = gram.t().to_owned();
-
-    let mut result = Array2::<T>::zeros((rows, rank));
-
-    for i in 0..rows {
-        let b = mttkrp_result.row(i).to_owned();
-
-        match lstsq(&gram_t.view(), &b.view(), None) {
-            Ok(solution) => {
-                for j in 0..rank {
-                    result[[i, j]] = solution.x[j];
-                }
+    // Try to invert the R×R Gram matrix directly (very cheap for R=64).
+    let gram_inv = match inv(&gram.view(), None) {
+        Ok(g_inv) => g_inv,
+        Err(_) => {
+            // Gram is singular/ill-conditioned — add small ridge and retry.
+            let rank = gram.shape()[0];
+            let eps = T::epsilon() * cast_lit::<T, _>(rank * 10);
+            let mut gram_reg = gram.clone();
+            for k in 0..rank {
+                gram_reg[[k, k]] += eps;
             }
-            Err(_) => {
-                let eps = T::epsilon() * T::from(rank * 10).unwrap();
-                let mut gram_reg = gram_t.clone();
-                for k in 0..rank.min(gram_reg.shape()[0]) {
-                    gram_reg[[k, k]] += eps;
-                }
-
-                let solution =
-                    lstsq(&gram_reg.view(), &b.view(), None).map_err(CpError::LinalgError)?;
-
-                for j in 0..rank {
-                    result[[i, j]] = solution.x[j];
-                }
-            }
+            inv(&gram_reg.view(), None).map_err(CpError::LinalgError)?
         }
-    }
+    };
+
+    // Batch multiply: result = MTTKRP × gram_inv^T
+    // Each row i: result[i,:] = mttkrp_result[i,:] · gram_inv^T
+    // Equivalently: result = mttkrp_result · gram_inv^T
+    // Note: for symmetric Gram, gram_inv is also symmetric, so gram_inv^T = gram_inv.
+    // We transpose to match the original lstsq convention (gram^T was passed).
+    let result = mttkrp_result.dot(&gram_inv.t());
 
     Ok(result)
 }
@@ -516,12 +572,12 @@ pub(crate) fn compute_fit<T>(
     tensor_norm_sq: T,
 ) -> Result<T, CpError>
 where
-    T: Float + NumCast,
+    T: Float + NumCast + 'static,
 {
     let recon_norm_sq = compute_reconstruction_norm_squared(factors);
     let inner_product = compute_inner_product(tensor, factors)?;
 
-    let error_sq = tensor_norm_sq + recon_norm_sq - T::from(2).unwrap() * inner_product;
+    let error_sq = tensor_norm_sq + recon_norm_sq - cast_lit::<T, _>(2) * inner_product;
     let error = error_sq.max(T::zero()).sqrt();
 
     let fit = T::one() - error / tensor_norm_sq.sqrt();
@@ -560,22 +616,36 @@ pub(crate) fn compute_inner_product<T>(
     factors: &[Array2<T>],
 ) -> Result<T, CpError>
 where
-    T: Float,
+    T: Float + 'static,
 {
-    let mut inner_prod = T::zero();
-    let rank = factors[0].shape()[1];
-
     let factor_views: Vec<_> = factors.iter().map(|f| f.view()).collect();
     let mttkrp_result = mttkrp(&tensor.view(), &factor_views, 0)
         .map_err(|e| CpError::ShapeMismatch(e.to_string()))?;
 
+    Ok(compute_inner_product_from_mttkrp(&mttkrp_result, &factors[0]))
+}
+
+/// Compute inner product <X, X_recon> from a pre-computed MTTKRP result.
+///
+/// This avoids a redundant MTTKRP computation when the caller already has
+/// the MTTKRP for mode 0 available (e.g., from the last ALS factor update).
+pub(crate) fn compute_inner_product_from_mttkrp<T>(
+    mttkrp_result: &Array2<T>,
+    factor_mode0: &Array2<T>,
+) -> T
+where
+    T: Float,
+{
+    let rank = factor_mode0.shape()[1];
+    let mut inner_prod = T::zero();
+
     for r in 0..rank {
-        for i in 0..factors[0].shape()[0] {
-            inner_prod = inner_prod + mttkrp_result[[i, r]] * factors[0][[i, r]];
+        for i in 0..factor_mode0.shape()[0] {
+            inner_prod = inner_prod + mttkrp_result[[i, r]] * factor_mode0[[i, r]];
         }
     }
 
-    Ok(inner_prod)
+    inner_prod
 }
 
 /// Orthonormalize a factor matrix using QR decomposition
@@ -651,7 +721,7 @@ where
                     let diag_val = if i == 0 || i == n - 1 {
                         T::one()
                     } else {
-                        T::from(2).unwrap()
+                        cast_lit::<T, _>(2)
                     };
                     gram[[i, i]] = gram[[i, i]] + lambda * diag_val;
 
@@ -670,17 +740,17 @@ where
                     let diag_val = if i == 0 || i == n - 1 {
                         T::one()
                     } else if i == 1 || i == n - 2 {
-                        T::from(5).unwrap()
+                        cast_lit::<T, _>(5)
                     } else {
-                        T::from(6).unwrap()
+                        cast_lit::<T, _>(6)
                     };
                     gram[[i, i]] = gram[[i, i]] + lambda * diag_val;
 
                     if i + 1 < n {
                         let off1 = if i == 0 || i == n - 2 {
-                            T::from(-2).unwrap()
+                            cast_lit::<T, _>(-2)
                         } else {
-                            T::from(-4).unwrap()
+                            cast_lit::<T, _>(-4)
                         };
                         gram[[i, i + 1]] = gram[[i, i + 1]] + lambda * off1;
                         gram[[i + 1, i]] = gram[[i + 1, i]] + lambda * off1;

@@ -1,10 +1,26 @@
 # tenrso-decomp TODO
 
 > **Milestone:** M2
-> **Version:** 0.1.0-rc.1
-> **Status:** RC.1 — 165 tests passing (2 ignored), 100% pass rate
+> **Version:** 0.1.0
+> **Status:** 0.1.0 — 165 tests passing (2 ignored), 100% pass rate
 > **Tests:** 165 passing (2 ignored, 100%)
-> **Last Updated:** 2026-03-06 (RC.1 Release)
+> **Last Updated:** 2026-04-15 (Unwrap audit + `tt.rs` split into `tt/` sub-modules)
+
+---
+
+## Unwrap Audit — 2026-04-15
+
+- **Non-test `.unwrap()` calls in `src/`:** 0 remaining (all eliminated).
+- **Scope:** `cp/helpers.rs`, `cp/core.rs`, `cp/advanced.rs`, `tucker.rs`, `rank_selection.rs`, `utils.rs`, `tt/algorithms.rs`, `tt/types.rs`.
+- **Replacement patterns used:**
+  - `cast_lit<T, V>` for infallible casts of numeric literals / well-bounded `usize` values (hoisted out of hot loops).
+  - `cast_f64<T>(val, ctx) -> Result<T, CpError | TuckerError>` for fallible user-supplied `f64` casts (tol, threshold).
+  - `make_normal(mean, std_dev) -> Result<Normal<f64>, CpError>` for fallible `Normal::new` constructors.
+  - `anyhow::anyhow!(...)` / typed error variants via `ok_or_else` for `Option` / `NumCast` conversions.
+  - `unwrap_or(std::cmp::Ordering::Equal)` for NaN-safe `partial_cmp` sorts.
+- **Shared helpers:** `cast_lit`, `cast_f64`, `make_normal` are `pub(crate)` in `cp/helpers.rs` and reused by `cp/core.rs` / `cp/advanced.rs`. File-local copies live in `tucker.rs`, `utils.rs`, `tt/types.rs` to avoid cross-module entanglement.
+- **Remaining unwraps are test-only:** doctests (`///`), `#[cfg(test)]` blocks, `property_tests.rs`, `tt/tests.rs`. These are acceptable under the no-unwrap policy.
+- **Build:** `cargo check -p tenrso-decomp --all-features` passes cleanly with `#![deny(warnings)]`.
 
 ---
 
@@ -153,7 +169,7 @@
   - [x] Reconstruction error bounds ✅ **4 CP tests + 4 Tucker tests + 9 TT tests** ✅ **UPDATED**
   - [x] Orthogonality of Tucker factors ✅ **Verified**
   - [x] Cross-method validation ✅ **All methods produce valid reconstructions**
-  - [ ] Non-negative constraints hold ⏳ Future (when non-negative CP is implemented)
+  - [x] Non-negative constraints hold ✅ **COMPLETE** — implemented in `cp/helpers.rs` via `cp_als_constrained` (CP) and `tucker.rs` via `tucker_nonnegative` (Tucker). See `test_cp_als_nonnegative` and `test_tucker_nonnegative_*` tests.
 
 - [x] Integration tests - ✅ **14 integration tests passing**
   - [x] Use with synthetic tensor data
@@ -1664,9 +1680,37 @@ All kernel dependencies for decomposition implementations are now satisfied. M2 
 
 ---
 
+## Refactoring
+
+### 2026-04-15 — `tt.rs` split into `tt/` sub-modules
+
+- The 2,113-line `crates/tenrso-decomp/src/tt.rs` file exceeded the
+  CLAUDE.md 2,000-line soft limit. It was split manually (the `splitrs`
+  dry-run produced unusable `functions.rs` / `functions_2.rs` names, so the
+  semantic split below was applied by hand and matches the recommendation
+  previously recorded in this TODO):
+  - `src/tt/mod.rs` — module docs + `pub use` re-exports
+  - `src/tt/types.rs` — `TTError`, `TTDecomp`, `TTMatrix`,
+    `tt_matrix_from_diagonal` (and all their `impl` blocks)
+  - `src/tt/algorithms.rs` — `tt_svd`, `tt_round`
+  - `src/tt/operations.rs` — `tt_add`, `tt_dot`, `tt_hadamard`
+  - `src/tt/tests.rs` — the original `#[cfg(test)]` test suite
+- Public API paths (`tenrso_decomp::tt::tt_svd`,
+  `tenrso_decomp::tt::TTDecomp`, etc.) are preserved exactly; `lib.rs` still
+  has `pub mod tt;` and `pub use tt::*;`. The relocated tests bring
+  `scirs2_core::numeric::Float` into scope so that the
+  `let mut max_diff = 0.0; max_diff.max(_)` pattern still type-checks under
+  the same trait-method resolution that applied when the test module was
+  inlined in `tt.rs`.
+- Verification: `cargo check`, `cargo clippy --all-targets` (with `-D
+  warnings`) and `cargo test --all-features` all clean. 165 lib + 14
+  integration + 35 doctests pass — same as the pre-refactor baseline.
+
+---
+
 ## Code Quality Considerations
 
-### Module Size Analysis (2025-12-10)
+### Module Size Analysis (2025-12-10, updated 2026-04-15)
 
 According to project policy ("Single code should be less than 2000 lines"), the following modules exceed the refactoring threshold:
 
@@ -1678,14 +1722,16 @@ According to project policy ("Single code should be less than 2000 lines"), the 
      - `cp/streaming.rs` - Randomized and incremental methods
      - `cp/completion.rs` - Tensor completion
 
-2. **`tt.rs`**: 2,107 lines ⚠️ **(SLIGHTLY OVER LIMIT)**
-   - Contains: TT-SVD, TT-rounding, TT operations, TT-matrix
-   - **Recommendation**: Consider splitting:
-     - `tt/core.rs` - TT-SVD, reconstruction
-     - `tt/operations.rs` - add, dot, hadamard, matvec
-     - `tt/rounding.rs` - Rounding algorithms
+2. **`tt.rs`**: ~~2,113 lines~~ ✅ **REFACTORED (2026-04-15)**
+   - Split into `src/tt/` sub-modules (all well under 1500 lines):
+     - `src/tt/mod.rs` (~40 lines) — module docs + re-exports
+     - `src/tt/types.rs` (~646 lines) — `TTError`, `TTDecomp`, `TTMatrix`, `tt_matrix_from_diagonal`
+     - `src/tt/algorithms.rs` (~417 lines) — `tt_svd`, `tt_round`
+     - `src/tt/operations.rs` (~440 lines) — `tt_add`, `tt_dot`, `tt_hadamard`
+     - `src/tt/tests.rs` (~634 lines) — the original `#[cfg(test)]` block
+   - Public API paths (`tenrso_decomp::tt::*`) unchanged. All 165 lib + 14 integration + 35 doc tests pass. No `ndarray` direct imports. clippy clean.
 
-Both modules are functionally complete and well-tested. Refactoring is recommended for maintainability but not urgent for functionality.
+`cp.rs` remains as the last outstanding refactoring target in this crate; it is functionally complete and well-tested.
 
 **Command for refactoring** (when desired):
 ```bash

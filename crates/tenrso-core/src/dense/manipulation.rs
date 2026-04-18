@@ -242,8 +242,9 @@ where
                 values.push(self.data[&indices[..]].clone());
             }
 
-            // Sort the values
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            // Sort the values. NaN-safe: incomparable values are treated
+            // as equal rather than triggering a panic.
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
             // Write sorted values back
             for (pos, value) in values.into_iter().enumerate() {
@@ -339,8 +340,10 @@ where
                 indexed_values.push((pos, self.data[&indices[..]].clone()));
             }
 
-            // Sort by values, keeping track of original indices
-            indexed_values.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+            // Sort by values, keeping track of original indices.
+            // NaN-safe ordering.
+            indexed_values
+                .sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
             // Extract the sorted indices
             let sorted_indices: Vec<usize> = indexed_values.iter().map(|(idx, _)| *idx).collect();
@@ -1300,7 +1303,9 @@ where
         let output_w = (input_w - kernel_w) / stride_w + 1;
 
         let mut pooled_data = Vec::with_capacity(output_h * output_w);
-        let kernel_area = T::from_usize(kernel_h * kernel_w).unwrap();
+        // Kernel area is a positive `usize`; fall back to `T::one()` to
+        // avoid divide-by-zero if the cast fails for an exotic numeric `T`.
+        let kernel_area = T::from_usize(kernel_h * kernel_w).unwrap_or_else(T::one);
 
         // Perform average pooling
         for out_i in 0..output_h {
@@ -1384,7 +1389,10 @@ where
                         count += 1;
                     }
                 }
-                pooled_data.push(sum / T::from_usize(count).unwrap());
+                // `count` is always >= 1 when this path runs; fall back to
+                // `T::one()` defensively rather than panic if the cast ever
+                // fails for an exotic `T`.
+                pooled_data.push(sum / T::from_usize(count).unwrap_or_else(T::one));
             }
         }
 
@@ -1506,8 +1514,11 @@ where
                 let j0 = src_j.floor() as usize;
                 let j1 = (j0 + 1).min(old_width - 1);
 
-                let di = T::from_f64(src_i - i0 as f64).unwrap();
-                let dj = T::from_f64(src_j - j0 as f64).unwrap();
+                // Interpolation fractions in [0, 1); any reasonable `Float`
+                // can represent them. Fall back to `T::zero()` (no
+                // interpolation) rather than panic if the cast ever fails.
+                let di: T = T::from_f64(src_i - i0 as f64).unwrap_or_else(T::zero);
+                let dj: T = T::from_f64(src_j - j0 as f64).unwrap_or_else(T::zero);
                 let one = T::one();
 
                 // Bilinear interpolation

@@ -94,6 +94,8 @@ where
         return Err(CpError::InvalidTolerance(tol));
     }
 
+    let tol_t: T = cast_f64(tol, "tol")?;
+
     // Initialize factor matrices
     let mut factors = initialize_factors(tensor, rank, init)?;
 
@@ -152,7 +154,7 @@ where
         let fit_change = (fit - prev_fit).abs();
         final_fit_change = fit_change;
 
-        if iter > 0 && fit_change < NumCast::from(tol).unwrap() {
+        if iter > 0 && fit_change < tol_t {
             convergence_reason = ConvergenceReason::FitTolerance;
             break;
         }
@@ -261,6 +263,8 @@ where
         return Err(CpError::InvalidTolerance(tol));
     }
 
+    let tol_t: T = cast_f64(tol, "tol")?;
+
     // Validate regularization parameters
     constraints.regularization.validate()?;
 
@@ -330,13 +334,13 @@ where
             match constraints.regularization {
                 RegularizationType::Tikhonov { lambda, order } if order > 0 => {
                     // Apply Tikhonov with finite difference operator
-                    let lambda_t = NumCast::from(lambda).unwrap();
+                    let lambda_t: T = cast_f64(lambda, "tikhonov lambda")?;
                     apply_tikhonov_to_gram(&mut gram, lambda_t, order);
                 }
                 _ => {
                     // Apply L2 regularization (standard ridge on diagonal)
                     if l2_lambda > 0.0 {
-                        let reg: T = NumCast::from(l2_lambda).unwrap();
+                        let reg: T = cast_f64(l2_lambda, "l2_lambda")?;
                         for i in 0..gram.nrows() {
                             gram[[i, i]] += reg;
                         }
@@ -349,7 +353,7 @@ where
 
             // Step 5: Apply L1 regularization (soft-thresholding)
             if l1_lambda > 0.0 {
-                let threshold: T = NumCast::from(l1_lambda).unwrap();
+                let threshold: T = cast_f64(l1_lambda, "l1_lambda")?;
                 soft_threshold(&mut factors[mode], threshold);
             }
 
@@ -378,7 +382,7 @@ where
         let fit_change = (fit - prev_fit).abs();
         final_fit_change = fit_change;
 
-        if iter > 0 && fit_change < NumCast::from(tol).unwrap() {
+        if iter > 0 && fit_change < tol_t {
             convergence_reason = ConvergenceReason::FitTolerance;
             break;
         }

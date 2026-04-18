@@ -395,7 +395,9 @@ impl ExecutionHistory {
             .min_by(|(_, a), (_, b)| {
                 let avg_a = (a.avg_flops_error + a.avg_time_error + a.avg_memory_error) / 3.0;
                 let avg_b = (b.avg_flops_error + b.avg_time_error + b.avg_memory_error) / 3.0;
-                avg_a.partial_cmp(&avg_b).unwrap()
+                avg_a
+                    .partial_cmp(&avg_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(name, _)| name.clone());
 

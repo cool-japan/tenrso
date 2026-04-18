@@ -58,7 +58,19 @@ use crate::parser::EinsumSpec;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+/// Acquire a `Mutex` guard, recovering from lock poisoning.
+///
+/// If a thread previously panicked while holding the cache lock, the data
+/// structures inside are still consistent (all mutations happen inside
+/// short critical sections without panicking operations), so recovering
+/// the guard is safe and lets the cache keep functioning instead of
+/// poisoning the entire planner.
+#[inline]
+fn lock_cache<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 
 /// Cache eviction policy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,7 +318,7 @@ impl PlanCache {
 
     /// Get the eviction policy used by this cache
     pub fn policy(&self) -> EvictionPolicy {
-        let inner = self.inner.lock().unwrap();
+        let inner = lock_cache(&self.inner);
         inner.policy
     }
 
@@ -356,7 +368,7 @@ impl PlanCache {
 
         // Try to get from cache
         {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = lock_cache(&self.inner);
             if let Some(entry) = inner.cache.get(&key) {
                 // Cache hit - clone plan and capture current time
                 let plan = entry.plan.clone();
@@ -382,7 +394,7 @@ impl PlanCache {
 
         // Insert into cache
         {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = lock_cache(&self.inner);
 
             // For ARC, adapt based on ghost list hits
             if inner.policy == EvictionPolicy::ARC {
@@ -433,7 +445,7 @@ impl PlanCache {
     /// ```
     pub fn get(&self, spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -> Option<Plan> {
         let key = CacheKey::new(spec, shapes, hints);
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = lock_cache(&self.inner);
 
         if let Some(entry) = inner.cache.get(&key) {
             // Clone plan and capture current time
@@ -475,7 +487,7 @@ impl PlanCache {
     /// ```
     pub fn insert(&self, spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints, plan: Plan) {
         let key = CacheKey::new(spec, shapes, hints);
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = lock_cache(&self.inner);
 
         // Evict if at capacity
         if inner.cache.len() >= inner.capacity {
@@ -506,20 +518,20 @@ impl PlanCache {
     /// assert_eq!(cache.len(), 0);
     /// ```
     pub fn clear(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = lock_cache(&self.inner);
         inner.cache.clear();
         inner.stats.entries = 0;
     }
 
     /// Get the cache capacity
     pub fn capacity(&self) -> usize {
-        let inner = self.inner.lock().unwrap();
+        let inner = lock_cache(&self.inner);
         inner.capacity
     }
 
     /// Get the current number of cached plans
     pub fn len(&self) -> usize {
-        let inner = self.inner.lock().unwrap();
+        let inner = lock_cache(&self.inner);
         inner.cache.len()
     }
 
@@ -549,7 +561,7 @@ impl PlanCache {
     /// assert_eq!(stats.entries, 1);
     /// ```
     pub fn stats(&self) -> CacheStats {
-        let inner = self.inner.lock().unwrap();
+        let inner = lock_cache(&self.inner);
         inner.stats.clone()
     }
 
@@ -578,13 +590,13 @@ impl PlanCache {
     /// assert_eq!(cache.hit_rate(), 0.5); // 1 hit out of 2 accesses
     /// ```
     pub fn hit_rate(&self) -> f64 {
-        let inner = self.inner.lock().unwrap();
+        let inner = lock_cache(&self.inner);
         inner.stats.hit_rate()
     }
 
     /// Reset cache statistics
     pub fn reset_stats(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = lock_cache(&self.inner);
         inner.stats = CacheStats {
             entries: inner.cache.len(),
             ..Default::default()

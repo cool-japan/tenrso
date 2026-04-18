@@ -87,7 +87,7 @@ Efficient handling of highly sparse gradients:
 
 ```toml
 [dependencies]
-tenrso-ad = "0.1.0-rc.1"
+tenrso-ad = "0.1.0"
 ```
 
 ## Quick Start
@@ -381,4 +381,4 @@ Apache-2.0 or MIT (dual licensed)
 
 ---
 
-**Status:** Alpha (production-ready internals) | **Version:** 0.1.0-rc.1 | **Tests:** 154/154 passing
+**Status:** Stable | **Version:** 0.1.0 | **Tests:** 154/154 passing

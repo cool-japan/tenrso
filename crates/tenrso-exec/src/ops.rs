@@ -94,11 +94,9 @@ fn is_matrix_multiply(spec_a: &str, spec_b: &str, output: &str) -> bool {
         None
     };
 
-    if shared.is_none() {
+    let Some(shared_idx) = shared else {
         return false;
-    }
-
-    let shared_idx = shared.unwrap();
+    };
 
     // Check that:
     // 1. Exactly one index is shared (contracted)
@@ -152,14 +150,34 @@ where
         .ok_or_else(|| anyhow!("No shared index found for contraction"))?;
 
     // Find non-shared indices and their positions
-    let a_free_idx = a_chars.iter().find(|&&c| c != shared_idx).copied().unwrap();
-    let b_free_idx = b_chars.iter().find(|&&c| c != shared_idx).copied().unwrap();
+    let a_free_idx = a_chars
+        .iter()
+        .find(|&&c| c != shared_idx)
+        .copied()
+        .ok_or_else(|| anyhow!("execute_matmul_general: no free index found in spec_a"))?;
+    let b_free_idx = b_chars
+        .iter()
+        .find(|&&c| c != shared_idx)
+        .copied()
+        .ok_or_else(|| anyhow!("execute_matmul_general: no free index found in spec_b"))?;
 
     // Find positions in tensors
-    let a_free_pos = a_chars.iter().position(|&c| c == a_free_idx).unwrap();
-    let a_shared_pos = a_chars.iter().position(|&c| c == shared_idx).unwrap();
-    let b_free_pos = b_chars.iter().position(|&c| c == b_free_idx).unwrap();
-    let b_shared_pos = b_chars.iter().position(|&c| c == shared_idx).unwrap();
+    let a_free_pos = a_chars
+        .iter()
+        .position(|&c| c == a_free_idx)
+        .ok_or_else(|| anyhow!("execute_matmul_general: a_free_idx missing from spec_a"))?;
+    let a_shared_pos = a_chars
+        .iter()
+        .position(|&c| c == shared_idx)
+        .ok_or_else(|| anyhow!("execute_matmul_general: shared_idx missing from spec_a"))?;
+    let b_free_pos = b_chars
+        .iter()
+        .position(|&c| c == b_free_idx)
+        .ok_or_else(|| anyhow!("execute_matmul_general: b_free_idx missing from spec_b"))?;
+    let b_shared_pos = b_chars
+        .iter()
+        .position(|&c| c == shared_idx)
+        .ok_or_else(|| anyhow!("execute_matmul_general: shared_idx missing from spec_b"))?;
 
     // Get dimensions
     let a_free_dim = a.shape()[a_free_pos];
@@ -177,8 +195,14 @@ where
 
     // Find output order
     let out_chars: Vec<char> = spec_out.chars().collect();
-    let a_free_out_pos = out_chars.iter().position(|&c| c == a_free_idx).unwrap();
-    let _b_free_out_pos = out_chars.iter().position(|&c| c == b_free_idx).unwrap();
+    let a_free_out_pos = out_chars
+        .iter()
+        .position(|&c| c == a_free_idx)
+        .ok_or_else(|| anyhow!("execute_matmul_general: a_free_idx missing from output spec"))?;
+    let _b_free_out_pos = out_chars
+        .iter()
+        .position(|&c| c == b_free_idx)
+        .ok_or_else(|| anyhow!("execute_matmul_general: b_free_idx missing from output spec"))?;
 
     let mut output = vec![T::default(); output_shape.iter().product()];
     let a_view = a.view();

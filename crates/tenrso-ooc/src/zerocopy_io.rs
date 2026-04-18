@@ -55,6 +55,19 @@ use memmap2::{Mmap, MmapMut, MmapOptions};
 /// Alignment size for direct I/O (typically 4KB for most systems)
 pub const DEFAULT_ALIGNMENT: usize = 4096;
 
+/// Lock a mutex, recovering from poisoning by taking the inner value.
+///
+/// Mutex poisoning only indicates a previous panic; the underlying data is
+/// still usable. This helper avoids `.unwrap()` on `.lock()` while remaining
+/// resilient to panics in other threads.
+#[inline]
+fn lock_pool<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match m.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 /// Zero-copy reader with memory-mapped views
 pub struct ZeroCopyReader {
     file: File,
@@ -94,7 +107,12 @@ impl ZeroCopyReader {
             };
             self.mmap = Some(mmap);
         }
-        Ok(self.mmap.as_ref().unwrap().as_ref())
+        // Safe: we just ensured self.mmap is Some above.
+        let mmap = self
+            .mmap
+            .as_ref()
+            .context("mmap was not initialized (unreachable)")?;
+        Ok(mmap.as_ref())
     }
 
     /// Create a zero-copy view of a specific range
@@ -256,7 +274,11 @@ impl ZeroCopyWriter {
             self.allocate(total_bytes)?;
         }
 
-        let mmap = self.mmap.as_mut().unwrap();
+        // Safe: we just ensured self.mmap is Some above.
+        let mmap = self
+            .mmap
+            .as_mut()
+            .context("mmap was not initialized (unreachable)")?;
         if mmap.len() < total_bytes {
             anyhow::bail!("Mmap too small for tensor");
         }
@@ -357,14 +379,14 @@ impl BufferPool {
 
     /// Acquire a buffer from the pool
     pub fn acquire(&self) -> AlignedBuffer {
-        let mut pool = self.pool.lock().unwrap();
+        let mut pool = lock_pool(&self.pool);
         pool.pop()
             .unwrap_or_else(|| AlignedBuffer::new(self.buffer_size, self.alignment))
     }
 
     /// Release a buffer back to the pool
     pub fn release(&self, buffer: AlignedBuffer) {
-        let mut pool = self.pool.lock().unwrap();
+        let mut pool = lock_pool(&self.pool);
         if pool.len() < 100 {
             // Max pool size
             pool.push(buffer);
@@ -373,7 +395,7 @@ impl BufferPool {
 
     /// Get current pool size
     pub fn size(&self) -> usize {
-        self.pool.lock().unwrap().len()
+        lock_pool(&self.pool).len()
     }
 }
 

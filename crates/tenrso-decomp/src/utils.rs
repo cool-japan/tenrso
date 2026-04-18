@@ -8,9 +8,24 @@
 
 use anyhow::Result;
 use scirs2_core::ndarray_ext::Array2;
-use scirs2_core::numeric::{Float, NumCast};
+use scirs2_core::numeric::{Float, NumCast, ToPrimitive};
 use std::iter::Sum;
 use tenrso_core::DenseND;
+
+/// Infallibly cast a literal / well-bounded numeric value to `T`.
+///
+/// SAFETY: all call sites use numeric literals or non-negative `usize`
+/// values that are representable in any supported `T: Float` (f32, f64).
+/// Returning `T::zero()` in the unreachable failure path preserves
+/// numerical safety without a panic and respects the no-unwrap policy.
+#[inline]
+fn cast_lit<T: NumCast, V: ToPrimitive>(v: V) -> T {
+    T::from(v).unwrap_or_else(|| {
+        T::from(0u8).unwrap_or_else(|| {
+            unreachable!("NumCast::from(0u8) must succeed for primitive numeric T")
+        })
+    })
+}
 
 /// Statistics for a decomposition method
 #[derive(Debug, Clone)]
@@ -112,7 +127,7 @@ where
     }
 
     // Normalize by sqrt(rank)
-    let normalizer = T::from(rank).unwrap().sqrt();
+    let normalizer: T = cast_lit::<T, _>(rank).sqrt();
     (error_sq.sqrt()) / normalizer
 }
 
@@ -152,7 +167,10 @@ where
     let condition_number = s_max / s_min;
 
     // Effective rank: count singular values > threshold * max
-    let threshold = s_max * T::from(sv_threshold).unwrap();
+    let threshold_t: T = NumCast::from(sv_threshold).ok_or_else(|| {
+        anyhow::anyhow!("could not convert sv_threshold={sv_threshold} to scalar type")
+    })?;
+    let threshold = s_max * threshold_t;
     let effective_rank = s.iter().filter(|&&sigma| sigma > threshold).count();
 
     // Frobenius norm
@@ -270,7 +288,11 @@ pub fn estimate_cp_rank(shape: &[usize], max_rank_ratio: f64) -> usize {
         return 1;
     }
 
-    let min_dim = *shape.iter().min().unwrap();
+    // `shape.is_empty()` has been checked above, so `min()` is guaranteed
+    // to return `Some`. We defensively fall back to `1` if a future refactor
+    // bypasses the emptiness guard, which preserves the semantic "no rank
+    // smaller than 1" without panicking.
+    let min_dim = shape.iter().min().copied().unwrap_or(1);
     let n_modes = shape.len();
 
     // Heuristic: rank ~ min_dim^(1/n_modes)
@@ -322,6 +344,9 @@ where
     let shape = tensor.shape();
     let n_modes = tensor.rank();
     let mut ranks = Vec::with_capacity(n_modes);
+    let energy_threshold_t: T = NumCast::from(energy_threshold).ok_or_else(|| {
+        anyhow::anyhow!("could not convert energy_threshold={energy_threshold} to scalar type")
+    })?;
 
     #[allow(clippy::needless_range_loop)] // mode is needed for unfold(mode), not just indexing
     for mode in 0..n_modes {
@@ -333,7 +358,7 @@ where
 
         // Find rank that preserves energy_threshold of energy
         let total_energy: T = s.iter().map(|&sigma| sigma * sigma).sum();
-        let target_energy = total_energy * T::from(energy_threshold).unwrap();
+        let target_energy = total_energy * energy_threshold_t;
 
         let mut cumulative_energy = T::zero();
         let mut rank = 1;
@@ -351,6 +376,111 @@ where
     }
 
     Ok(ranks)
+}
+
+/// Compute truncated SVD using randomized algorithm (Halko-Martinsson-Tropp 2011).
+///
+/// For an m x n matrix, computes an approximate rank-k SVD:
+///   A ≈ U_k Σ_k V_k^T
+///
+/// This is dramatically faster than full SVD when k << min(m,n).
+/// Complexity: O(m * n * k) instead of O(m * n * min(m,n)).
+///
+/// # Arguments
+///
+/// * `matrix` - Input m x n matrix (as ArrayView2)
+/// * `target_rank` - Number of singular values/vectors to compute
+/// * `oversampling` - Extra samples for accuracy (typically 5-10)
+/// * `power_iters` - Power iterations for better approximation (typically 1-2)
+///
+/// # Returns
+///
+/// (U, S, Vt) where U is m x k, S is k, Vt is k x n
+pub fn randomized_svd_truncated<T>(
+    matrix: &scirs2_core::ndarray_ext::ArrayView2<T>,
+    target_rank: usize,
+    oversampling: usize,
+    power_iters: usize,
+) -> Result<(Array2<T>, scirs2_core::ndarray_ext::Array1<T>, Array2<T>)>
+where
+    T: Float
+        + NumCast
+        + scirs2_core::numeric::NumAssign
+        + Sum
+        + scirs2_core::ndarray_ext::ScalarOperand
+        + Send
+        + Sync
+        + std::fmt::Debug
+        + 'static,
+{
+    use scirs2_core::random::{thread_rng, Distribution, RandNormal as Normal};
+    use scirs2_linalg::{qr, svd};
+
+    let (m, n) = (matrix.shape()[0], matrix.shape()[1]);
+    let k = target_rank.min(m).min(n);
+    let l = (k + oversampling).min(m).min(n);
+
+    let mut rng = thread_rng();
+    let normal = Normal::new(0.0, 1.0).map_err(|e| {
+        anyhow::anyhow!("failed to construct Normal(0.0, 1.0): {e}")
+    })?;
+
+    // Step 1: Generate random Gaussian matrix Omega (n x l)
+    let omega = Array2::<T>::from_shape_fn((n, l), |_| {
+        cast_lit(normal.sample(&mut rng))
+    });
+
+    // Step 2: Form the sample matrix Y = A * Omega (m x l)
+    let mut y = matrix.dot(&omega);
+
+    // Step 3: Power iterations for improved accuracy
+    for _ in 0..power_iters {
+        // y = A * (A^T * y)
+        let aty = matrix.t().dot(&y.view());
+        y = matrix.dot(&aty.view());
+    }
+
+    // Step 4: QR decomposition of Y = Q * R
+    let (q, _r) = qr(&y.view(), None)?;
+
+    // Take only l columns from Q (thin QR)
+    let q_thin = if q.shape()[1] > l {
+        q.slice(scirs2_core::ndarray_ext::s![.., ..l]).to_owned()
+    } else {
+        q
+    };
+
+    // Step 5: Form B = Q^T * A (l x n) — small matrix
+    let b = q_thin.t().dot(matrix);
+
+    // Step 6: SVD of small matrix B = U_b * S * Vt
+    let (u_b, s, vt) = svd(&b.view(), false, None)?;
+
+    // Step 7: Recover left singular vectors: U = Q * U_b
+    let u_full = q_thin.dot(&u_b.view());
+
+    // Truncate to target rank k
+    let u_trunc = u_full
+        .slice(scirs2_core::ndarray_ext::s![.., ..k])
+        .to_owned();
+    let s_trunc = s.slice(scirs2_core::ndarray_ext::s![..k]).to_owned();
+    let vt_trunc = vt
+        .slice(scirs2_core::ndarray_ext::s![..k, ..])
+        .to_owned();
+
+    Ok((u_trunc, s_trunc, vt_trunc))
+}
+
+/// Determine whether to use randomized SVD based on matrix dimensions and target rank.
+///
+/// Use randomized SVD when the matrix is "wide" or "tall" relative to the
+/// target rank, making full SVD wasteful.
+#[inline]
+pub fn should_use_randomized_svd(rows: usize, cols: usize, target_rank: usize) -> bool {
+    let min_dim = rows.min(cols);
+    // Use randomized when target rank is much smaller than the matrix
+    // and the matrix is large enough to benefit
+    target_rank < min_dim / 2 && min_dim > 64
 }
 
 #[cfg(test)]

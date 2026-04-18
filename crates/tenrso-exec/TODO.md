@@ -1,9 +1,9 @@
 # tenrso-exec TODO
 
 > **Milestone:** M4
-> **Version:** 0.1.0-rc.1
-> **Status:** RC.1 — 244 tests passing (100%) — 2026-03-06
-> **Last Updated:** 2026-03-06
+> **Version:** 0.1.0
+> **Status:** 0.1.0 — 273 tests passing (100%) — 2026-04-15
+> **Last Updated:** 2026-04-15
 
 ---
 
@@ -132,22 +132,64 @@
 
 ```
 src/
-├── lib.rs                      - Module exports
-├── types.rs                    - Type definitions, enums, MemoryPool
-├── functions.rs                - Trait definitions
-├── cpuexecutor_traits.rs       - CpuExecutor trait implementations
-├── functions_tests.rs          - Test suite (extracted for compliance)
-├── parallel.rs                 - Parallel execution utilities
-├── custom_ops.rs               - Custom user-defined operations
-├── simd_ops.rs                 - SIMD-accelerated element-wise ops
-├── tiled_reductions.rs         - Cache-friendly blocked reductions
-├── advanced_indexing.rs        - Multi-dim gather/scatter/mask
-├── vectorized_broadcast.rs     - Pattern-aware broadcasting
-├── optimized_ops.rs            - Optimization integration layer
-├── pooled_ops.rs               - RAII-style buffer management helpers
-├── thread_local_pool.rs        - Thread-local memory pools
-└── pool_heuristics.rs          - Smart pooling heuristics
+├── lib.rs                        - Module exports
+├── executor/
+│   ├── mod.rs                    - Executor sub-tree declarations
+│   ├── types.rs                  - Type definitions, enums, MemoryPool
+│   ├── functions.rs              - TenrsoExecutor trait definitions
+│   ├── cpuexecutor_traits/       - CpuExecutor trait impls (split by category)
+│   │   ├── mod.rs                - Thin trait dispatch (327 lines)
+│   │   ├── contraction.rs        - einsum (37 lines)
+│   │   ├── conv_pool.rs          - conv/pool ops (641 lines)
+│   │   ├── elementwise.rs        - elem_op, binary_op, clip, modulo (201)
+│   │   ├── indexing.rs           - where/masked_select/gather/scatter (312)
+│   │   ├── linalg.rs             - determinant, inverse, solve (176)
+│   │   ├── reduction.rs          - reduce/softmax/layer_norm/argmax (437)
+│   │   └── shape.rs              - transpose/reshape/concat/split/... (644)
+│   ├── functions_tests/          - Tests for TenrsoExecutor impls (split)
+│   │   ├── mod.rs                - Test-module declarations (29 lines)
+│   │   ├── einsum_tests.rs       - 4 tests (84 lines)
+│   │   ├── elementwise_tests.rs  - 33 tests (522 lines)
+│   │   ├── reduction_tests.rs    - 21 tests (317 lines)
+│   │   ├── shape_tests.rs        - 37 tests (536 lines)
+│   │   ├── indexing_tests.rs     - 15 tests (271 lines)
+│   │   ├── conv_pool_tests.rs    - 20 tests (355 lines)
+│   │   ├── linalg_tests.rs       - 15 tests (202 lines)
+│   │   └── pool_tests.rs         - 17 tests (379 lines)
+│   └── ...
+├── parallel.rs                   - Parallel execution utilities
+├── custom_ops.rs                 - Custom user-defined operations
+├── simd_ops.rs                   - SIMD-accelerated element-wise ops
+├── tiled_reductions.rs           - Cache-friendly blocked reductions
+├── advanced_indexing.rs          - Multi-dim gather/scatter/mask
+├── vectorized_broadcast.rs       - Pattern-aware broadcasting
+├── optimized_ops.rs              - Optimization integration layer
+├── pooled_ops.rs                 - RAII-style buffer management helpers
+├── thread_local_pool.rs          - Thread-local memory pools
+└── pool_heuristics.rs            - Smart pooling heuristics
 ```
+
+---
+
+## Refactoring
+
+### 2026-04-15 - Large file splits (compliance with <2000 lines policy)
+
+- [x] **`executor/cpuexecutor_traits.rs`** (2221 lines) split into a directory
+  module with 8 files (`mod.rs` + 7 per-category submodules). `mod.rs`
+  now contains only thin trait dispatches; all helper logic lives in
+  submodules named by operation family (contraction, conv_pool,
+  elementwise, indexing, linalg, reduction, shape). Largest child
+  is `shape.rs` at 644 lines — all children comfortably under 1500.
+- [x] **`executor/functions_tests.rs`** (2503 lines) converted to a
+  directory module with `mod.rs` + 8 per-category test submodules
+  (einsum, elementwise, reduction, shape, indexing, conv_pool, linalg,
+  pool). The parent `executor/mod.rs` already gates the subtree with
+  `#[cfg(test)]`, so no additional attributes were needed. Largest
+  child is `shape_tests.rs` at 536 lines.
+- Line-count verification: every new file is well under the 1500-line
+  ceiling; no file-level warnings; clippy `-D warnings` clean.
+- Test integrity: 273 lib tests pass — identical count to pre-split.
 
 ---
 
@@ -162,4 +204,4 @@ src/
 ---
 
 **Milestone M4:** COMPLETE
-**Last Updated:** 2026-03-06
+**Last Updated:** 2026-04-15

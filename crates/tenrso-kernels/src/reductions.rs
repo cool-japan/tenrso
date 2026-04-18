@@ -34,6 +34,30 @@ use crate::error::{KernelError, KernelResult};
 use scirs2_core::ndarray_ext::{Array, ArrayView, Dimension, IxDyn};
 use scirs2_core::numeric::{Float, Num, Zero};
 
+/// Convert a count (`usize`) into a floating-point type, returning a
+/// structured error instead of panicking on the rare conversion failure.
+#[inline]
+fn cast_count<T: Float>(op: &'static str, count: usize) -> KernelResult<T> {
+    T::from(count).ok_or_else(|| {
+        KernelError::operation_error(
+            op,
+            format!("cannot convert count {} to target float", count),
+        )
+    })
+}
+
+/// Convert an `f64` literal (or any `f64` expression) into a floating-point
+/// type, returning a structured error instead of panicking.
+#[inline]
+fn cast_f64<T: Float>(op: &'static str, value: f64) -> KernelResult<T> {
+    T::from(value).ok_or_else(|| {
+        KernelError::operation_error(
+            op,
+            format!("cannot convert value {} to target float", value),
+        )
+    })
+}
+
 /// Compute the sum of tensor elements along specified modes
 ///
 /// Reduces the tensor by summing over the specified modes. This is a wrapper
@@ -149,7 +173,7 @@ where
 
     // Compute number of elements being averaged
     let count: usize = modes.iter().map(|&m| shape[m]).product();
-    let count_t = T::from(count).unwrap();
+    let count_t = cast_count::<T>("mean_along_modes", count)?;
 
     // Divide by count
     let mean = sum.mapv(|x| x / count_t);
@@ -285,7 +309,7 @@ where
     }
 
     // Divide by (count - ddof)
-    let divisor = T::from(count - ddof).unwrap();
+    let divisor = cast_count::<T>("compute_variance_from_mean", count - ddof)?;
     variance.mapv_inplace(|x| x / divisor);
 
     Ok(variance)
@@ -757,7 +781,7 @@ where
             let index = (n - 1) as f64 * (percentile / 100.0);
             let lower_idx = index.floor() as usize;
             let upper_idx = index.ceil() as usize;
-            let fraction = T::from(index - index.floor()).unwrap();
+            let fraction = cast_f64::<T>("percentile_along_modes", index - index.floor())?;
 
             let lower_val = values_buffer[lower_idx];
             let upper_val = values_buffer[upper_idx];
@@ -883,15 +907,17 @@ where
     }
 
     // Compute skewness
-    let n_t = T::from(n).unwrap();
-    let one_point_five = T::from(1.5).unwrap();
+    let n_t = cast_count::<T>("skewness_along_modes", n)?;
+    let one_point_five = cast_f64::<T>("skewness_along_modes", 1.5)?;
     let result = if bias {
         // Biased estimator: g₁ = m₃ / m₂^(3/2)
         third_moment.mapv(|m3| m3 / n_t)
             / second_moment.mapv(|m2: T| (m2 / n_t).powf(one_point_five))
     } else {
         // Unbiased estimator: G₁ = √(n(n-1)) / (n-2) × g₁
-        let adj_factor = T::from((n * (n - 1)) as f64).unwrap().sqrt() / T::from(n - 2).unwrap();
+        let numerator = cast_f64::<T>("skewness_along_modes", (n * (n - 1)) as f64)?.sqrt();
+        let denominator = cast_count::<T>("skewness_along_modes", n - 2)?;
+        let adj_factor = numerator / denominator;
         (third_moment.mapv(|m3| m3 / n_t)
             / second_moment.mapv(|m2: T| (m2 / n_t).powf(one_point_five)))
         .mapv(|g1| g1 * adj_factor)
@@ -1017,8 +1043,8 @@ where
     }
 
     // Compute kurtosis
-    let n_t = T::from(n).unwrap();
-    let three = T::from(3.0).unwrap();
+    let n_t = cast_count::<T>("kurtosis_along_modes", n)?;
+    let three = cast_f64::<T>("kurtosis_along_modes", 3.0)?;
 
     let kurt = if bias {
         // Biased estimator: g₂ = m₄ / m₂²
@@ -1029,10 +1055,10 @@ where
             })
     } else {
         // Unbiased estimator with correction factor
-        let adj1 = T::from((n + 1) * n * (n - 1)).unwrap();
-        let adj2 = T::from((n - 2) * (n - 3)).unwrap();
-        let adj3 = T::from(3 * (n - 1) * (n - 1)).unwrap();
-        let adj4 = T::from((n - 2) * (n - 3)).unwrap();
+        let adj1 = cast_count::<T>("kurtosis_along_modes", (n + 1) * n * (n - 1))?;
+        let adj2 = cast_count::<T>("kurtosis_along_modes", (n - 2) * (n - 3))?;
+        let adj3 = cast_count::<T>("kurtosis_along_modes", 3 * (n - 1) * (n - 1))?;
+        let adj4 = cast_count::<T>("kurtosis_along_modes", (n - 2) * (n - 3))?;
 
         (fourth_moment.mapv(|m4| m4 / n_t)
             / second_moment.mapv(|m2| {
@@ -1268,7 +1294,7 @@ where
     }
 
     // Divide by (n - ddof)
-    let divisor = T::from(sample_size - ddof).unwrap();
+    let divisor = cast_count::<T>("covariance_along_modes", sample_size - ddof)?;
     result.mapv_inplace(|x| x / divisor);
 
     Ok(result)

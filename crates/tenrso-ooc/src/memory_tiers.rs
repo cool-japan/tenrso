@@ -545,19 +545,22 @@ impl TieredMemoryManager {
             .map(|m| (m.id.clone(), m.calculate_demotion_score(now)))
             .collect();
 
-        // Sort by demotion score (highest first)
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        // Sort by demotion score (highest first). NaN scores sort as Equal.
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Calculate target usage
-        let (capacity_bytes, promotion_threshold) = {
-            let target_stats = self.tier_stats.get(&tier).unwrap();
-            (target_stats.capacity_bytes, self.promotion_threshold)
+        // Calculate target usage. Missing tier stats -> skip demotion.
+        let (capacity_bytes, promotion_threshold) = match self.tier_stats.get(&tier) {
+            Some(stats) => (stats.capacity_bytes, self.promotion_threshold),
+            None => return Ok(()),
         };
         let target_usage = (capacity_bytes as f64 * promotion_threshold) as usize;
 
         // Demote chunks until we're below threshold
         for (chunk_id, _score) in candidates {
-            let current_usage = self.tier_stats.get(&tier).unwrap().used_bytes;
+            let current_usage = match self.tier_stats.get(&tier) {
+                Some(stats) => stats.used_bytes,
+                None => break,
+            };
             if current_usage <= target_usage {
                 break;
             }
@@ -587,15 +590,13 @@ impl TieredMemoryManager {
             .map(|m| (m.id.clone(), m.calculate_promotion_score(now), m.size_bytes))
             .collect();
 
-        // Sort by promotion score (highest first)
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        // Sort by promotion score (highest first). NaN scores sort as Equal.
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Calculate available space
-        let available_space = {
-            let target_stats = self.tier_stats.get(&tier).unwrap();
-            target_stats
-                .capacity_bytes
-                .saturating_sub(target_stats.used_bytes)
+        // Calculate available space. Missing tier stats -> nothing to promote.
+        let available_space = match self.tier_stats.get(&tier) {
+            Some(stats) => stats.capacity_bytes.saturating_sub(stats.used_bytes),
+            None => return Ok(()),
         };
 
         let mut promoted_bytes = 0;
@@ -618,7 +619,10 @@ impl TieredMemoryManager {
     /// Load tensor from a tier
     #[cfg(feature = "mmap")]
     fn load_from_tier(&self, chunk_id: &str, tier: MemoryTier) -> Result<DenseND<f64>> {
-        let path = self.tier_paths.get(&tier).unwrap();
+        let path = self
+            .tier_paths
+            .get(&tier)
+            .ok_or_else(|| anyhow!("No path registered for tier {:?}", tier))?;
         let filename = format!("chunk_{}.bin", chunk_id);
         let full_path = path.join(filename);
 
@@ -626,7 +630,12 @@ impl TieredMemoryManager {
         {
             let compressed = std::fs::read(&full_path)?;
             let decompressed = decompress_to_f64_vec(&compressed)?;
-            let shape = self.chunks.get(chunk_id).unwrap().shape.clone();
+            let shape = self
+                .chunks
+                .get(chunk_id)
+                .ok_or_else(|| anyhow!("Chunk {chunk_id} missing from registry"))?
+                .shape
+                .clone();
             DenseND::from_vec(decompressed, &shape)
         }
 
@@ -639,7 +648,10 @@ impl TieredMemoryManager {
     /// Save tensor to a tier
     #[cfg(feature = "mmap")]
     fn save_to_tier(&self, chunk_id: &str, tensor: &DenseND<f64>, tier: MemoryTier) -> Result<()> {
-        let path = self.tier_paths.get(&tier).unwrap();
+        let path = self
+            .tier_paths
+            .get(&tier)
+            .ok_or_else(|| anyhow!("No path registered for tier {:?}", tier))?;
         let filename = format!("chunk_{}.bin", chunk_id);
         let full_path = path.join(filename);
 

@@ -1,9 +1,9 @@
 # tenrso-ooc TODO
 
 > **Milestone:** M5
-> **Version:** 0.1.0-rc.1
-> **Status:** RC.1 — 238 tests passing (100%) — 2026-03-06
-> **Last Updated:** 2026-03-06
+> **Version:** 0.1.0
+> **Status:** 0.1.0 — 238 tests passing (100%) — 2026-04-14
+> **Last Updated:** 2026-04-14
 
 ---
 

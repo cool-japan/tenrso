@@ -101,3 +101,8 @@ required-features = ["distributed"]
 [[bench]]
 name = "integrity_and_autoselect"
 harness = false
+
+[[bench]]
+name = "ooc_benchmarks"
+harness = false
+required-features = ["arrow", "parquet", "mmap", "compression"]

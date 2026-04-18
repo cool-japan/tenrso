@@ -859,7 +859,10 @@ impl CpuExecutor {
                 intermediates.len()
             ));
         }
-        Ok(intermediates.into_iter().next().unwrap())
+        intermediates
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("BUG: expected exactly 1 intermediate after guard check"))
     }
     /// Helper: Compute determinant of a 2D matrix using LU decomposition
     pub(crate) fn compute_determinant_2d<T2>(
@@ -896,7 +899,10 @@ impl CpuExecutor {
                     pivot = k;
                 }
             }
-            if max_val < T2::from_f64(1e-10).unwrap() {
+            if max_val
+                < T2::from_f64(1e-10)
+                    .expect("FromPrimitive invariant: 1e-10 representable in float type")
+            {
                 return Ok(T2::zero());
             }
             if pivot != i {
@@ -947,7 +953,10 @@ impl CpuExecutor {
                     pivot = k;
                 }
             }
-            if max_val < T2::from_f64(1e-10).unwrap() {
+            if max_val
+                < T2::from_f64(1e-10)
+                    .expect("FromPrimitive invariant: 1e-10 representable in float type")
+            {
                 return Err(anyhow!("Matrix is singular and cannot be inverted"));
             }
             if pivot != i {
@@ -1004,7 +1013,10 @@ impl CpuExecutor {
                     pivot = k;
                 }
             }
-            if max_val < T2::from_f64(1e-10).unwrap() {
+            if max_val
+                < T2::from_f64(1e-10)
+                    .expect("FromPrimitive invariant: 1e-10 representable in float type")
+            {
                 return Err(anyhow!("Matrix is singular, cannot solve"));
             }
             if pivot != i {

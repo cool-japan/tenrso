@@ -283,11 +283,14 @@ impl HeartbeatResponse {
 }
 
 /// Get current Unix timestamp in seconds.
+///
+/// Returns 0 if the system clock is before the Unix epoch (never expected on
+/// a correctly-configured system); this keeps the API infallible for callers.
 fn current_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

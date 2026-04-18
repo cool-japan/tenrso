@@ -2,7 +2,7 @@
 
 Tensor decomposition methods: CP-ALS, Tucker-HOOI/HOSVD, TT-SVD, and advanced variants.
 
-**Version:** 0.1.0-rc.1 | **Status:** RC.1 — 165 tests passing (2 ignored), 100% pass rate | **Last Updated:** 2026-03-06
+**Version:** 0.1.0 | **Status:** Stable — 165 tests passing (2 ignored), 100% pass rate | **Last Updated:** 2026-04-14
 
 ## Overview
 
@@ -344,7 +344,7 @@ cargo test --test properties
 cargo test --test '*'
 ```
 
-**Test coverage (RC.1):** 165 passing (2 ignored), 100% pass rate
+**Test coverage (0.1.0):** 165 passing (2 ignored), 100% pass rate
 - Unit tests: 52+ (CP, Tucker, TT, utilities)
 - Property tests: 19 (proptest framework)
 - Integration tests: 14

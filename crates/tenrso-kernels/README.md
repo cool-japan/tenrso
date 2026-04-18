@@ -1,6 +1,6 @@
 # tenrso-kernels
 
-> **Version:** 0.1.0-rc.1 | **Status:** [Alpha] — 264 tests passing, 7 ignored (100%) | **Updated:** 2026-03-06
+> **Version:** 0.1.0 | **Status:** Stable — 264 tests passing, 7 ignored (100%) | **Updated:** 2026-04-14
 
 Tensor kernel operations: Khatri-Rao, Kronecker, Hadamard, N-mode products, MTTKRP, outer products, Tucker, statistical reductions, and randomized algorithms.
 

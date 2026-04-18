@@ -207,7 +207,9 @@ impl ChunkGraph {
 
         for node in &self.nodes {
             for &_input_id in &node.inputs {
-                *in_degree.get_mut(&node.id).unwrap() += 1;
+                // All node ids are pre-seeded into in_degree above; default to
+                // 0 instead of panicking if that invariant is ever broken.
+                *in_degree.entry(node.id).or_insert(0) += 1;
             }
         }
 
@@ -232,10 +234,11 @@ impl ChunkGraph {
             if let Some(deps) = self.dependents.get(&node_id) {
                 let mut new_ready = Vec::new();
                 for &dep_id in deps {
-                    let deg = in_degree.get_mut(&dep_id).unwrap();
-                    *deg -= 1;
-                    if *deg == 0 {
-                        new_ready.push(dep_id);
+                    if let Some(deg) = in_degree.get_mut(&dep_id) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            new_ready.push(dep_id);
+                        }
                     }
                 }
                 // Sort for determinism
@@ -283,7 +286,9 @@ impl ChunkGraph {
         for node in &self.nodes {
             ref_count.insert(node.id, 0);
             for &input_id in &node.inputs {
-                *ref_count.get_mut(&input_id).unwrap() += 1;
+                // Increment via entry API so an unseen input id contributes
+                // a fresh count of 1 instead of panicking.
+                *ref_count.entry(input_id).or_insert(0) += 1;
             }
         }
 

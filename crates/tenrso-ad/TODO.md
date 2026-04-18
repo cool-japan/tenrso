@@ -1,9 +1,9 @@
 # tenrso-ad TODO
 
 > **Milestone:** M6
-> **Version:** 0.1.0-rc.1
-> **Status:** RC.1 — 154 tests passing (100%, incl. 10 property tests) — 2026-03-06
-> **Last Updated:** 2026-03-06
+> **Version:** 0.1.0
+> **Status:** 0.1.0 — 185 tests passing (100%, incl. 11 property tests) — 2026-04-14
+> **Last Updated:** 2026-04-14
 
 ---
 
@@ -128,8 +128,17 @@
   - [x] Operation fusion
   - [x] Dead code elimination (DCE)
   - [x] Memory planning
+  - [x] Constant folding (`constant_folding`, size-thresholded, topo-order,
+    whitelist of deterministic ops, preserves cached values)
+  - [x] Common subexpression elimination
+    (`common_subexpression_elimination`, commutative-aware for Add/Mul,
+    order-preserving for Sub/Div/MatMul, never deduplicates `Input`)
+  - [x] Combined pipeline `optimize_graph` in canonical order:
+    CSE (pre-fold) → constant_folding → CSE (post-fold) → DCE
 - [x] 15 tests for graph module
-- [x] 12 tests for graph optimizer module
+- [x] 23 tests for graph optimizer module (12 pre-existing + 11 new for
+  constant folding, CSE, end-to-end pipeline, and round-trip numerical
+  correctness at 1e-10 f64 tolerance)
 - [x] Example: `graph_based_ad.rs`
 - [x] 8 graph benchmarks
 
@@ -172,7 +181,7 @@
 - [x] Gradient monitoring - 15 tests
 - [x] Optimizers - 13 tests
 - [x] Graph-based AD - 15 tests
-- [x] Graph optimizer - 12 tests
+- [x] Graph optimizer - 23 tests (incl. constant folding + CSE)
 - [x] Parallel computation - 5 tests
 - [x] Storage - 7 tests
 - [x] Utilities - 8 tests
@@ -181,7 +190,7 @@
 - [x] Examples - 10 comprehensive examples
 - [x] Benchmarks - 15 benchmarks (7 gradient + 8 graph)
 
-**Total Tests:** 154 passing (100%)
+**Total Tests:** 185 passing (100%)
 
 ---
 
@@ -215,9 +224,8 @@ src/
 - Distributed gradients (AllReduce, gradient bucketing, communication-computation overlap)
 - Hardware accelerators (GPU kernels via scirs2-gpu, TPU/NPU support)
 - Advanced optimization algorithms (L-BFGS, conjugate gradients)
-- Additional graph optimizations (constant folding, common subexpression elimination)
 
 ---
 
 **Milestone M6:** COMPLETE
-**Last Updated:** 2026-03-06
+**Last Updated:** 2026-04-14

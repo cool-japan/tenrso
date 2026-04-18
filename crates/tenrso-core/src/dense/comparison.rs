@@ -301,9 +301,13 @@ where
             );
         }
 
+        let slice = self
+            .data
+            .as_slice_mut()
+            .ok_or_else(|| anyhow::anyhow!("where_replace requires a contiguous tensor"))?;
         for (i, &cond) in condition.iter().enumerate() {
             if cond {
-                self.data.as_slice_mut().unwrap()[i] = value.clone();
+                slice[i] = value.clone();
             }
         }
 

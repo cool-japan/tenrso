@@ -39,7 +39,7 @@ where
         T: scirs2_core::numeric::Signed,
     {
         let abs_data: Vec<T> = self.data.iter().map(|x| x.abs()).collect();
-        Self::from_vec(abs_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(abs_data, self.shape())
     }
 
     /// Clip values to be within [min_val, max_val]
@@ -95,7 +95,7 @@ where
     /// ```
     pub fn sqrt(&self) -> Self {
         let sqrt_data: Vec<T> = self.data.iter().map(|x| x.sqrt()).collect();
-        Self::from_vec(sqrt_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(sqrt_data, self.shape())
     }
 
     /// Apply element-wise exponential (e^x).
@@ -116,7 +116,7 @@ where
     /// ```
     pub fn exp(&self) -> Self {
         let exp_data: Vec<T> = self.data.iter().map(|x| x.exp()).collect();
-        Self::from_vec(exp_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(exp_data, self.shape())
     }
 
     /// Apply element-wise natural logarithm (ln(x)).
@@ -137,7 +137,7 @@ where
     /// ```
     pub fn ln(&self) -> Self {
         let log_data: Vec<T> = self.data.iter().map(|x| x.ln()).collect();
-        Self::from_vec(log_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(log_data, self.shape())
     }
 
     /// Apply element-wise power (x^n).
@@ -164,7 +164,7 @@ where
     /// ```
     pub fn powf(&self, n: T) -> Self {
         let pow_data: Vec<T> = self.data.iter().map(|x| x.powf(n)).collect();
-        Self::from_vec(pow_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(pow_data, self.shape())
     }
 
     // ========== Trigonometric Functions ==========
@@ -187,7 +187,7 @@ where
     /// ```
     pub fn sin(&self) -> Self {
         let sin_data: Vec<T> = self.data.iter().map(|x| x.sin()).collect();
-        Self::from_vec(sin_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(sin_data, self.shape())
     }
 
     /// Apply element-wise cosine function.
@@ -208,7 +208,7 @@ where
     /// ```
     pub fn cos(&self) -> Self {
         let cos_data: Vec<T> = self.data.iter().map(|x| x.cos()).collect();
-        Self::from_vec(cos_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(cos_data, self.shape())
     }
 
     /// Apply element-wise tangent function.
@@ -229,7 +229,7 @@ where
     /// ```
     pub fn tan(&self) -> Self {
         let tan_data: Vec<T> = self.data.iter().map(|x| x.tan()).collect();
-        Self::from_vec(tan_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(tan_data, self.shape())
     }
 
     /// Apply element-wise arcsine (inverse sine) function.
@@ -250,7 +250,7 @@ where
     /// ```
     pub fn asin(&self) -> Self {
         let asin_data: Vec<T> = self.data.iter().map(|x| x.asin()).collect();
-        Self::from_vec(asin_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(asin_data, self.shape())
     }
 
     /// Apply element-wise arccosine (inverse cosine) function.
@@ -271,7 +271,7 @@ where
     /// ```
     pub fn acos(&self) -> Self {
         let acos_data: Vec<T> = self.data.iter().map(|x| x.acos()).collect();
-        Self::from_vec(acos_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(acos_data, self.shape())
     }
 
     /// Apply element-wise arctangent (inverse tangent) function.
@@ -292,7 +292,7 @@ where
     /// ```
     pub fn atan(&self) -> Self {
         let atan_data: Vec<T> = self.data.iter().map(|x| x.atan()).collect();
-        Self::from_vec(atan_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(atan_data, self.shape())
     }
 
     /// Apply element-wise two-argument arctangent function (atan2).
@@ -331,7 +331,7 @@ where
             .zip(other.data.iter())
             .map(|(y, x)| y.atan2(*x))
             .collect();
-        Ok(Self::from_vec(atan2_data, self.shape()).unwrap())
+        Ok(Self::from_vec_unchecked(atan2_data, self.shape()))
     }
 
     // ========== Hyperbolic Functions ==========
@@ -354,7 +354,7 @@ where
     /// ```
     pub fn sinh(&self) -> Self {
         let sinh_data: Vec<T> = self.data.iter().map(|x| x.sinh()).collect();
-        Self::from_vec(sinh_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(sinh_data, self.shape())
     }
 
     /// Apply element-wise hyperbolic cosine function.
@@ -375,7 +375,7 @@ where
     /// ```
     pub fn cosh(&self) -> Self {
         let cosh_data: Vec<T> = self.data.iter().map(|x| x.cosh()).collect();
-        Self::from_vec(cosh_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(cosh_data, self.shape())
     }
 
     /// Apply element-wise hyperbolic tangent function.
@@ -399,7 +399,7 @@ where
     /// ```
     pub fn tanh(&self) -> Self {
         let tanh_data: Vec<T> = self.data.iter().map(|x| x.tanh()).collect();
-        Self::from_vec(tanh_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(tanh_data, self.shape())
     }
 
     /// Apply element-wise inverse hyperbolic sine function.
@@ -420,7 +420,7 @@ where
     /// ```
     pub fn asinh(&self) -> Self {
         let asinh_data: Vec<T> = self.data.iter().map(|x| x.asinh()).collect();
-        Self::from_vec(asinh_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(asinh_data, self.shape())
     }
 
     /// Apply element-wise inverse hyperbolic cosine function.
@@ -441,7 +441,7 @@ where
     /// ```
     pub fn acosh(&self) -> Self {
         let acosh_data: Vec<T> = self.data.iter().map(|x| x.acosh()).collect();
-        Self::from_vec(acosh_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(acosh_data, self.shape())
     }
 
     /// Apply element-wise inverse hyperbolic tangent function.
@@ -462,7 +462,7 @@ where
     /// ```
     pub fn atanh(&self) -> Self {
         let atanh_data: Vec<T> = self.data.iter().map(|x| x.atanh()).collect();
-        Self::from_vec(atanh_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(atanh_data, self.shape())
     }
 
     // ========== Additional Logarithmic & Exponential Functions ==========
@@ -487,7 +487,7 @@ where
     /// ```
     pub fn log2(&self) -> Self {
         let log2_data: Vec<T> = self.data.iter().map(|x| x.log2()).collect();
-        Self::from_vec(log2_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(log2_data, self.shape())
     }
 
     /// Apply element-wise base-10 logarithm.
@@ -509,7 +509,7 @@ where
     /// ```
     pub fn log10(&self) -> Self {
         let log10_data: Vec<T> = self.data.iter().map(|x| x.log10()).collect();
-        Self::from_vec(log10_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(log10_data, self.shape())
     }
 
     /// Apply element-wise ln(1 + x).
@@ -532,7 +532,7 @@ where
     /// ```
     pub fn log1p(&self) -> Self {
         let log1p_data: Vec<T> = self.data.iter().map(|x| x.ln_1p()).collect();
-        Self::from_vec(log1p_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(log1p_data, self.shape())
     }
 
     /// Apply element-wise exp(x) - 1.
@@ -555,7 +555,7 @@ where
     /// ```
     pub fn expm1(&self) -> Self {
         let expm1_data: Vec<T> = self.data.iter().map(|x| x.exp_m1()).collect();
-        Self::from_vec(expm1_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(expm1_data, self.shape())
     }
 
     /// Apply element-wise 2^x.
@@ -578,7 +578,7 @@ where
     /// ```
     pub fn exp2(&self) -> Self {
         let exp2_data: Vec<T> = self.data.iter().map(|x| x.exp2()).collect();
-        Self::from_vec(exp2_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(exp2_data, self.shape())
     }
 
     // ========== Power & Root Functions ==========
@@ -603,7 +603,7 @@ where
     /// ```
     pub fn square(&self) -> Self {
         let square_data: Vec<T> = self.data.iter().map(|x| *x * *x).collect();
-        Self::from_vec(square_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(square_data, self.shape())
     }
 
     /// Apply element-wise cube (x^3).
@@ -625,7 +625,7 @@ where
     /// ```
     pub fn cube(&self) -> Self {
         let cube_data: Vec<T> = self.data.iter().map(|x| *x * *x * *x).collect();
-        Self::from_vec(cube_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(cube_data, self.shape())
     }
 
     /// Apply element-wise cube root.
@@ -647,7 +647,7 @@ where
     /// ```
     pub fn cbrt(&self) -> Self {
         let cbrt_data: Vec<T> = self.data.iter().map(|x| x.cbrt()).collect();
-        Self::from_vec(cbrt_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(cbrt_data, self.shape())
     }
 
     /// Apply element-wise reciprocal (1/x).
@@ -669,7 +669,7 @@ where
     /// ```
     pub fn recip(&self) -> Self {
         let recip_data: Vec<T> = self.data.iter().map(|x| x.recip()).collect();
-        Self::from_vec(recip_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(recip_data, self.shape())
     }
 
     // ========== Rounding Functions ==========
@@ -696,7 +696,7 @@ where
     /// ```
     pub fn round(&self) -> Self {
         let round_data: Vec<T> = self.data.iter().map(|x| x.round()).collect();
-        Self::from_vec(round_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(round_data, self.shape())
     }
 
     /// Apply element-wise floor (round down to nearest integer).
@@ -719,7 +719,7 @@ where
     /// ```
     pub fn floor(&self) -> Self {
         let floor_data: Vec<T> = self.data.iter().map(|x| x.floor()).collect();
-        Self::from_vec(floor_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(floor_data, self.shape())
     }
 
     /// Apply element-wise ceiling (round up to nearest integer).
@@ -742,7 +742,7 @@ where
     /// ```
     pub fn ceil(&self) -> Self {
         let ceil_data: Vec<T> = self.data.iter().map(|x| x.ceil()).collect();
-        Self::from_vec(ceil_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(ceil_data, self.shape())
     }
 
     /// Apply element-wise truncation (round towards zero).
@@ -765,7 +765,7 @@ where
     /// ```
     pub fn trunc(&self) -> Self {
         let trunc_data: Vec<T> = self.data.iter().map(|x| x.trunc()).collect();
-        Self::from_vec(trunc_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(trunc_data, self.shape())
     }
 
     /// Apply element-wise fractional part extraction.
@@ -789,7 +789,7 @@ where
     /// ```
     pub fn fract(&self) -> Self {
         let fract_data: Vec<T> = self.data.iter().map(|x| x.fract()).collect();
-        Self::from_vec(fract_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(fract_data, self.shape())
     }
 
     // ========== Sign Functions ==========
@@ -815,7 +815,7 @@ where
     /// ```
     pub fn signum(&self) -> Self {
         let signum_data: Vec<T> = self.data.iter().map(|x| x.signum()).collect();
-        Self::from_vec(signum_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(signum_data, self.shape())
     }
 }
 
@@ -921,7 +921,7 @@ where
             .iter()
             .map(|&x| if x > zero { x } else { zero })
             .collect();
-        Self::from_vec(relu_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(relu_data, self.shape())
     }
 
     /// Apply Leaky ReLU activation function.
@@ -951,7 +951,7 @@ where
             .iter()
             .map(|&x| if x > zero { x } else { alpha * x })
             .collect();
-        Self::from_vec(leaky_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(leaky_data, self.shape())
     }
 
     /// Apply ELU (Exponential Linear Unit) activation function.
@@ -981,7 +981,7 @@ where
             .iter()
             .map(|&x| if x > zero { x } else { alpha * (x.exp() - one) })
             .collect();
-        Self::from_vec(elu_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(elu_data, self.shape())
     }
 
     /// Apply sigmoid activation function.
@@ -1005,7 +1005,7 @@ where
             .iter()
             .map(|&x| one / (one + (-x).exp()))
             .collect();
-        Self::from_vec(sigmoid_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(sigmoid_data, self.shape())
     }
 
     /// Apply tanh (hyperbolic tangent) activation function.
@@ -1024,7 +1024,7 @@ where
     /// ```
     pub fn tanh_activation(&self) -> Self {
         let tanh_data: Vec<T> = self.data.iter().map(|&x| x.tanh()).collect();
-        Self::from_vec(tanh_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(tanh_data, self.shape())
     }
 
     /// Apply Swish/SiLU activation function.
@@ -1044,7 +1044,7 @@ where
     pub fn swish(&self) -> Self {
         let one = T::one();
         let swish_data: Vec<T> = self.data.iter().map(|&x| x / (one + (-x).exp())).collect();
-        Self::from_vec(swish_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(swish_data, self.shape())
     }
 
     /// Apply GELU (Gaussian Error Linear Unit) activation function.
@@ -1062,10 +1062,14 @@ where
     /// assert!((activated[&[1]] - 0.0).abs() < 1e-10);
     /// ```
     pub fn gelu(&self) -> Self {
-        let half = T::from_f64(0.5).unwrap();
+        // These f64 literals are all finite and representable in any
+        // `scirs2_core::numeric::Float`; `from_f64` would only fail on a
+        // broken `Float` impl. Fall back to `T::zero()` defensively to
+        // preserve the "never panics" contract.
+        let half = T::from_f64(0.5).unwrap_or_else(T::zero);
         let one = T::one();
-        let coeff = T::from_f64(0.7978845608028654).unwrap(); // sqrt(2/pi)
-        let cubic_coeff = T::from_f64(0.044715).unwrap();
+        let coeff = T::from_f64(0.7978845608028654).unwrap_or_else(T::zero); // sqrt(2/pi)
+        let cubic_coeff = T::from_f64(0.044715).unwrap_or_else(T::zero);
 
         let gelu_data: Vec<T> = self
             .data
@@ -1076,7 +1080,7 @@ where
                 half * x * (one + inner.tanh())
             })
             .collect();
-        Self::from_vec(gelu_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(gelu_data, self.shape())
     }
 
     /// Clip gradient values to be within [-clip_value, clip_value].
@@ -1116,7 +1120,7 @@ where
                 }
             })
             .collect();
-        Self::from_vec(clipped_data, self.shape()).unwrap()
+        Self::from_vec_unchecked(clipped_data, self.shape())
     }
 
     /// Clip gradient tensor by L2 norm.
@@ -1147,7 +1151,7 @@ where
         } else {
             let scale = max_norm / norm;
             let clipped_data: Vec<T> = self.data.iter().map(|&x| x * scale).collect();
-            Self::from_vec(clipped_data, self.shape()).unwrap()
+            Self::from_vec_unchecked(clipped_data, self.shape())
         }
     }
 }

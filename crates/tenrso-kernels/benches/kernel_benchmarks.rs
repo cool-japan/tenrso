@@ -237,6 +237,57 @@ fn bench_mttkrp(c: &mut Criterion) {
                 });
             },
         );
+
+        // Fused MTTKRP (scalar reference, rank-outermost loop)
+        group.bench_with_input(
+            BenchmarkId::new("fused_scalar", format!("{}^3_r{}", size, rank)),
+            &size,
+            |bencher, _| {
+                bencher.iter(|| {
+                    black_box(
+                        mttkrp_fused(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1)
+                            .unwrap(),
+                    );
+                });
+            },
+        );
+
+        // Fused MTTKRP with SIMD inner loops (rank-innermost, auto-vectorized)
+        group.bench_with_input(
+            BenchmarkId::new("fused_simd_f64", format!("{}^3_r{}", size, rank)),
+            &size,
+            |bencher, _| {
+                bencher.iter(|| {
+                    black_box(
+                        mttkrp_fused_simd_f64(
+                            &tensor.view(),
+                            &[u1.view(), u2.view(), u3.view()],
+                            1,
+                        )
+                        .unwrap(),
+                    );
+                });
+            },
+        );
+
+        // Fused parallel SIMD MTTKRP
+        #[cfg(feature = "parallel")]
+        group.bench_with_input(
+            BenchmarkId::new("fused_simd_parallel_f64", format!("{}^3_r{}", size, rank)),
+            &size,
+            |bencher, _| {
+                bencher.iter(|| {
+                    black_box(
+                        mttkrp_fused_simd_parallel_f64(
+                            &tensor.view(),
+                            &[u1.view(), u2.view(), u3.view()],
+                            1,
+                        )
+                        .unwrap(),
+                    );
+                });
+            },
+        );
     }
     group.finish();
 }

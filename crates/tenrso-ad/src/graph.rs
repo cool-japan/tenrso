@@ -43,7 +43,22 @@ use scirs2_core::ndarray_ext::{ArrayD, Axis, Ix2, IxDyn, ScalarOperand};
 use scirs2_core::numeric::{Float, FromPrimitive};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+/// Acquire a mutex guard, transparently recovering from poisoning.
+///
+/// The internal mutexes in this module only protect data structures that are
+/// refreshed per-operation (the node map, next-id counter, recording flag), so a
+/// poisoned mutex carries no invariant that would make continued use unsafe.
+/// Returning the inner guard instead of panicking keeps the whole graph API
+/// panic-free even if a worker thread previously panicked while holding a lock.
+#[inline]
+fn lock_mutex<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    match m.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// Unique identifier for a node in the computation graph
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -216,40 +231,28 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Enable gradient recording (training mode)
     pub fn train(&self) {
-        *self
-            .recording
-            .lock()
-            .expect("mutex poisoned - this is a bug") = true;
+        *lock_mutex(&self.recording) = true;
     }
 
     /// Disable gradient recording (inference mode)
     pub fn eval(&self) {
-        *self
-            .recording
-            .lock()
-            .expect("mutex poisoned - this is a bug") = false;
+        *lock_mutex(&self.recording) = false;
     }
 
     /// Check if currently recording
     pub fn is_recording(&self) -> bool {
-        *self
-            .recording
-            .lock()
-            .expect("mutex poisoned - this is a bug")
+        *lock_mutex(&self.recording)
     }
 
     /// Clear all nodes and reset the graph
     pub fn clear(&self) {
-        self.nodes
-            .lock()
-            .expect("mutex poisoned - this is a bug")
-            .clear();
-        *self.next_id.lock().expect("mutex poisoned - this is a bug") = 0;
+        lock_mutex(&self.nodes).clear();
+        *lock_mutex(&self.next_id) = 0;
     }
 
     /// Get next available node ID
     fn allocate_id(&self) -> NodeId {
-        let mut next_id = self.next_id.lock().expect("mutex poisoned - this is a bug");
+        let mut next_id = lock_mutex(&self.next_id);
         let id = NodeId(*next_id);
         *next_id += 1;
         id
@@ -260,10 +263,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
         let id = self.allocate_id();
         let node = GraphNode::new(id, Operation::Input, value, requires_grad, vec![]);
 
-        self.nodes
-            .lock()
-            .expect("mutex poisoned - this is a bug")
-            .insert(id, node);
+        lock_mutex(&self.nodes).insert(id, node);
         Ok(Variable::new(id))
     }
 
@@ -282,12 +282,8 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
         let id = self.allocate_id();
 
         // Check if any parent requires gradients
-        let requires_grad = if *self
-            .recording
-            .lock()
-            .expect("mutex poisoned - this is a bug")
-        {
-            let nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
+        let requires_grad = if *lock_mutex(&self.recording) {
+            let nodes = lock_mutex(&self.nodes);
             parents
                 .iter()
                 .any(|&parent_id| nodes.get(&parent_id).is_some_and(|n| n.requires_grad))
@@ -299,7 +295,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
         // Update parent nodes to add this as a child
         {
-            let mut nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
+            let mut nodes = lock_mutex(&self.nodes);
             for parent_id in &parents {
                 if let Some(parent) = nodes.get_mut(parent_id) {
                     parent.children.push(id);
@@ -313,7 +309,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Get the value of a variable
     pub fn value(&self, var: &Variable) -> Result<ArrayD<T>> {
-        let nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
+        let nodes = lock_mutex(&self.nodes);
         let node = nodes
             .get(&var.id)
             .ok_or_else(|| anyhow!("Variable not found in graph"))?;
@@ -324,7 +320,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Get the gradient of a variable
     pub fn gradient(&self, var: &Variable) -> Result<ArrayD<T>> {
-        let nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
+        let nodes = lock_mutex(&self.nodes);
         let node = nodes
             .get(&var.id)
             .ok_or_else(|| anyhow!("Variable not found in graph"))?;
@@ -335,7 +331,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Check if a variable has a gradient
     pub fn has_gradient(&self, var: &Variable) -> bool {
-        let nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
+        let nodes = lock_mutex(&self.nodes);
         nodes
             .get(&var.id)
             .is_some_and(|node| node.gradient.is_some())
@@ -343,7 +339,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Zero all gradients in the graph
     pub fn zero_grad(&self) {
-        let mut nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
+        let mut nodes = lock_mutex(&self.nodes);
         for node in nodes.values_mut() {
             node.gradient = None;
         }
@@ -591,7 +587,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Perform backward pass from the given output node
     pub fn backward(&self, output: &Variable) -> Result<()> {
-        let mut nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
+        let mut nodes = lock_mutex(&self.nodes);
 
         // Check that output is a scalar
         let output_node = nodes
@@ -829,23 +825,25 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
                     .ok_or_else(|| anyhow!("Input value not available for Sum backward"))?;
                 let input_shape = input_val.shape();
 
-                let grad_input = if axis.is_none() {
-                    // Full reduction - broadcast scalar to full shape
-                    ArrayD::from_elem(IxDyn(input_shape), grad_output[[]])
-                } else {
-                    // Partial reduction - add dimension back
-                    let ax = axis.expect("axis is Some - checked above");
-                    let mut new_shape = grad_output.shape().to_vec();
-                    new_shape.insert(ax, 1);
-                    let reshaped = grad_output
-                        .clone()
-                        .to_shape(IxDyn(&new_shape))
-                        .context("Reshape failed in Sum backward")?
-                        .to_owned();
-                    reshaped
-                        .broadcast(IxDyn(input_shape))
-                        .ok_or_else(|| anyhow!("Broadcast failed in Sum backward"))?
-                        .to_owned()
+                let grad_input = match *axis {
+                    None => {
+                        // Full reduction - broadcast scalar to full shape
+                        ArrayD::from_elem(IxDyn(input_shape), grad_output[[]])
+                    }
+                    Some(ax) => {
+                        // Partial reduction - add dimension back
+                        let mut new_shape = grad_output.shape().to_vec();
+                        new_shape.insert(ax, 1);
+                        let reshaped = grad_output
+                            .clone()
+                            .to_shape(IxDyn(&new_shape))
+                            .context("Reshape failed in Sum backward")?
+                            .to_owned();
+                        reshaped
+                            .broadcast(IxDyn(input_shape))
+                            .ok_or_else(|| anyhow!("Broadcast failed in Sum backward"))?
+                            .to_owned()
+                    }
                 };
 
                 Ok(vec![(*input, grad_input)])
@@ -859,25 +857,27 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
                     .ok_or_else(|| anyhow!("Input value not available for Mean backward"))?;
                 let input_shape = input_val.shape();
 
-                let (grad_input, n_elements) = if axis.is_none() {
-                    let n = input_val.len();
-                    let grad = ArrayD::from_elem(IxDyn(input_shape), grad_output[[]]);
-                    (grad, n)
-                } else {
-                    let ax = axis.expect("axis is Some - checked above");
-                    let n = input_shape[ax];
-                    let mut new_shape = grad_output.shape().to_vec();
-                    new_shape.insert(ax, 1);
-                    let reshaped = grad_output
-                        .clone()
-                        .to_shape(IxDyn(&new_shape))
-                        .context("Reshape failed in Mean backward")?
-                        .to_owned();
-                    let grad = reshaped
-                        .broadcast(IxDyn(input_shape))
-                        .ok_or_else(|| anyhow!("Broadcast failed in Mean backward"))?
-                        .to_owned();
-                    (grad, n)
+                let (grad_input, n_elements) = match *axis {
+                    None => {
+                        let n = input_val.len();
+                        let grad = ArrayD::from_elem(IxDyn(input_shape), grad_output[[]]);
+                        (grad, n)
+                    }
+                    Some(ax) => {
+                        let n = input_shape[ax];
+                        let mut new_shape = grad_output.shape().to_vec();
+                        new_shape.insert(ax, 1);
+                        let reshaped = grad_output
+                            .clone()
+                            .to_shape(IxDyn(&new_shape))
+                            .context("Reshape failed in Mean backward")?
+                            .to_owned();
+                        let grad = reshaped
+                            .broadcast(IxDyn(input_shape))
+                            .ok_or_else(|| anyhow!("Broadcast failed in Mean backward"))?
+                            .to_owned();
+                        (grad, n)
+                    }
                 };
 
                 let divisor =
@@ -944,7 +944,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
 
     /// Get statistics about the computation graph
     pub fn stats(&self) -> GraphStats {
-        let nodes = self.nodes.lock().expect("mutex poisoned - this is a bug");
+        let nodes = lock_mutex(&self.nodes);
         let num_nodes = nodes.len();
         let num_edges: usize = nodes.values().map(|n| n.children.len()).sum();
 
@@ -965,6 +965,228 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
             num_edges,
             num_requires_grad,
             ops_count,
+        }
+    }
+
+    // ===== Helpers for graph optimization passes =====
+    //
+    // These `pub(crate)` helpers expose internals so optimization passes in
+    // `graph_optimizer` can inspect and mutate the graph while keeping
+    // `GraphNode` private.
+
+    /// Snapshot all `(NodeId, Operation)` pairs for iteration by passes.
+    pub(crate) fn snapshot_ops(&self) -> Vec<(NodeId, Operation)> {
+        let nodes = lock_mutex(&self.nodes);
+        nodes
+            .iter()
+            .map(|(id, node)| (*id, node.operation.clone()))
+            .collect()
+    }
+
+    /// Return every `NodeId` currently present in the graph.
+    pub(crate) fn all_node_ids(&self) -> Vec<NodeId> {
+        let nodes = lock_mutex(&self.nodes);
+        nodes.keys().copied().collect()
+    }
+
+    /// Total number of nodes.
+    pub(crate) fn num_nodes(&self) -> usize {
+        let nodes = lock_mutex(&self.nodes);
+        nodes.len()
+    }
+
+    /// Return `true` when the node is a compile-time constant: `Operation::Input`
+    /// with `requires_grad == false`.
+    pub(crate) fn is_constant(&self, id: NodeId) -> bool {
+        let nodes = lock_mutex(&self.nodes);
+        nodes
+            .get(&id)
+            .map(|n| matches!(n.operation, Operation::Input) && !n.requires_grad)
+            .unwrap_or(false)
+    }
+
+    /// Return `true` if the node has `requires_grad == true`.
+    pub(crate) fn node_requires_grad(&self, id: NodeId) -> bool {
+        let nodes = lock_mutex(&self.nodes);
+        nodes.get(&id).is_some_and(|n| n.requires_grad)
+    }
+
+    /// Element count of the stored value, if available.
+    pub(crate) fn node_element_count(&self, id: NodeId) -> Option<usize> {
+        let nodes = lock_mutex(&self.nodes);
+        nodes
+            .get(&id)
+            .and_then(|n| n.value.as_ref().map(|v| v.len()))
+    }
+
+    /// Parent node IDs of a node in their original order.
+    pub(crate) fn node_parents(&self, id: NodeId) -> Option<Vec<NodeId>> {
+        let nodes = lock_mutex(&self.nodes);
+        nodes.get(&id).map(|n| n.parents.clone())
+    }
+
+    /// Operation of a node.
+    pub(crate) fn node_operation(&self, id: NodeId) -> Option<Operation> {
+        let nodes = lock_mutex(&self.nodes);
+        nodes.get(&id).map(|n| n.operation.clone())
+    }
+
+    /// Reclassify an existing node as a compile-time constant.
+    ///
+    /// Preserves the cached `value` (the result of eager evaluation that
+    /// happened during graph construction) but rewrites the operation to
+    /// `Operation::Input`, clears `requires_grad`, and removes the node from
+    /// its former parents' `children` lists so DCE can later collect them.
+    ///
+    /// This is the core primitive used by the constant-folding pass.
+    pub(crate) fn reclassify_as_constant(&self, id: NodeId) -> Result<()> {
+        let mut nodes = lock_mutex(&self.nodes);
+        let old_parents = {
+            let node = nodes
+                .get_mut(&id)
+                .ok_or_else(|| anyhow!("Node {} not found for reclassify", id))?;
+            let parents = std::mem::take(&mut node.parents);
+            node.operation = Operation::Input;
+            node.requires_grad = false;
+            node.gradient = None;
+            parents
+        };
+        for parent_id in old_parents {
+            if let Some(parent) = nodes.get_mut(&parent_id) {
+                parent.children.retain(|&c| c != id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Redirect every reference to `from` to point at `to`.
+    ///
+    /// For CSE: rewrites every `Operation` field and every `parents` entry
+    /// that names `from`, replacing it with `to`. Also migrates `from`'s
+    /// children list into `to`'s children list (deduplicated). The `from`
+    /// node itself is left in place; the subsequent DCE pass removes it if
+    /// it is no longer reachable from any output.
+    pub(crate) fn redirect_consumers(&self, from: NodeId, to: NodeId) -> Result<()> {
+        if from == to {
+            return Ok(());
+        }
+        let mut nodes = lock_mutex(&self.nodes);
+
+        // Consumers: every node that lists `from` in its parents.
+        let consumer_ids: Vec<NodeId> = nodes
+            .iter()
+            .filter(|(_, node)| node.parents.contains(&from))
+            .map(|(id, _)| *id)
+            .collect();
+
+        for consumer_id in &consumer_ids {
+            if let Some(consumer) = nodes.get_mut(consumer_id) {
+                for p in consumer.parents.iter_mut() {
+                    if *p == from {
+                        *p = to;
+                    }
+                }
+                rewrite_op_node_id(&mut consumer.operation, from, to);
+            }
+        }
+
+        // Migrate children of `from` onto `to`.
+        let moved_children: Vec<NodeId> = {
+            if let Some(from_node) = nodes.get_mut(&from) {
+                std::mem::take(&mut from_node.children)
+            } else {
+                Vec::new()
+            }
+        };
+        if !moved_children.is_empty() {
+            if let Some(to_node) = nodes.get_mut(&to) {
+                for child in moved_children {
+                    if !to_node.children.contains(&child) {
+                        to_node.children.push(child);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Remove a set of nodes from the graph (used by DCE).
+    ///
+    /// Also cleans up any dangling references in the remaining nodes'
+    /// `children` lists so the graph stays internally consistent.
+    pub(crate) fn remove_nodes(&self, to_remove: &HashSet<NodeId>) -> usize {
+        if to_remove.is_empty() {
+            return 0;
+        }
+        let mut nodes = lock_mutex(&self.nodes);
+        let mut removed = 0usize;
+        for id in to_remove {
+            if nodes.remove(id).is_some() {
+                removed += 1;
+            }
+        }
+        for node in nodes.values_mut() {
+            node.children.retain(|c| !to_remove.contains(c));
+            node.parents.retain(|p| !to_remove.contains(p));
+        }
+        removed
+    }
+
+    /// Collect every node id reachable from `roots` through the `parents`
+    /// edges (i.e. the live set w.r.t. a chosen set of outputs).
+    pub(crate) fn reachable_from(&self, roots: &[NodeId]) -> HashSet<NodeId> {
+        let nodes = lock_mutex(&self.nodes);
+        let mut live = HashSet::new();
+        let mut stack: Vec<NodeId> = roots.to_vec();
+        while let Some(id) = stack.pop() {
+            if !live.insert(id) {
+                continue;
+            }
+            if let Some(node) = nodes.get(&id) {
+                for &p in &node.parents {
+                    if !live.contains(&p) {
+                        stack.push(p);
+                    }
+                }
+            }
+        }
+        live
+    }
+}
+
+/// Rewrite every `NodeId` field inside an `Operation` value, replacing any
+/// occurrence of `from` with `to`.
+fn rewrite_op_node_id(op: &mut Operation, from: NodeId, to: NodeId) {
+    let replace = |n: &mut NodeId| {
+        if *n == from {
+            *n = to;
+        }
+    };
+    match op {
+        Operation::Input => {}
+        Operation::Add { lhs, rhs }
+        | Operation::Sub { lhs, rhs }
+        | Operation::Mul { lhs, rhs }
+        | Operation::Div { lhs, rhs }
+        | Operation::MatMul { lhs, rhs } => {
+            replace(lhs);
+            replace(rhs);
+        }
+        Operation::Neg { input }
+        | Operation::Exp { input }
+        | Operation::Log { input }
+        | Operation::Pow { input, .. }
+        | Operation::Sum { input, .. }
+        | Operation::Mean { input, .. }
+        | Operation::Reshape { input, .. }
+        | Operation::Transpose { input, .. }
+        | Operation::Broadcast { input, .. }
+        | Operation::ReLU { input }
+        | Operation::Sigmoid { input }
+        | Operation::Tanh { input }
+        | Operation::Slice { input, .. } => {
+            replace(input);
         }
     }
 }

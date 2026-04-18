@@ -235,7 +235,7 @@ where
         let seed = (i * 31 + j * 17) as f64;
         let normalized = (seed.sin().abs() * 1000.0).fract();
         let range = max - min;
-        min + T::from(normalized).unwrap() * range
+        min + T::from(normalized).unwrap_or_else(T::zero) * range
     })
 }
 
@@ -284,7 +284,7 @@ pub fn mttkrp_all_modes<T>(
     factors: &[ArrayView2<T>],
 ) -> KernelResult<Vec<Array2<T>>>
 where
-    T: Clone + Num + Float,
+    T: Clone + Num + Float + 'static,
 {
     let nmodes = tensor.ndim();
 
@@ -414,7 +414,8 @@ where
         norms.push(norm);
 
         // Normalize column (avoid division by zero)
-        if norm > T::from(1e-15).unwrap() {
+        let epsilon = T::from(1e-15).unwrap_or_else(T::zero);
+        if norm > epsilon {
             for val in col.iter_mut() {
                 *val = *val / norm;
             }

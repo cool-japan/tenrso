@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-04-14
+
+Stable 0.1.0 release (branch cut from 0.1.0-rc.1, no code changes vs RC.1 at time of version bump).
+
+### Post-Release Quality (2026-04-17)
+
+#### Changed
+- Eliminated 321 production `.unwrap()` calls across all 8 crates (99.4% reduction)
+- Added safe helper functions: `from_vec_unchecked`, `lock_mutex`, `lock_safe`, `take_arc_mutex`, `cast_count`, `cast_f64`, `lock_cache`, `lock_profiler`, `contiguous_slice_mut`, `read_state`/`write_state`
+- Converted lazy-init patterns to `get_or_insert_with` (tenrso-ad optimizers)
+- Replaced `Arc::try_unwrap().unwrap()` chains with `Arc::into_inner()` (tenrso-ooc)
+
+#### Added
+- Sparse MTTKRP for COO tensors (`mttkrp_sparse_coo` + parallel version, 62x speedup at 0.5% density)
+- Performance validation framework with blueprint target measurements
+- TT memory reduction verified at 20,459x (exceeds 10x target)
+
+#### Fixed
+- MINRES solver Paige-Saunders algorithm rewrite (correct Givens rotation recurrence)
+- AD graph optimizer pipeline (CSE → constant fold → CSE → DCE)
+- Squeeze/unsqueeze tensor shape operations (27 new tests)
+
 ## [0.1.0-rc.1] - 2026-03-06
 
 ### Added

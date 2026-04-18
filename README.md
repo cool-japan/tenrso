@@ -24,15 +24,15 @@
 
 ## Installation
 
-**Version:** 0.1.0-rc.1
+**Version:** 0.1.0
 
 Add TenRSo crates to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tenrso-core = "0.1.0-rc.1"
-tenrso-exec = "0.1.0-rc.1"
-tenrso-decomp = "0.1.0-rc.1"
+tenrso-core = "0.1.0"
+tenrso-exec = "0.1.0"
+tenrso-decomp = "0.1.0"
 ```
 
 Or use the workspace in development:
@@ -128,6 +128,8 @@ API documentation: `cargo doc --workspace --no-deps --open`
 
 ### Latest Release
 
+**0.1.0 — Stable** (2026-04-14): branch-cut from RC.1 with no code changes vs RC.1 at release time.
+
 **What's New in 0.1.0-rc.1:**
 - All milestones M0-M6 complete
 - 2,109 tests passing (100% pass rate, 14 skipped)
@@ -142,7 +144,7 @@ See [CHANGELOG.md](CHANGELOG.md) for complete release notes.
 
 ## Project Status
 
-**RC.1 RELEASED** - 2026-03-06 - Production-Ready Quality
+**0.1.0 RELEASED** - 2026-04-14 - Production-Ready Quality
 
 | Crate | Tests | Status |
 |-------|-------|--------|

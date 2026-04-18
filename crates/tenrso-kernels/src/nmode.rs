@@ -75,7 +75,7 @@ pub fn nmode_product<T>(
     mode: usize,
 ) -> Result<Array<T, IxDyn>>
 where
-    T: Clone + Num + One + Zero,
+    T: Copy + Num + One + Zero + 'static,
 {
     let tensor_shape = tensor.shape();
     let rank = tensor_shape.len();
@@ -100,17 +100,8 @@ where
     let unfolded = unfold_tensor(tensor, mode)?;
 
     // Step 2: Matrix multiplication: M · X_(k)
-    // Manual matrix multiplication: result[i,j] = sum_k matrix[i,k] * unfolded[k,j]
-    let mut result_unfolded = Array2::<T>::zeros((matrix_rows, unfolded.shape()[1]));
-    for i in 0..matrix_rows {
-        for j in 0..unfolded.shape()[1] {
-            let mut sum = T::zero();
-            for k in 0..matrix_cols {
-                sum = sum + matrix[[i, k]].clone() * unfolded[[k, j]].clone();
-            }
-            result_unfolded[[i, j]] = sum;
-        }
-    }
+    // Use BLAS-accelerated .dot() for massive speedup over manual loops
+    let result_unfolded = matrix.dot(&unfolded);
 
     // Step 3: Fold back to tensor with new shape
     let mut new_shape: Vec<usize> = tensor_shape.to_vec();
@@ -127,7 +118,7 @@ where
 /// with shape (Iₖ, I₁ · ... · Iₖ₋₁ · Iₖ₊₁ · ... · Iₙ)
 fn unfold_tensor<T>(tensor: &ArrayView<T, IxDyn>, mode: usize) -> Result<Array2<T>>
 where
-    T: Clone + Num,
+    T: Copy + Num,
 {
     let shape = tensor.shape();
     let mode_size = shape[mode];
@@ -160,7 +151,7 @@ where
 /// Inverse operation of unfold_tensor
 fn fold_matrix<T>(matrix: &ArrayView2<T>, shape: &[usize], mode: usize) -> Result<Array<T, IxDyn>>
 where
-    T: Clone + Num,
+    T: Copy + Num,
 {
     let mode_size = shape[mode];
     let other_size: usize = shape
@@ -243,7 +234,7 @@ pub fn nmode_products_seq<T>(
     matrices: &[(&ArrayView2<T>, usize)],
 ) -> Result<Array<T, IxDyn>>
 where
-    T: Clone + Num + One + Zero,
+    T: Copy + Num + One + Zero + 'static,
 {
     let mut result = tensor.to_owned();
 
@@ -444,7 +435,7 @@ pub fn tucker_operator<T>(
     factor_matrices: &std::collections::HashMap<usize, ArrayView2<T>>,
 ) -> Result<Array<T, IxDyn>>
 where
-    T: Clone + Num + One + Zero,
+    T: Copy + Num + One + Zero + 'static,
 {
     if factor_matrices.is_empty() {
         return Ok(tensor.to_owned());
@@ -519,7 +510,7 @@ pub fn tucker_operator_ordered<T>(
     mode_matrix_pairs: &[(usize, &ArrayView2<T>)],
 ) -> Result<Array<T, IxDyn>>
 where
-    T: Clone + Num + One + Zero,
+    T: Copy + Num + One + Zero + 'static,
 {
     let mut result = tensor.to_owned();
 
@@ -578,7 +569,7 @@ pub fn tucker_reconstruct<T>(
     factors: &[ArrayView2<T>],
 ) -> Result<Array<T, IxDyn>>
 where
-    T: Clone + Num + One + Zero,
+    T: Copy + Num + One + Zero + 'static,
 {
     let core_shape = core.shape();
     let rank = core_shape.len();
@@ -826,7 +817,7 @@ pub fn tensor_tensor_product<T>(
     modes_b: &[usize],
 ) -> Result<Array<T, IxDyn>>
 where
-    T: Clone + Num + One + Zero,
+    T: Copy + Num + One + Zero + 'static,
 {
     // Validation
     if modes_a.len() != modes_b.len() {
@@ -932,17 +923,8 @@ where
 
     // Matrix multiplication: (free_a_size, contract_size) × (contract_size, free_b_size)
     // Result: (free_a_size, free_b_size)
-    let mut result_matrix = Array2::<T>::zeros((free_a_size, free_b_size));
-
-    for i in 0..free_a_size {
-        for j in 0..free_b_size {
-            let mut sum = T::zero();
-            for k in 0..contract_size {
-                sum = sum + reshaped_a[[i, k]].clone() * reshaped_b[[k, j]].clone();
-            }
-            result_matrix[[i, j]] = sum;
-        }
-    }
+    // Use BLAS-accelerated .dot() for massive speedup over manual loops
+    let result_matrix = reshaped_a.dot(&reshaped_b);
 
     // Reshape result to output shape
     let result = result_matrix.into_shape_with_order(IxDyn(&output_shape))?;
@@ -956,7 +938,7 @@ fn compute_outer_product_tensors<T>(
     tensor_b: &ArrayView<T, IxDyn>,
 ) -> Result<Array<T, IxDyn>>
 where
-    T: Clone + Num,
+    T: Copy + Num,
 {
     let shape_a = tensor_a.shape();
     let shape_b = tensor_b.shape();
@@ -970,7 +952,7 @@ where
     // Compute outer product: result[i..., j...] = a[i...] * b[j...]
     for a_val in tensor_a.iter() {
         for b_val in tensor_b.iter() {
-            result_data.push(a_val.clone() * b_val.clone());
+            result_data.push(*a_val * *b_val);
         }
     }
 

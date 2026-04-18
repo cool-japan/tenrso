@@ -101,11 +101,14 @@ where
     where
         T: scirs2_core::numeric::Signed + PartialOrd,
     {
+        // NaN-safe ordering: treat incomparable values as equal so the
+        // iterator still yields a deterministic answer instead of panicking.
+        // Callers wanting strict NaN propagation should filter/clean upstream.
         self.data
             .iter()
             .map(|x| x.clone().abs())
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or_else(T::zero)
     }
 
     /// Compute a general Lp norm of the tensor.
@@ -137,8 +140,11 @@ where
     {
         assert!(p > 0.0, "Norm order p must be positive");
 
-        let p_t = NumCast::from(p).unwrap();
-        let inv_p = NumCast::from(1.0 / p).unwrap();
+        // `p` is positive/finite; these casts succeed for any well-formed
+        // `Float`. Fall back to `T::zero()` defensively so the "never panics"
+        // contract of this reduction-style function holds even for exotic `T`.
+        let p_t: T = NumCast::from(p).unwrap_or_else(T::zero);
+        let inv_p: T = NumCast::from(1.0 / p).unwrap_or_else(T::zero);
 
         self.data
             .iter()
@@ -208,7 +214,10 @@ where
         T: std::ops::Div<Output = T>,
     {
         let sum = self.sum();
-        let count = NumCast::from(self.len()).unwrap();
+        // `self.len()` is a non-negative `usize` and representable in any
+        // sensible `Num + NumCast`; fall back to `T::one()` to avoid
+        // divide-by-zero if the cast somehow fails for an exotic `T`.
+        let count: T = NumCast::from(self.len()).unwrap_or_else(T::one);
         sum / count
     }
 
@@ -437,10 +446,14 @@ where
     /// assert_eq!(min, &1.0);
     /// ```
     pub fn min(&self) -> &T {
+        // NaN-safe ordering: treat incomparable values as equal.
+        // Non-empty invariant documented: returns a reference into the
+        // buffer, which is only valid for non-empty tensors. An empty
+        // tensor would panic here — callers must check `is_empty()` first.
         self.data
             .iter()
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .expect("DenseND::min called on empty tensor")
     }
 
     /// Find the maximum element in the tensor.
@@ -463,10 +476,12 @@ where
     /// assert_eq!(max, &9.0);
     /// ```
     pub fn max(&self) -> &T {
+        // NaN-safe ordering: treat incomparable values as equal.
+        // Non-empty invariant: panics on empty tensor (caller contract).
         self.data
             .iter()
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .expect("DenseND::max called on empty tensor")
     }
 
     /// Find the index of the maximum element (flattened)
@@ -480,12 +495,13 @@ where
     /// assert_eq!(tensor.argmax(), 3);
     /// ```
     pub fn argmax(&self) -> usize {
+        // NaN-safe ordering; returns 0 for empty tensors (boundary behaviour).
         self.data
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(idx, _)| idx)
-            .unwrap()
+            .unwrap_or(0)
     }
 
     /// Find the index of the minimum element (flattened)
@@ -499,12 +515,13 @@ where
     /// assert_eq!(tensor.argmin(), 4);
     /// ```
     pub fn argmin(&self) -> usize {
+        // NaN-safe ordering; returns 0 for empty tensors (boundary behaviour).
         self.data
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(idx, _)| idx)
-            .unwrap()
+            .unwrap_or(0)
     }
 }
 
@@ -539,7 +556,9 @@ where
                 diff.clone() * diff
             })
             .sum();
-        let n = NumCast::from(self.len()).unwrap();
+        // `self.len()` is a non-negative `usize` representable in any
+        // reasonable numeric `T`; fall back defensively to avoid panics.
+        let n: T = NumCast::from(self.len()).unwrap_or_else(T::one);
         squared_diffs / n
     }
 
@@ -608,7 +627,7 @@ where
             .into_iter()
             .collect::<Array<T, _>>()
             .into_shape_with_order(IxDyn(self.shape()))
-            .unwrap();
+            .map_err(|e| anyhow::anyhow!("Failed to reshape squared diffs: {}", e))?;
 
         let variance_data = squared_diffs
             .mean_axis(Axis(axis))
@@ -786,7 +805,9 @@ where
         T: PartialOrd,
     {
         let mut sorted: Vec<T> = self.data.iter().cloned().collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // NaN-safe sort: incomparable values are treated as equal so the
+        // sort is total and no panic occurs on NaN-contaminated data.
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let n = sorted.len();
         if n % 2 == 1 {
@@ -794,7 +815,9 @@ where
         } else {
             let mid1 = sorted[n / 2 - 1].clone();
             let mid2 = sorted[n / 2].clone();
-            let two = NumCast::from(2).unwrap();
+            // Integer 2 is representable in any sensible numeric `T`;
+            // fall back to `T::one()` as a non-zero divisor if not.
+            let two: T = NumCast::from(2).unwrap_or_else(T::one);
             (mid1 + mid2) / two
         }
     }
@@ -825,7 +848,8 @@ where
         assert!((0.0..=1.0).contains(&q), "Quantile must be in range [0, 1]");
 
         let mut sorted: Vec<T> = self.data.iter().cloned().collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // NaN-safe sort (see comments in `median`).
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let n = sorted.len();
         if n == 1 {
@@ -842,7 +866,9 @@ where
         } else {
             let lower_val = sorted[lower_idx];
             let upper_val = sorted[upper_idx];
-            let weight = NumCast::from(index - lower_idx as f64).unwrap();
+            // Interpolation weight is always finite/positive in [0, 1);
+            // fall back to zero (no interpolation) if the cast fails.
+            let weight: T = NumCast::from(index - lower_idx as f64).unwrap_or_else(T::zero);
             lower_val + (upper_val - lower_val) * weight
         }
     }
@@ -967,13 +993,14 @@ where
             }
 
             // Compute median of collected values
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            // NaN-safe sort; integer 2 → T fallback to T::one().
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let median = if axis_size % 2 == 1 {
                 values[axis_size / 2].clone()
             } else {
                 let mid1 = values[axis_size / 2 - 1].clone();
                 let mid2 = values[axis_size / 2].clone();
-                let two = NumCast::from(2).unwrap();
+                let two: T = NumCast::from(2).unwrap_or_else(T::one);
                 (mid1 + mid2) / two
             };
 
@@ -1077,7 +1104,8 @@ where
             }
 
             // Compute quantile of collected values
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            // NaN-safe sort; interpolation-weight cast falls back to zero.
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
             let quantile = if values.len() == 1 {
                 values[0]
@@ -1091,7 +1119,7 @@ where
                 } else {
                     let lower_val = values[lower_idx];
                     let upper_val = values[upper_idx];
-                    let weight = NumCast::from(index - lower_idx as f64).unwrap();
+                    let weight: T = NumCast::from(index - lower_idx as f64).unwrap_or_else(T::zero);
                     lower_val + (upper_val - lower_val) * weight
                 }
             };
@@ -1198,7 +1226,10 @@ where
         let mean_x = self.mean();
         let mean_y = other.mean();
 
-        let n_minus_1 = T::from_usize(n - 1).unwrap();
+        // `n - 1` is a non-negative `usize`; any reasonable `Float`
+        // will accept it. Fall back to `T::one()` to avoid divide-by-zero
+        // should the cast fail for an exotic numeric type.
+        let n_minus_1 = T::from_usize(n - 1).unwrap_or_else(T::one);
 
         let cov = self
             .data
@@ -1281,7 +1312,8 @@ where
         let centered = Self::from_vec(centered_data, &[n_features, n_samples])?;
 
         // Compute covariance matrix: C = (1/(n-1)) * X * X^T
-        let n_minus_1 = T::from_usize(n_samples - 1).unwrap();
+        // Defensive fallback keeps us panic-free for exotic `T`.
+        let n_minus_1 = T::from_usize(n_samples - 1).unwrap_or_else(T::one);
 
         let mut cov_data = Vec::with_capacity(n_features * n_features);
         for i in 0..n_features {
@@ -1648,8 +1680,12 @@ where
                 sq_sum = sq_sum + val * val;
             }
 
-            let mean = sum / T::from_usize(feature_size).unwrap();
-            let variance = sq_sum / T::from_usize(feature_size).unwrap() - mean * mean;
+            // `feature_size` is a positive `usize`; fall back to `T::one()`
+            // defensively so normalization never divides by zero even if the
+            // cast fails for an unusual numeric type.
+            let fs: T = T::from_usize(feature_size).unwrap_or_else(T::one);
+            let mean = sum / fs;
+            let variance = sq_sum / fs - mean * mean;
             let std = (variance + epsilon).sqrt();
 
             for j in 0..feature_size {
@@ -1935,7 +1971,11 @@ where
                 });
             }
 
-            result_data.push(max_val.unwrap());
+            // `axis_size` is guaranteed non-zero because an axis of size 0
+            // would have been rejected by the axis-bounds check above;
+            // therefore the inner loop always sets `max_val = Some(..)` at
+            // least once. `.expect` documents this invariant.
+            result_data.push(max_val.expect("max_axis: non-empty axis produces a maximum"));
         }
 
         let mut result = Self::from_vec(result_data, &output_shape)?;

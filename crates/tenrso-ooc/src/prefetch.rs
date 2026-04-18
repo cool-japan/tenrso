@@ -229,13 +229,17 @@ impl Prefetcher {
             let is_sequential = numbers.windows(2).all(|w| w[1] == w[0] + 1);
 
             if is_sequential {
-                let next_num = numbers.last().unwrap() + 1;
-                let predictions: Vec<String> = (0..self.queue_size)
-                    .map(|i| format!("chunk_{}", next_num + i))
-                    .collect();
+                // `numbers.len() >= 2` guarantees `last()` is Some; fall through
+                // to `Ok(0)` instead of panicking if that invariant ever breaks.
+                if let Some(&last_num) = numbers.last() {
+                    let next_num = last_num + 1;
+                    let predictions: Vec<String> = (0..self.queue_size)
+                        .map(|i| format!("chunk_{}", next_num + i))
+                        .collect();
 
-                let chunk_refs: Vec<&str> = predictions.iter().map(|s| s.as_str()).collect();
-                return self.schedule_prefetch(chunk_refs);
+                    let chunk_refs: Vec<&str> = predictions.iter().map(|s| s.as_str()).collect();
+                    return self.schedule_prefetch(chunk_refs);
+                }
             }
         }
 

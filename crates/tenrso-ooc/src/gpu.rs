@@ -647,7 +647,14 @@ impl DeviceManager {
 
 impl Default for DeviceManager {
     fn default() -> Self {
-        Self::new().expect("Failed to create device manager")
+        // `DeviceManager::new()` only allocates a single CPU descriptor and an
+        // `AtomicUsize`; neither operation can fail in practice. If the Result
+        // is ever Err we fall back to an empty device list rather than panic,
+        // keeping `Default::default()` panic-free.
+        Self::new().unwrap_or(Self {
+            devices: Vec::new(),
+            default_device: AtomicUsize::new(0),
+        })
     }
 }
 

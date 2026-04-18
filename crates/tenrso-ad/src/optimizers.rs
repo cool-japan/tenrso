@@ -249,8 +249,11 @@ impl<T: Float + 'static> Optimizer<T> for SGD<T> {
                     grad = v.clone();
                 }
             } else {
-                self.velocity = Some(grad.clone());
-                grad = self.velocity.as_ref().unwrap().clone();
+                // First step: initialize velocity with the current gradient.
+                // Cloning grad here avoids an unwrap on the freshly-set Option.
+                let initial = grad.clone();
+                self.velocity = Some(initial.clone());
+                grad = initial;
             }
         }
 
@@ -316,22 +319,21 @@ impl<T: Float + 'static> Optimizer<T> for Adam<T> {
             grad = &grad + &(params.mapv(|x| x * weight_decay));
         }
 
-        // Initialize moments if needed
-        if self.m.is_none() {
-            self.m = Some(ArrayD::zeros(grad.raw_dim()));
-            self.v = Some(ArrayD::zeros(grad.raw_dim()));
+        // Initialize moments if needed (lazy init on first step).
+        // Using get_or_insert_with for each field avoids the `as_mut().unwrap()`
+        // pattern while keeping the separate-field borrow semantics intact.
+        {
+            let m = self.m.get_or_insert_with(|| ArrayD::zeros(grad.raw_dim()));
+            // Update biased first moment: m = beta1 * m + (1 - beta1) * grad
+            *m = m.mapv(|x| x * beta1) + grad.mapv(|x| x * (T::one() - beta1));
+        }
+        {
+            let v = self.v.get_or_insert_with(|| ArrayD::zeros(grad.raw_dim()));
+            // Update biased second moment: v = beta2 * v + (1 - beta2) * grad^2
+            *v = v.mapv(|x| x * beta2) + grad.mapv(|x| x * x * (T::one() - beta2));
         }
 
         self.step_count += 1;
-
-        let m = self.m.as_mut().unwrap();
-        let v = self.v.as_mut().unwrap();
-
-        // Update biased first moment: m = beta1 * m + (1 - beta1) * grad
-        *m = m.mapv(|x| x * beta1) + grad.mapv(|x| x * (T::one() - beta1));
-
-        // Update biased second moment: v = beta2 * v + (1 - beta2) * grad^2
-        *v = v.mapv(|x| x * beta2) + grad.mapv(|x| x * x * (T::one() - beta2));
 
         // Bias correction
         let beta1_t = T::from(self.config.beta1.powi(self.step_count as i32))
@@ -339,8 +341,18 @@ impl<T: Float + 'static> Optimizer<T> for Adam<T> {
         let beta2_t = T::from(self.config.beta2.powi(self.step_count as i32))
             .context("Failed to compute beta2^t")?;
 
-        let m_hat = m.mapv(|x| x / (T::one() - beta1_t));
-        let v_hat = v.mapv(|x| x / (T::one() - beta2_t));
+        // Safe to read back the just-initialized moments via ok_or_else;
+        // both fields are guaranteed to be Some at this point.
+        let m_ref = self
+            .m
+            .as_ref()
+            .context("Adam first-moment buffer missing after init")?;
+        let v_ref = self
+            .v
+            .as_ref()
+            .context("Adam second-moment buffer missing after init")?;
+        let m_hat = m_ref.mapv(|x| x / (T::one() - beta1_t));
+        let v_hat = v_ref.mapv(|x| x / (T::one() - beta2_t));
 
         // Update parameters: params = params - lr * m_hat / (sqrt(v_hat) + epsilon)
         let update = m_hat
@@ -408,22 +420,18 @@ impl<T: Float + 'static> Optimizer<T> for AdamW<T> {
 
         let grad = gradients.clone();
 
-        // Initialize moments if needed
-        if self.m.is_none() {
-            self.m = Some(ArrayD::zeros(grad.raw_dim()));
-            self.v = Some(ArrayD::zeros(grad.raw_dim()));
+        // Lazy-init moments and update them in bounded borrow scopes
+        // to avoid holding two &mut Option<ArrayD<T>> fields at once.
+        {
+            let m = self.m.get_or_insert_with(|| ArrayD::zeros(grad.raw_dim()));
+            *m = m.mapv(|x| x * beta1) + grad.mapv(|x| x * (T::one() - beta1));
+        }
+        {
+            let v = self.v.get_or_insert_with(|| ArrayD::zeros(grad.raw_dim()));
+            *v = v.mapv(|x| x * beta2) + grad.mapv(|x| x * x * (T::one() - beta2));
         }
 
         self.step_count += 1;
-
-        let m = self.m.as_mut().unwrap();
-        let v = self.v.as_mut().unwrap();
-
-        // Update first moment
-        *m = m.mapv(|x| x * beta1) + grad.mapv(|x| x * (T::one() - beta1));
-
-        // Update second moment
-        *v = v.mapv(|x| x * beta2) + grad.mapv(|x| x * x * (T::one() - beta2));
 
         // Bias correction
         let beta1_t = T::from(self.config.beta1.powi(self.step_count as i32))
@@ -431,8 +439,16 @@ impl<T: Float + 'static> Optimizer<T> for AdamW<T> {
         let beta2_t = T::from(self.config.beta2.powi(self.step_count as i32))
             .context("Failed to compute beta2^t")?;
 
-        let m_hat = m.mapv(|x| x / (T::one() - beta1_t));
-        let v_hat = v.mapv(|x| x / (T::one() - beta2_t));
+        let m_ref = self
+            .m
+            .as_ref()
+            .context("AdamW first-moment buffer missing after init")?;
+        let v_ref = self
+            .v
+            .as_ref()
+            .context("AdamW second-moment buffer missing after init")?;
+        let m_hat = m_ref.mapv(|x| x / (T::one() - beta1_t));
+        let v_hat = v_ref.mapv(|x| x / (T::one() - beta2_t));
 
         // AdamW: Decoupled weight decay
         // params = params - lr * weight_decay * params - lr * m_hat / (sqrt(v_hat) + epsilon)
@@ -501,12 +517,10 @@ impl<T: Float + 'static> Optimizer<T> for RMSprop<T> {
 
         let grad = gradients.clone();
 
-        // Initialize square average if needed
-        if self.square_avg.is_none() {
-            self.square_avg = Some(ArrayD::zeros(grad.raw_dim()));
-        }
-
-        let sq_avg = self.square_avg.as_mut().unwrap();
+        // Lazy-init and update the running square average
+        let sq_avg = self
+            .square_avg
+            .get_or_insert_with(|| ArrayD::zeros(grad.raw_dim()));
 
         // Update square average: sq_avg = alpha * sq_avg + (1 - alpha) * grad^2
         *sq_avg = sq_avg.mapv(|x| x * alpha) + grad.mapv(|x| x * x * (T::one() - alpha));
@@ -571,12 +585,10 @@ impl<T: Float + 'static> Optimizer<T> for AdaGrad<T> {
 
         let grad = gradients.clone();
 
-        // Initialize sum of squares if needed
-        if self.sum_squares.is_none() {
-            self.sum_squares = Some(ArrayD::zeros(grad.raw_dim()));
-        }
-
-        let sum_sq = self.sum_squares.as_mut().unwrap();
+        // Lazy-init and accumulate the sum of squared gradients
+        let sum_sq = self
+            .sum_squares
+            .get_or_insert_with(|| ArrayD::zeros(grad.raw_dim()));
 
         // Accumulate squared gradients: sum_sq = sum_sq + grad^2
         *sum_sq = &*sum_sq + &grad.mapv(|x| x * x);
@@ -938,56 +950,81 @@ impl<T: Float> Optimizer<T> for RAdam<T> {
 
         self.steps += 1;
 
-        // Initialize moments if needed
-        if self.m.is_none() {
-            self.m = Some(ArrayD::zeros(params.raw_dim()));
-            self.v = Some(ArrayD::zeros(params.raw_dim()));
-        }
+        // Pre-compute scalar coefficients once so the zip_mut_with closures
+        // below become panic-free and cheaper per element.
+        let beta1 = T::from(self.config.beta1).context("Failed to convert beta1")?;
+        let beta2 = T::from(self.config.beta2).context("Failed to convert beta2")?;
 
-        // Compute rectification term before borrowing
+        // Compute rectification term before borrowing the moment buffers
         let rect_term = self.get_rectification_term();
 
-        let m = self.m.as_mut().unwrap();
-        let v = self.v.as_mut().unwrap();
-
-        // Update biased first and second moments
-        m.zip_mut_with(gradients, |m_val, &g_val| {
-            let beta1 = T::from(self.config.beta1).unwrap();
-            *m_val = *m_val * beta1 + g_val * (T::one() - beta1);
-        });
-
-        v.zip_mut_with(gradients, |v_val, &g_val| {
-            let beta2 = T::from(self.config.beta2).unwrap();
-            *v_val = *v_val * beta2 + g_val * g_val * (T::one() - beta2);
-        });
+        // Lazy-init moment buffers in bounded borrow scopes.
+        {
+            let m = self
+                .m
+                .get_or_insert_with(|| ArrayD::zeros(params.raw_dim()));
+            m.zip_mut_with(gradients, |m_val, &g_val| {
+                *m_val = *m_val * beta1 + g_val * (T::one() - beta1);
+            });
+        }
+        {
+            let v = self
+                .v
+                .get_or_insert_with(|| ArrayD::zeros(params.raw_dim()));
+            v.zip_mut_with(gradients, |v_val, &g_val| {
+                *v_val = *v_val * beta2 + g_val * g_val * (T::one() - beta2);
+            });
+        }
 
         // Bias correction
         let bias_correction1 = 1.0 - self.config.beta1.powi(self.steps as i32);
         let bias_correction2 = 1.0 - self.config.beta2.powi(self.steps as i32);
-        let m_hat_scale = T::from(1.0 / bias_correction1).unwrap();
+        let m_hat_scale =
+            T::from(1.0 / bias_correction1).context("Failed to convert m_hat scale")?;
 
         // Check if we should use rectified adaptive learning rate
         if let Some(rect_term) = rect_term {
             // Rectified adaptive learning rate
-            let lr = T::from(self.config.learning_rate * rect_term).unwrap();
-            let v_hat_scale = T::from(1.0 / bias_correction2.sqrt()).unwrap();
-            let eps = T::from(self.config.epsilon).unwrap();
+            let lr = T::from(self.config.learning_rate * rect_term)
+                .context("Failed to convert rectified learning rate")?;
+            let v_hat_scale =
+                T::from(1.0 / bias_correction2.sqrt()).context("Failed to convert v_hat scale")?;
+            let eps = T::from(self.config.epsilon).context("Failed to convert epsilon")?;
+
+            let m = self
+                .m
+                .as_ref()
+                .context("RAdam first-moment buffer missing after init")?;
+            let v = self
+                .v
+                .as_ref()
+                .context("RAdam second-moment buffer missing after init")?;
+            let m_slice = m
+                .as_slice()
+                .context("RAdam first-moment buffer is not contiguous")?;
+            let v_slice = v
+                .as_slice()
+                .context("RAdam second-moment buffer is not contiguous")?;
+            let p_slice = params
+                .as_slice_mut()
+                .context("RAdam parameter buffer is not contiguous")?;
 
             // Proper element-wise update: params = params - lr * m_hat / (sqrt(v_hat) + eps)
-            for i in 0..params.len() {
-                let m_val = m.as_slice().unwrap()[i];
-                let v_val = v.as_slice().unwrap()[i];
-                let p_val = &mut params.as_slice_mut().unwrap()[i];
-
-                let m_hat = m_val * m_hat_scale;
-                let v_hat = v_val * v_hat_scale;
+            for i in 0..p_slice.len() {
+                let m_hat = m_slice[i] * m_hat_scale;
+                let v_hat = v_slice[i] * v_hat_scale;
                 let update = m_hat / (v_hat.sqrt() + eps);
-                *p_val = *p_val - lr * update;
+                p_slice[i] = p_slice[i] - lr * update;
             }
         } else {
             // Use SGD-like update (momentum only, no adaptive LR)
-            let lr = T::from(self.config.learning_rate).unwrap();
-            params.zip_mut_with(&*m, |p_val, &m_val| {
+            let lr =
+                T::from(self.config.learning_rate).context("Failed to convert learning rate")?;
+            let m = self
+                .m
+                .as_ref()
+                .context("RAdam first-moment buffer missing after init")?;
+            params.zip_mut_with(m, |p_val, &m_val| {
                 *p_val = *p_val - lr * (m_val * m_hat_scale);
             });
         }
@@ -1045,18 +1082,19 @@ impl<T: Float> GradientAccumulator<T> {
     ///
     /// Returns `Some(averaged_grads)` when ready to perform optimizer step, `None` otherwise
     pub fn accumulate(&mut self, gradients: &ArrayD<T>) -> Option<ArrayD<T>> {
-        if self.accumulated_grads.is_none() {
-            self.accumulated_grads = Some(ArrayD::zeros(gradients.raw_dim()));
-        }
-
-        let acc = self.accumulated_grads.as_mut().unwrap();
+        // Lazy-init and fold the new gradients into the accumulator
+        let acc = self
+            .accumulated_grads
+            .get_or_insert_with(|| ArrayD::zeros(gradients.raw_dim()));
         acc.zip_mut_with(gradients, |a, &g| *a = *a + g);
 
         self.current_step += 1;
 
         if self.current_step >= self.accumulation_steps {
-            // Average the accumulated gradients
-            let scale = T::from(1.0 / self.accumulation_steps as f64).unwrap();
+            // Average the accumulated gradients. If `T::from` cannot represent
+            // the scale (exotic numeric types), return None rather than panic —
+            // the caller will simply try again on the next call.
+            let scale = T::from(1.0 / self.accumulation_steps as f64)?;
             let averaged = acc.mapv(|v| v * scale);
 
             // Reset accumulator

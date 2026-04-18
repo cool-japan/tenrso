@@ -1,9 +1,9 @@
 # tenrso-core TODO
 
 > **Milestone:** M0 → M1 → M2+ (Complete)
-> **Version:** 0.1.0-rc.1
-> **Status:** RC.1 — 138 tests passing (100%)
-> **Last Updated:** 2026-03-06
+> **Version:** 0.1.0
+> **Status:** 0.1.0 — 178 unit tests passing (100%)
+> **Last Updated:** 2026-04-14
 
 ---
 
@@ -87,9 +87,12 @@
   - [x] `swapaxes(ax1, ax2) -> Self`
   - [x] `moveaxis(src, dst) -> Self`
 
-- [ ] Squeeze/Unsqueeze - Future M2+
-  - [ ] `squeeze(&self, axis: Option<Axis>) -> Self`
-  - [ ] `unsqueeze(&self, axis: Axis) -> Self`
+- [x] Squeeze/Unsqueeze - COMPLETE (M2+)
+  - [x] `squeeze(&self) -> Self` (drops every size-1 axis; collapses to rank-0 when all axes are 1)
+  - [x] `squeeze_axis(&self, axis: Axis) -> Result<Self>`
+  - [x] `squeeze_axes(&self, axes: &[Axis]) -> Result<Self>`
+  - [x] `unsqueeze(&self, axis: Axis) -> Result<Self>`
+  - [x] `unsqueeze_axes(&self, axes: &[Axis]) -> Result<Self>` (indices interpreted against final shape)
 
 ### Integration with TensorHandle - COMPLETE
 
@@ -242,7 +245,7 @@
 
 - [ ] Sparse interop via boolean masks - Future M3
 - [ ] CP-ALS leverage score initialization (`random_leverage_scores`) - Future M2
-- [ ] Squeeze/Unsqueeze shape ops - Future M2+
+- [x] Squeeze/Unsqueeze shape ops - COMPLETE (see `shape_ops.rs`)
 
 ---
 
@@ -299,3 +302,11 @@ All modules under 500 lines, clear separation of concerns.
 - **SCIRS2 compliance:** Full (no direct ndarray/rand imports)
 - **Source:** 20 files, ~16K lines
 - **Methods:** 189+ tensor operations implemented
+
+## 0.1.0 Status (2026-04-14)
+
+- **Tests:** 178 unit + 18 integration + 240 doctests (100%)
+- **Warnings:** 0 (clippy strict mode)
+- **New in this update:** `squeeze` now collapses all-size-1 inputs to rank-0;
+  added `squeeze_axes`, `unsqueeze_axes`. `squeeze_axis` / `unsqueeze`
+  annotated `#[inline]`. 27 new unit tests in `dense::shape_ops::tests`.

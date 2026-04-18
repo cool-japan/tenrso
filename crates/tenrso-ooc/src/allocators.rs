@@ -229,7 +229,7 @@ pub fn get_allocator_stats() -> Option<AllocatorStats> {
 #[allow(dead_code)]
 fn get_jemalloc_stats() -> Option<AllocatorStats> {
     // Query jemalloc epoch to refresh statistics
-    tikv_jemalloc_ctl::epoch::mib().unwrap().advance().ok()?;
+    tikv_jemalloc_ctl::epoch::mib().ok()?.advance().ok()?;
 
     let allocated = tikv_jemalloc_ctl::stats::allocated::mib()
         .ok()?
@@ -290,17 +290,32 @@ impl AllocatorBenchmark {
         let info = AllocatorInfo::current();
         let start = std::time::Instant::now();
 
+        // Build the allocation layout once. If the requested size cannot form
+        // a valid layout (e.g. exceeds isize::MAX), return a zero-length
+        // benchmark result instead of panicking.
+        let layout = match std::alloc::Layout::from_size_align(allocation_size, 8) {
+            Ok(l) => l,
+            Err(_) => {
+                return Self {
+                    allocator: info.name,
+                    allocations: 0,
+                    total_bytes: 0,
+                    duration_ns: 0,
+                    allocs_per_sec: 0.0,
+                    throughput_mbps: 0.0,
+                };
+            }
+        };
+
         // Perform allocations
         let mut ptrs: Vec<*mut u8> = Vec::with_capacity(allocations);
         for _ in 0..allocations {
-            let layout = std::alloc::Layout::from_size_align(allocation_size, 8).unwrap();
             let ptr = unsafe { std::alloc::alloc(layout) };
             ptrs.push(ptr);
         }
 
         // Deallocate
         for &ptr in &ptrs {
-            let layout = std::alloc::Layout::from_size_align(allocation_size, 8).unwrap();
             unsafe { std::alloc::dealloc(ptr, layout) };
         }
 

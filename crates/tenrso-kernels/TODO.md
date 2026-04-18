@@ -1,22 +1,24 @@
 # tenrso-kernels TODO
 
-> **Milestone:** M1 (Complete)
-> **Version:** 0.1.0-rc.1
-> **Status:** RC.1 — 264 tests passing, 7 ignored (100%)
-> **Last Updated:** 2026-03-06
+> **Milestone:** M1 (Complete) + early M3 (sparse MTTKRP)
+> **Version:** 0.1.0
+> **Status:** 0.1.0 — 292 unit tests passing + 31 integration + 78 doc tests, 7 ignored (100%)
+> **Last Updated:** 2026-04-15
 
 ---
 
 ## Current Status Summary
 
-**Test Coverage:** 264 tests (100% passing), 7 ignored
-- Unit tests: 132 (correctness + edge cases)
+**Test Coverage:** 292 unit tests + 31 integration + 78 doc tests (100% passing), 7 ignored
+- Unit tests: 292 (275 baseline + 17 new sparse-MTTKRP tests: 3D/4D correctness vs dense oracle,
+  all-zeros / fully-dense edges, rank-1 / rank-128 stress, duplicate-index aggregation,
+  invalid-mode / factor-shape / factor-rank errors, parallel parity vs serial and dense)
 - Property tests (proptest): 40+ (mathematical invariants)
-- Integration tests: 22+ (real-world CP-ALS, Tucker-HOOI workflows)
-- Doc tests: 55+ (all API examples verified)
+- Integration tests: 31 (real-world CP-ALS, Tucker-HOOI workflows)
+- Doc tests: 78 (all API examples verified, +2 for sparse MTTKRP fns)
 
 **Code Metrics:**
-- Source code: ~10K lines (14 files)
+- Source code: ~11K lines (15 files, +`mttkrp_sparse.rs`)
 - Benchmarks: 135+ individual benchmarks across 10 groups
 - Examples: 3 comprehensive demonstrations
 
@@ -152,13 +154,41 @@
     - [x] Significantly reduced memory usage
     - [x] Column-to-multi-index mapping fixed (all previously ignored tests passing)
   - [ ] Fully fused + cache-blocking - Future optimization
-  - [ ] SIMD inner loops - Future (using scirs2_core where possible)
+  - [x] **SIMD inner loops (2026-04-14)** — rank-innermost loop reorder
+        with compiler auto-vectorization over contiguous slices
+    - [x] `mttkrp_fused_simd_f32` / `mttkrp_fused_simd_f64` (serial)
+    - [x] `mttkrp_fused_simd_parallel_f32` / `_f64` (Rayon over mode rows)
+    - [x] Supported lane widths: AVX-512 (16x f32 / 8x f64), AVX2 (8x f32 /
+          4x f64), NEON (4x f32 / 2x f64); scalar fallback on other ISAs.
+          All via LLVM auto-vectorization over `iter::zip` / `copy_from_slice`
+          on contiguous row slices — **no raw intrinsics, no `unsafe`**.
+    - [x] Transparent scalar fallback when R < 4 (`SIMD_MIN_RANK`) or
+          R == 0, or when row slices happen to be non-contiguous
+    - [x] Numerical tolerance vs scalar fused: **1e-6 for f32, 1e-12 for f64**
+          (may differ from scalar by up to this amount when hardware FMA
+          reorders accumulation; FMA-free targets yield bit-identical output)
+    - [x] 11 new tests covering 4 shape regimes + tail (R = lane+1) +
+          R=1/R=0 edge cases + parallel variants
+    - [x] Measured speedup on aarch64 NEON at rank=32: **~4.5x** over
+          scalar fused serial, ~12x combined with Rayon parallelism
+          (50^3 f64: 10.3ms → 855us)
 
 - [x] Variants
   - [x] Dense MTTKRP - Complete
   - [x] Blocked MTTKRP - Complete
   - [x] Fused MTTKRP - Complete
-  - [ ] Sparse MTTKRP (future M3)
+  - [x] Sparse MTTKRP - Complete (COO, serial + parallel) — 2026-04-15
+        - [x] `mttkrp_sparse_coo` - O(nnz * (N-1) * R) serial variant
+        - [x] `mttkrp_sparse_coo_parallel` - row-partitioned Rayon variant
+              (gated on `parallel` feature, no atomics, no write races)
+        - [x] Duplicate-index entries accumulate additively (matches
+              `CooTensor::deduplicate` semantics, verified vs dense oracle)
+        - [x] N-D general: 3rd, 4th-order tensors exercised in tests
+        - [ ] Sparse CSR-tensor input (CSF/HiCOO) — follow-up: the
+              `CsrMatrix` in `tenrso-sparse` is 2D-only, so a true N-D
+              sparse-tensor CSR path needs a generalized N-D format
+              (HiCOO or CSF). Deferred to M3 proper; see "Sparse Support (M3)"
+              section below.
   - [ ] Out-of-core MTTKRP (future M5)
 
 - [x] Testing
@@ -354,7 +384,10 @@
 
 ### Sparse Support (M3)
 
-- [ ] Sparse MTTKRP (COO/CSR input)
+- [x] Sparse MTTKRP (COO input) - Complete (2026-04-15, serial + parallel)
+- [ ] Sparse MTTKRP (CSF / HiCOO input) — requires N-D sparse format;
+      `CsrMatrix` in `tenrso-sparse` is 2D-only so a direct "CSR tensor"
+      MTTKRP path is not possible without first generalizing to CSF/HiCOO
 - [ ] Sparse n-mode product
 - [ ] Mixed sparse/dense operations
 
@@ -372,7 +405,7 @@
 
 ### Additional Optimizations (Future)
 
-- [ ] SIMD inner loops for MTTKRP fused kernel
+- [x] SIMD inner loops for MTTKRP fused kernel (2026-04-14)
 - [ ] Fully fused + cache-blocking combined variant
 - [ ] Parallel Tucker mode application
 - [ ] Fused multi-mode products
@@ -395,6 +428,21 @@
 ---
 
 ## Recent Updates
+
+### SIMD Fused MTTKRP (2026-04-14)
+
+- Added `mttkrp_fused_simd_f32` / `mttkrp_fused_simd_f64` with
+  rank-innermost loop reorder → compiler auto-vectorization on AVX2,
+  AVX-512, and NEON (no `unsafe`, no raw intrinsics).
+- Added parallel variants `mttkrp_fused_simd_parallel_f32/_f64` that
+  partition the `I_mode` rows across Rayon threads with per-thread scratch.
+- Measured speedups (aarch64 NEON, rank=32, f64):
+  4.10x-4.63x over scalar fused serial; 8-12x combined with parallelism.
+- 11 new unit tests (shape grid, tail R=lane+1, R=1 below-threshold
+  fallback, R=0 empty, parallel f32/f64, invalid-mode propagation).
+- Numerical tolerance: 1e-12 f64, 1e-6 f32 vs scalar reference.
+- 4 new doc tests.
+- 0 warnings, 0 `unsafe`, clippy-clean with `-D warnings`.
 
 ### RC.1 Release (2026-03-06)
 

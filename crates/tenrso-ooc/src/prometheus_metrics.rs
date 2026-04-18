@@ -362,14 +362,21 @@ impl PrometheusMetrics {
 
 impl Default for PrometheusMetrics {
     fn default() -> Self {
-        Self::new().expect("Failed to create Prometheus metrics")
+        // Startup-only initialization: metric name registration with a fresh
+        // Registry is effectively infallible (unique names, fixed bucket configs).
+        // If this ever fails, it indicates a programming error (duplicate names).
+        Self::new()
+            .expect("PrometheusMetrics::new() registry init is infallible with unique metric names")
     }
 }
 
 lazy_static::lazy_static! {
-    /// Global metrics instance
+    /// Global metrics instance.
+    ///
+    /// Initialized once at program startup. Fails only if metric name
+    /// registration conflicts — a programming error that must be caught early.
     pub static ref METRICS: PrometheusMetrics = PrometheusMetrics::new()
-        .expect("Failed to initialize global Prometheus metrics");
+        .expect("Global Prometheus metrics registry init is infallible with unique metric names");
 }
 
 /// Prometheus HTTP server state

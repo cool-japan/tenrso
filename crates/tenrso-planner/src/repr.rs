@@ -108,11 +108,9 @@ fn is_lowrank_candidate(stats: &TensorStats, config: &ReprConfig) -> bool {
 ///
 /// Returns ratio of sparse_memory / dense_memory
 pub fn sparse_memory_ratio(stats: &TensorStats) -> f64 {
-    if stats.nnz.is_none() {
+    let Some(nnz) = stats.nnz else {
         return 1.0; // Dense tensor
-    }
-
-    let nnz = stats.nnz.unwrap();
+    };
     let total = stats.size();
 
     if total == 0 {

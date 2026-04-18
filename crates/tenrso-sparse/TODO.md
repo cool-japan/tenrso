@@ -1,17 +1,52 @@
 # tenrso-sparse TODO
 
 > **Milestone:** M3 + Advanced Enhancements + Graph Algorithms & Solvers
-> **Version:** 0.1.0-rc.1
-> **Status:** RC.1 — 426 tests passing (3 ignored), 100% pass rate
-> **Tests:** 426 passing (3 ignored, 100%)
-> **Last Updated:** 2026-03-06 (RC.1 Release)
+> **Version:** 0.1.0
+> **Status:** 0.1.0 — 429 tests passing (0 ignored), 100% pass rate
+> **Tests:** 429 passing (0 ignored, 100%)
+> **Last Updated:** 2026-04-15 (solvers.rs refactored: split into per-solver sub-modules, no-unwrap cleanup)
 
 ---
 
-## RC.1 Status — 2026-03-06
+## Refactoring — 2026-04-15
 
-- **Tests:** 426 passing (3 ignored), 100% pass rate
-  - Note: 3 MINRES tests ignored pending algorithm refinement for symmetric indefinite edge cases
+- **`solvers.rs` split via manual refactor** (splitrs dry-run suggested a trait-based split
+  that did not align with the per-solver goal). Original `crates/tenrso-sparse/src/solvers.rs`
+  (2114 lines, over the 2000-line soft limit) was replaced by `crates/tenrso-sparse/src/solvers/`
+  directory with 9 focused modules:
+  - `mod.rs` (97 lines) — module doc, `SolverInfo`, public re-exports
+  - `helpers.rs` (86 lines) — shared private helpers (`dot`, `norm`, `axpy`, `spmv_vec`, `spmv_transpose`)
+  - `preconditioner.rs` (349 lines) — `Preconditioner` trait + Identity/ILU/Jacobi/SSOR
+  - `cg.rs` (310 lines) — Conjugate Gradient + CG preconditioner integration tests
+  - `bicgstab.rs` (212 lines) — BiCGSTAB
+  - `gmres.rs` (293 lines) — GMRES + its private `givens` / `backward_solve_triangular`
+  - `minres.rs` (409 lines) — MINRES (Paige-Saunders dbar/epsln recurrence, untouched)
+  - `cgne.rs` (228 lines) — CG on Normal Equations
+  - `cgnr.rs` (255 lines) — CG on Normal Residual
+  - All files well under the 2000-line limit (largest: 409 lines).
+- **No-unwrap cleanup (No-unwrap policy):** 7 bare production `.unwrap()` calls eliminated:
+  - `T::from(2.0).unwrap()` in `SsorPreconditioner::from_matrix` → `ok_or_else(|| SparseError::operation(...))?`
+  - 6× `norm(...).to_f64().unwrap()` in CGNE/CGNR → `unwrap_or(0.0)` / `unwrap_or(f64::INFINITY)`
+    (consistent with the pattern already used in CG/BiCGSTAB/GMRES/MINRES).
+  - Test-only and doctest `.unwrap()` calls intentionally retained (policy-compliant).
+- **Verification:**
+  - `cargo check -p tenrso-sparse --all-features`: clean, no warnings.
+  - `cargo clippy -p tenrso-sparse --all-features --all-targets -- -D warnings`: clean.
+  - `cargo test -p tenrso-sparse --all-features`: 429 lib + 22 integration + 158 doctests
+    all pass (same counts as before the refactor).
+- Public API unchanged: `use tenrso_sparse::solvers::{cg, bicgstab, gmres, minres, cgne, cgnr,
+  Preconditioner, IdentityPreconditioner, IluPreconditioner, JacobiPreconditioner, SsorPreconditioner,
+  SolverInfo}` continues to work. Examples (`iterative_solvers.rs`, `complete_workflow.rs`) unchanged.
+
+---
+
+## RC.1 Status — 2026-03-06 (Updated 2026-04-14)
+
+- **Tests:** 429 passing (0 ignored), 100% pass rate
+  - ✅ MINRES (7/7 tests) — algorithm rewritten using Paige-Saunders (1975) dbar/epsln
+    recurrence (following SciPy `scipy.sparse.linalg.minres` reference). All three
+    previously-ignored tests (symmetric indefinite, tridiagonal indefinite, and
+    MINRES-vs-CG equivalence) now pass to assertion tolerances of 1e-4 to 1e-5.
 - **Zero `todo!()` / `unimplemented!()` macros** in the entire crate
 - **Milestone M3: COMPLETE** — all sparse formats, operations, and algorithms implemented
 - **Sparse Formats (8):** COO, CSR, CSC, BCSR, ELL, DIA, CSF (feature-gated), HiCOO (feature-gated)
@@ -26,14 +61,14 @@
 - **I/O:** Matrix Market format
 - **Property tests:** 22 (proptest framework)
 - **Benchmark groups:** 21
-- **Nextest validated:** 426 tests passing
+- **Nextest validated:** 429 tests passing
 
 ---
 
 ## Latest Statistics (RC.1)
 
 ### Code Metrics
-- **Library Tests:** 426 passing (3 ignored, 100%)
+- **Library Tests:** 429 passing (0 ignored, 100%)
 - **Documentation:** Comprehensive with examples
 - **Quality:** Zero warnings
   - Doc Tests: 150+ (all passing)
@@ -42,11 +77,9 @@
   - ✅ Zero clippy warnings (`cargo clippy -- -D warnings`)
   - ✅ Formatting validated (`cargo fmt -- --check`)
   - ✅ SciRS2 policy compliant (no direct ndarray/rand imports)
-  - ✅ Nextest validated (all 426 tests passing)
+  - ✅ Nextest validated (all 429 tests passing)
 - **New Features:** 6 major algorithms (MINRES, PageRank, MST, Graph Coloring, Bellman-Ford, MIS)
 - **Code Lines:** ~14,600 (added ~700 production lines this session)
-
-*3 MINRES tests skipped pending algorithm refinement for edge cases
 
 ### Feature Set Updates - ENHANCED
 - **Sparse Formats:** 8 (COO, CSR, CSC, BCSR, ELL, DIA, CSF, HiCOO)
@@ -62,7 +95,7 @@
 ---
 
 > **Latest Updates (2025-12-10 - Part 13 ENHANCED):**
-> - 🚀 **NEW!** MINRES solver for symmetric indefinite systems (4/7 tests passing - needs refinement)
+> - 🚀 **NEW!** MINRES solver for symmetric indefinite systems (7/7 tests passing — algorithm refined 2026-04-14)
 > - ✨ **NEW!** PageRank algorithm for vertex ranking (5/5 tests passing) ⭐
 > - ✨ **NEW!** Minimum Spanning Tree - Kruskal's + Union-Find (6/6 tests passing) ⭐
 > - ✨ **NEW!** Graph Coloring - greedy with degree ordering (4/4 tests passing) ⭐
@@ -75,7 +108,12 @@
 ### Summary of New Enhancements
 1. **MINRES** (~200 lines): Minimum Residual method for symmetric indefinite linear systems
    - Uses Lanczos iteration with QR factorization via Givens rotations
-   - Status: Partial implementation (4/7 tests), needs algorithm refinement for some edge cases
+   - Status: Full implementation (7/7 tests passing). Algorithm rewritten on 2026-04-14
+     to follow the canonical Paige-Saunders (1975) `dbar`/`epsln` recurrence as used
+     by SciPy's `scipy.sparse.linalg.minres`. Preconditioner support is now wired into
+     the Lanczos recurrence (previously ignored).
+   - Reference: C. C. Paige and M. A. Saunders, "Solution of sparse indefinite
+     systems of linear equations", SIAM J. Numer. Anal. 12(4), 617-629 (1975).
 
 2. **PageRank** (~110 lines): Google's page ranking algorithm using power iteration
    - Handles dangling nodes, configurable damping factor
@@ -177,7 +215,7 @@
 
 **Advanced Graph Algorithms & Symmetric Indefinite Solver** ✅ **NEW FEATURES!**
 
-38. **MINRES Solver (Minimum Residual Method)** 🔧 **PARTIAL**
+38. **MINRES Solver (Minimum Residual Method)** ✅ **COMPLETE!**
     - Added to `solvers.rs` module (+~200 lines)
     - **Algorithm:** Solves symmetric (possibly indefinite) linear systems Ax = b
     - **Key Feature:** Works for symmetric indefinite matrices (unlike CG which requires SPD)
@@ -186,10 +224,18 @@
       - Symmetric indefinite systems
       - Mixed finite element formulations
       - Problems where CG fails due to non-positive definiteness
-    - **Implementation:** Lanczos 3-term recurrence with Givens rotations
+    - **Implementation:** Lanczos 3-term recurrence with Givens rotations, using the
+      Paige-Saunders `dbar`/`epsln` scalar recurrence for the incremental QR of the
+      tridiagonal matrix (canonical MATLAB / SciPy formulation).
     - **Complexity:** O(nnz × iterations) time, O(n) space
-    - **Status:** Partial - 3/7 tests passing, needs refinement for some indefinite cases
-    - **Tests:** 7 tests (3 passing for SPD and some indefinite systems)
+    - **Status:** Complete — 7/7 tests passing (2026-04-14). Supports both
+      unpreconditioned and symmetric-preconditioned variants; Jacobi preconditioner
+      test included.
+    - **Tests:** 7 passing (symmetric indefinite 2x2, tridiagonal indefinite 3x3,
+      SPD, with Jacobi preconditioner, zero RHS, size-mismatch error, MINRES-vs-CG
+      equivalence on SPD).
+    - **Reference:** C. C. Paige and M. A. Saunders, "Solution of sparse indefinite
+      systems of linear equations", SIAM J. Numer. Anal. 12(4), 617-629 (1975).
 
 39. **PageRank Algorithm** ✅ **COMPLETE!** ⭐
     - Added to `graph.rs` module (+~110 lines)

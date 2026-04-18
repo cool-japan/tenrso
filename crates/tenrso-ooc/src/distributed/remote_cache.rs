@@ -196,11 +196,14 @@ impl RemoteCache {
     }
 
     /// Get current timestamp as f64.
+    ///
+    /// Returns 0.0 if the system clock is before the Unix epoch (never
+    /// expected on a correctly-configured system).
     fn current_timestamp_f64() -> f64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64()
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0)
     }
 
     /// Get a chunk from cache or fetch from remote node.
@@ -417,8 +420,10 @@ impl RemoteCache {
                         })
                         .collect();
 
-                    // Sort by score (higher score = more likely to evict)
-                    scored_chunks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                    // Sort by score (higher score = more likely to evict).
+                    // NaN-safe: treat uncomparable pairs as Equal.
+                    scored_chunks
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
                     // Take chunks until we've freed enough bytes
                     for (chunk_id, _) in scored_chunks {

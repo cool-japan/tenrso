@@ -197,7 +197,8 @@ impl<T: Float + FromPrimitive> CompressedGradient<T> {
         let min = data.iter().copied().fold(T::infinity(), T::min);
         let max = data.iter().copied().fold(T::neg_infinity(), T::max);
 
-        let scale = (max - min) / T::from_u8(255).unwrap();
+        let scale = (max - min)
+            / T::from_u8(255).ok_or_else(|| anyhow!("Float type cannot represent 255"))?;
 
         let values: Vec<u8> = data
             .iter()
@@ -211,7 +212,8 @@ impl<T: Float + FromPrimitive> CompressedGradient<T> {
         let min = data.iter().copied().fold(T::infinity(), T::min);
         let max = data.iter().copied().fold(T::neg_infinity(), T::max);
 
-        let scale = (max - min) / T::from_u16(65535).unwrap();
+        let scale = (max - min)
+            / T::from_u16(65535).ok_or_else(|| anyhow!("Float type cannot represent 65535"))?;
 
         let values: Vec<u16> = data
             .iter()
@@ -234,8 +236,10 @@ impl<T: Float + FromPrimitive> CompressedGradient<T> {
             .map(|(i, &val)| (i, val.abs()))
             .collect();
 
-        // Sort by magnitude (descending)
-        indexed_magnitudes.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        // Sort by magnitude (descending). NaN magnitudes (e.g. from upstream NaN
+        // gradients) sort as if equal so no panic can occur.
+        indexed_magnitudes
+            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Keep top-k
         let mut indices = Vec::with_capacity(k);
@@ -282,10 +286,11 @@ impl<T: Float + FromPrimitive> CompressedGradient<T> {
                 let decompressed: Vec<T> = values
                     .iter()
                     .map(|&qval| {
-                        let q_float = T::from_u8(qval).unwrap();
-                        q_float * *scale + *min
+                        let q_float = T::from_u8(qval)
+                            .ok_or_else(|| anyhow!("Float type cannot represent u8 {qval}"))?;
+                        Ok::<T, anyhow::Error>(q_float * *scale + *min)
                     })
-                    .collect();
+                    .collect::<Result<_>>()?;
 
                 Array::from_shape_vec(IxDyn(shape), decompressed)
                     .map_err(|e| anyhow!("Shape mismatch: {}", e))
@@ -295,10 +300,11 @@ impl<T: Float + FromPrimitive> CompressedGradient<T> {
                 let decompressed: Vec<T> = values
                     .iter()
                     .map(|&qval| {
-                        let q_float = T::from_u16(qval).unwrap();
-                        q_float * *scale + *min
+                        let q_float = T::from_u16(qval)
+                            .ok_or_else(|| anyhow!("Float type cannot represent u16 {qval}"))?;
+                        Ok::<T, anyhow::Error>(q_float * *scale + *min)
                     })
-                    .collect();
+                    .collect::<Result<_>>()?;
 
                 Array::from_shape_vec(IxDyn(shape), decompressed)
                     .map_err(|e| anyhow!("Shape mismatch: {}", e))
@@ -376,8 +382,11 @@ impl CompressionStats {
             })
             .fold(T::zero(), |acc, x| acc + x);
 
-        let n = T::from_usize(a.len()).unwrap();
-        Ok((sum_sq_diff / n).to_f64().unwrap())
+        let n = T::from_usize(a.len())
+            .ok_or_else(|| anyhow!("Float type cannot represent tensor length {}", a.len()))?;
+        (sum_sq_diff / n)
+            .to_f64()
+            .ok_or_else(|| anyhow!("MSE value cannot be converted to f64"))
     }
 }
 

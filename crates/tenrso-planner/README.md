@@ -57,14 +57,14 @@ Part of the [TenRSo](https://github.com/cool-japan/tenrso) tensor computing stac
 
 ```toml
 [dependencies]
-tenrso-planner = "0.1.0-rc.1"
+tenrso-planner = "0.1.0"
 ```
 
 ### Optional Features
 
 ```toml
 [dependencies]
-tenrso-planner = { version = "0.1.0-rc.1", features = ["serde"] }
+tenrso-planner = { version = "0.1.0", features = ["serde"] }
 ```
 
 - `serde`: Enable serialization/deserialization of plans
@@ -351,4 +351,4 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](../../LICENSE) for
 
 ---
 
-**Status:** Alpha (production-ready internals) | **Version:** 0.1.0-rc.1 | **Tests:** 271/271 passing
+**Status:** Stable | **Version:** 0.1.0 | **Tests:** 271/271 passing

@@ -30,6 +30,36 @@ use std::collections::HashMap;
 use std::path::Path;
 use tenrso_core::DenseND;
 
+/// Acquire a mutex guard, transparently recovering from poisoning.
+///
+/// Used by the parallel batch-I/O paths to synchronize result accumulators.
+/// Poisoning only indicates a worker panicked earlier; the data behind these
+/// locks is always freshly-allocated per-batch so the partial results remain
+/// safe to use.
+#[cfg(feature = "parallel")]
+#[inline]
+fn lock_safe<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match m.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Extract the inner value from an exclusively-owned `Arc<Mutex<T>>`.
+///
+/// Returns an error if another clone exists (parallel worker leaked a handle)
+/// or if the mutex is in a state that prevents extraction. Callers use this at
+/// pipeline end-of-life where the `Arc` is known to be the sole reference.
+#[cfg(feature = "parallel")]
+#[inline]
+fn take_arc_mutex<T>(arc: std::sync::Arc<std::sync::Mutex<T>>) -> Result<T> {
+    let mutex = std::sync::Arc::into_inner(arc)
+        .ok_or_else(|| anyhow!("Batch accumulator still shared; cannot finalize"))?;
+    mutex
+        .into_inner()
+        .map_err(|_| anyhow!("Batch accumulator mutex poisoned; cannot finalize"))
+}
+
 #[cfg(feature = "compression")]
 use crate::compression::{compress_f64_slice, decompress_to_f64_vec, CompressionCodec};
 
@@ -242,12 +272,12 @@ impl BatchReader {
         for (chunk_id, result) in results {
             match result {
                 Ok((tensor, size)) => {
-                    chunks.lock().unwrap().insert(chunk_id, tensor);
-                    *bytes_read.lock().unwrap() += size;
+                    lock_safe(&chunks).insert(chunk_id, tensor);
+                    *lock_safe(&bytes_read) += size;
                 }
                 Err(e) => {
                     if self.config.continue_on_error {
-                        errors.lock().unwrap().insert(chunk_id, e.to_string());
+                        lock_safe(&errors).insert(chunk_id, e.to_string());
                     } else {
                         return Err(e);
                     }
@@ -256,9 +286,9 @@ impl BatchReader {
         }
 
         Ok(BatchReadResult {
-            chunks: Arc::try_unwrap(chunks).unwrap().into_inner().unwrap(),
-            errors: Arc::try_unwrap(errors).unwrap().into_inner().unwrap(),
-            bytes_read: Arc::try_unwrap(bytes_read).unwrap().into_inner().unwrap(),
+            chunks: take_arc_mutex(chunks)?,
+            errors: take_arc_mutex(errors)?,
+            bytes_read: take_arc_mutex(bytes_read)?,
         })
     }
 
@@ -443,12 +473,12 @@ impl BatchWriter {
         for (chunk_id, result) in results {
             match result {
                 Ok(size) => {
-                    written.lock().unwrap().push(chunk_id);
-                    *bytes_written.lock().unwrap() += size;
+                    lock_safe(&written).push(chunk_id);
+                    *lock_safe(&bytes_written) += size;
                 }
                 Err(e) => {
                     if self.config.continue_on_error {
-                        errors.lock().unwrap().insert(chunk_id, e.to_string());
+                        lock_safe(&errors).insert(chunk_id, e.to_string());
                     } else {
                         return Err(e);
                     }
@@ -457,12 +487,9 @@ impl BatchWriter {
         }
 
         Ok(BatchWriteResult {
-            written: Arc::try_unwrap(written).unwrap().into_inner().unwrap(),
-            errors: Arc::try_unwrap(errors).unwrap().into_inner().unwrap(),
-            bytes_written: Arc::try_unwrap(bytes_written)
-                .unwrap()
-                .into_inner()
-                .unwrap(),
+            written: take_arc_mutex(written)?,
+            errors: take_arc_mutex(errors)?,
+            bytes_written: take_arc_mutex(bytes_written)?,
         })
     }
 

@@ -124,7 +124,7 @@ pub fn estimate_flops(spec: &EinsumSpec, stats: &[TensorStats]) -> Result<f64> {
         let output_size: usize = spec
             .output
             .chars()
-            .map(|c| *dim_map.get(&c).unwrap())
+            .map(|c| dim_map.get(&c).copied().unwrap_or(1))
             .product::<usize>()
             .max(1); // Handle scalar output (empty output spec)
 
@@ -132,7 +132,7 @@ pub fn estimate_flops(spec: &EinsumSpec, stats: &[TensorStats]) -> Result<f64> {
         let contracted_size: usize = spec
             .contracted_indices
             .iter()
-            .map(|c| *dim_map.get(c).unwrap())
+            .map(|c| dim_map.get(c).copied().unwrap_or(1))
             .product::<usize>()
             .max(1); // Handle no contraction
 
@@ -154,7 +154,7 @@ fn estimate_sparse_flops(
     let output_size: usize = spec
         .output
         .chars()
-        .map(|c| *dim_map.get(&c).unwrap())
+        .map(|c| dim_map.get(&c).copied().unwrap_or(1))
         .product();
 
     // Each output element may require multiple operations depending on nnz

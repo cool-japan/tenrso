@@ -129,11 +129,10 @@ pub fn greedy_planner(
                 }
             }
         }
-        if best_spec.is_none() || best_shape.is_none() {
-            return Err(anyhow!("No valid contraction found"));
-        }
-        let pairwise_spec = best_spec.unwrap();
-        let output_shape = best_shape.unwrap();
+        let (pairwise_spec, output_shape) = match (best_spec, best_shape) {
+            (Some(spec), Some(shape)) => (spec, shape),
+            _ => return Err(anyhow!("No valid contraction found")),
+        };
         let (i, j) = best_pair;
         let a = &intermediates[i];
         let b = &intermediates[j];
@@ -489,13 +488,21 @@ pub fn beam_search_planner(
         if next_beam.is_empty() {
             return Err(anyhow!("No valid contractions found in beam search"));
         }
-        next_beam.sort_by(|a, b| a.total_flops.partial_cmp(&b.total_flops).unwrap());
+        next_beam.sort_by(|a, b| {
+            a.total_flops
+                .partial_cmp(&b.total_flops)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         next_beam.truncate(beam_width);
         beam = next_beam;
     }
     let best = beam
         .into_iter()
-        .min_by(|a, b| a.total_flops.partial_cmp(&b.total_flops).unwrap())
+        .min_by(|a, b| {
+            a.total_flops
+                .partial_cmp(&b.total_flops)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .ok_or_else(|| anyhow!("No complete plan found"))?;
     let mut final_plan = best.plan;
     final_plan.estimated_flops = best.total_flops;
@@ -662,7 +669,11 @@ pub fn genetic_algorithm_planner(
     // Evolution loop
     for _generation in 0..max_generations {
         // Sort population by fitness (lower cost = better)
-        population.sort_by(|a, b| a.estimated_flops.partial_cmp(&b.estimated_flops).unwrap());
+        population.sort_by(|a, b| {
+            a.estimated_flops
+                .partial_cmp(&b.estimated_flops)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Update best
         if population[0].estimated_flops < best_cost {
@@ -680,16 +691,17 @@ pub fn genetic_algorithm_planner(
 
         // Generate offspring through crossover and mutation
         while offspring.len() < population_size {
-            // Tournament selection (size 3)
+            // Tournament selection (size 3). The population is guaranteed
+            // non-empty by the caller, so `min_by` yields `Some`.
             let parent1_idx = (0..3)
                 .map(|_| rng.random_range(0..population.len()))
                 .min_by(|&a, &b| {
                     population[a]
                         .estimated_flops
                         .partial_cmp(&population[b].estimated_flops)
-                        .unwrap()
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 })
-                .unwrap();
+                .unwrap_or(0);
 
             let parent2_idx = (0..3)
                 .map(|_| rng.random_range(0..population.len()))
@@ -697,9 +709,9 @@ pub fn genetic_algorithm_planner(
                     population[a]
                         .estimated_flops
                         .partial_cmp(&population[b].estimated_flops)
-                        .unwrap()
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 })
-                .unwrap();
+                .unwrap_or(0);
 
             // Order crossover (OX): preserve relative order from both parents
             let mut child = population[parent1_idx].clone();

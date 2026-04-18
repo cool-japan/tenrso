@@ -111,6 +111,8 @@ pub mod hadamard;
 pub mod khatri_rao;
 pub mod kronecker;
 pub mod mttkrp;
+#[cfg(feature = "sparse")]
+pub mod mttkrp_sparse;
 pub mod nmode;
 pub mod outer;
 pub mod randomized;
@@ -128,6 +130,8 @@ pub use hadamard::*;
 pub use khatri_rao::*;
 pub use kronecker::*;
 pub use mttkrp::*;
+#[cfg(feature = "sparse")]
+pub use mttkrp_sparse::*;
 pub use nmode::*;
 pub use outer::*;
 pub use randomized::*;

@@ -259,8 +259,10 @@ impl WorkingSetPredictor {
             })
             .collect();
 
-        // Sort by score (descending)
-        predictions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        // Sort by score (descending). NaN scores sort as Equal to avoid
+        // panicking; ordering within NaN-containing pairs is unspecified but
+        // never leaks a panic.
+        predictions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Take top N
         let result = predictions

@@ -150,7 +150,12 @@ where
             let slice = input.index_axis(scirs2_core::ndarray_ext::Axis(current_depth), idx);
             if current_depth == output_shape.len() - 1 {
                 // Leaf level - copy data
-                output_data[*output_idx] = slice.iter().next().unwrap().clone();
+                let val = slice
+                    .iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("gather_recursive: empty slice at gather axis"))?
+                    .clone();
+                output_data[*output_idx] = val;
                 *output_idx += 1;
             } else {
                 gather_recursive(
@@ -170,7 +175,12 @@ where
             let slice = input.index_axis(scirs2_core::ndarray_ext::Axis(current_depth), i);
             if current_depth == output_shape.len() - 1 {
                 // Leaf level - copy data
-                output_data[*output_idx] = slice.iter().next().unwrap().clone();
+                let val = slice
+                    .iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("gather_recursive: empty slice at non-gather axis"))?
+                    .clone();
+                output_data[*output_idx] = val;
                 *output_idx += 1;
             } else {
                 gather_recursive(
@@ -265,8 +275,18 @@ where
     let mut output_data = match mode {
         ScatterMode::Replace => vec![T::zero(); total_elements],
         ScatterMode::Add => vec![T::zero(); total_elements],
-        ScatterMode::Max => vec![T::from_f64(f64::NEG_INFINITY).unwrap(); total_elements],
-        ScatterMode::Min => vec![T::from_f64(f64::INFINITY).unwrap(); total_elements],
+        ScatterMode::Max => {
+            let neg_inf = T::from_f64(f64::NEG_INFINITY).ok_or_else(|| {
+                anyhow!("advanced_scatter: float type cannot represent -infinity")
+            })?;
+            vec![neg_inf; total_elements]
+        }
+        ScatterMode::Min => {
+            let pos_inf = T::from_f64(f64::INFINITY).ok_or_else(|| {
+                anyhow!("advanced_scatter: float type cannot represent +infinity")
+            })?;
+            vec![pos_inf; total_elements]
+        }
     };
 
     // Perform scattering
@@ -324,7 +344,11 @@ where
         for &out_idx in indices {
             if current_depth == output_shape.len() - 1 {
                 // Leaf level - write data
-                let value = values.iter().nth(*values_idx).unwrap().clone();
+                let value = values
+                    .iter()
+                    .nth(*values_idx)
+                    .ok_or_else(|| anyhow!("scatter_recursive: values index out of bounds"))?
+                    .clone();
                 let flat_idx = compute_flat_index(output_shape, &[out_idx], current_depth);
 
                 match mode {

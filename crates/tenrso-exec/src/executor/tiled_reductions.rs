@@ -83,8 +83,9 @@ where
 {
     let total_elements = input.view().len();
     let sum = tiled_sum_all(input)?;
-    let mean = sum / T::from_usize(total_elements).unwrap();
-    Ok(mean)
+    let divisor = T::from_usize(total_elements)
+        .ok_or_else(|| anyhow::anyhow!("tiled_mean_all: cannot convert element count to T"))?;
+    Ok(sum / divisor)
 }
 
 /// Tiled max reduction along all axes

@@ -76,10 +76,10 @@ Part of the [TenRSo](https://github.com/cool-japan/tenrso) tensor computing stac
 
 ```toml
 [dependencies]
-tenrso-ooc = "0.1.0-rc.1"
+tenrso-ooc = "0.1.0"
 
 # With all I/O backends
-tenrso-ooc = { version = "0.1.0-rc.1", features = ["arrow", "parquet", "mmap"] }
+tenrso-ooc = { version = "0.1.0", features = ["arrow", "parquet", "mmap"] }
 ```
 
 ## Quick Start
@@ -252,4 +252,4 @@ Apache-2.0
 
 ---
 
-**Status:** Alpha (production-ready internals) | **Version:** 0.1.0-rc.1 | **Tests:** 238/238 passing
+**Status:** Stable | **Version:** 0.1.0 | **Tests:** 238/238 passing

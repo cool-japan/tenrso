@@ -13,7 +13,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0-rc.1"
+version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/cool-japan/tenrso"
@@ -68,12 +68,12 @@ scirs2-linalg = { version = "0.4.2" }
 scirs2-fft = { version = "0.4.2" }
 
 # TenRSo internal crates
-tenrso = { version = "0.1.0-rc.1", path = "crates/tenrso" }
-tenrso-core = { version = "0.1.0-rc.1", path = "crates/tenrso-core" }
-tenrso-kernels = { version = "0.1.0-rc.1", path = "crates/tenrso-kernels" }
-tenrso-decomp = { version = "0.1.0-rc.1", path = "crates/tenrso-decomp" }
-tenrso-sparse = { version = "0.1.0-rc.1", path = "crates/tenrso-sparse" }
-tenrso-planner = { version = "0.1.0-rc.1", path = "crates/tenrso-planner" }
-tenrso-ooc = { version = "0.1.0-rc.1", path = "crates/tenrso-ooc" }
-tenrso-exec = { version = "0.1.0-rc.1", path = "crates/tenrso-exec" }
-tenrso-ad = { version = "0.1.0-rc.1", path = "crates/tenrso-ad" }
+tenrso = { version = "0.1.0", path = "crates/tenrso" }
+tenrso-core = { version = "0.1.0", path = "crates/tenrso-core" }
+tenrso-kernels = { version = "0.1.0", path = "crates/tenrso-kernels" }
+tenrso-decomp = { version = "0.1.0", path = "crates/tenrso-decomp" }
+tenrso-sparse = { version = "0.1.0", path = "crates/tenrso-sparse" }
+tenrso-planner = { version = "0.1.0", path = "crates/tenrso-planner" }
+tenrso-ooc = { version = "0.1.0", path = "crates/tenrso-ooc" }
+tenrso-exec = { version = "0.1.0", path = "crates/tenrso-exec" }
+tenrso-ad = { version = "0.1.0", path = "crates/tenrso-ad" }

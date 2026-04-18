@@ -236,6 +236,10 @@ where
 
     /// Remove all singleton dimensions (dimensions of size 1).
     ///
+    /// Returns the tensor unchanged when no size-1 axes are present. If every
+    /// axis has size 1, the result is a rank-0 (scalar) tensor holding the
+    /// single element.
+    ///
     /// # Examples
     ///
     /// ```
@@ -244,17 +248,19 @@ where
     /// let tensor = DenseND::<f64>::zeros(&[1, 3, 1, 5, 1]);
     /// let squeezed = tensor.squeeze();
     /// assert_eq!(squeezed.shape(), &[3, 5]);
+    ///
+    /// // All size-1 axes collapse to a 0-D scalar
+    /// let scalar = DenseND::<f64>::ones(&[1, 1, 1]).squeeze();
+    /// assert_eq!(scalar.shape(), &[] as &[usize]);
+    /// assert_eq!(scalar.rank(), 0);
     /// ```
     pub fn squeeze(&self) -> Self {
         let new_shape: Vec<usize> = self.shape().iter().filter(|&&s| s != 1).copied().collect();
 
-        if new_shape.is_empty() {
-            // If all dimensions were 1, result is a scalar (shape [1])
-            return Self::from_elem(&[1], self.data.iter().next().unwrap().clone());
-        }
-
-        self.reshape(&new_shape)
-            .expect("Squeeze should always succeed")
+        // Reshape handles the 0-D case correctly (empty shape, product == 1).
+        // Fall back to a clone if (hypothetically) the reshape were to fail;
+        // squeeze cannot meaningfully change the total element count.
+        self.reshape(&new_shape).unwrap_or_else(|_| self.clone())
     }
 
     /// Remove a specific singleton dimension.
@@ -265,7 +271,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an error if the axis doesn't have size 1.
+    /// Returns an error if `axis` is out of bounds or the axis does not have
+    /// size 1.
     ///
     /// # Examples
     ///
@@ -276,14 +283,19 @@ where
     /// let squeezed = tensor.squeeze_axis(1).unwrap();
     /// assert_eq!(squeezed.shape(), &[3, 5]);
     /// ```
+    #[inline]
     pub fn squeeze_axis(&self, axis: usize) -> anyhow::Result<Self> {
         if axis >= self.rank() {
-            anyhow::bail!("Axis {} out of bounds for rank {}", axis, self.rank());
+            anyhow::bail!(
+                "squeeze_axis: axis {} out of bounds for tensor of rank {}",
+                axis,
+                self.rank()
+            );
         }
 
         if self.shape()[axis] != 1 {
             anyhow::bail!(
-                "Cannot squeeze axis {} with size {}",
+                "squeeze_axis: cannot squeeze axis {} with size {} (expected size 1)",
                 axis,
                 self.shape()[axis]
             );
@@ -300,7 +312,69 @@ where
         self.reshape(&new_shape)
     }
 
+    /// Remove the given set of singleton dimensions simultaneously.
+    ///
+    /// Every axis listed in `axes` must be in-bounds and have size 1.
+    /// Duplicate axes are reported as errors. The relative order of the
+    /// remaining axes is preserved.
+    ///
+    /// # Arguments
+    ///
+    /// * `axes` - Axes to drop. May be given in any order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any axis is out of bounds, has size != 1, or is
+    /// specified more than once.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenrso_core::DenseND;
+    ///
+    /// let tensor = DenseND::<f64>::zeros(&[1, 3, 1, 5]);
+    /// let squeezed = tensor.squeeze_axes(&[0, 2]).unwrap();
+    /// assert_eq!(squeezed.shape(), &[3, 5]);
+    /// ```
+    pub fn squeeze_axes(&self, axes: &[usize]) -> anyhow::Result<Self> {
+        let rank = self.rank();
+        let mut drop = vec![false; rank];
+        for &axis in axes {
+            if axis >= rank {
+                anyhow::bail!(
+                    "squeeze_axes: axis {} out of bounds for tensor of rank {}",
+                    axis,
+                    rank
+                );
+            }
+            if drop[axis] {
+                anyhow::bail!("squeeze_axes: duplicate axis {} in axes list", axis);
+            }
+            if self.shape()[axis] != 1 {
+                anyhow::bail!(
+                    "squeeze_axes: cannot squeeze axis {} with size {} (expected size 1)",
+                    axis,
+                    self.shape()[axis]
+                );
+            }
+            drop[axis] = true;
+        }
+
+        let new_shape: Vec<usize> = self
+            .shape()
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| !drop[i])
+            .map(|(_, &s)| s)
+            .collect();
+
+        self.reshape(&new_shape)
+    }
+
     /// Add a singleton dimension at the specified axis.
+    ///
+    /// Valid positions are `0..=rank`. Inserting at `rank` appends the new
+    /// axis at the end.
     ///
     /// # Arguments
     ///
@@ -308,7 +382,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an error if axis is out of bounds.
+    /// Returns an error if `axis > rank`.
     ///
     /// # Examples
     ///
@@ -319,10 +393,11 @@ where
     /// let unsqueezed = tensor.unsqueeze(1).unwrap();
     /// assert_eq!(unsqueezed.shape(), &[3, 1, 5]);
     /// ```
+    #[inline]
     pub fn unsqueeze(&self, axis: usize) -> anyhow::Result<Self> {
         if axis > self.rank() {
             anyhow::bail!(
-                "Axis {} out of bounds for result rank {}",
+                "unsqueeze: axis {} out of bounds for result rank {}",
                 axis,
                 self.rank() + 1
             );
@@ -330,6 +405,63 @@ where
 
         let mut new_shape = self.shape().to_vec();
         new_shape.insert(axis, 1);
+
+        self.reshape(&new_shape)
+    }
+
+    /// Insert multiple singleton dimensions at once.
+    ///
+    /// Each index in `axes` is interpreted against the *final* shape (rank
+    /// `self.rank() + axes.len()`). Duplicate positions are reported as
+    /// errors. Indices are applied in sorted ascending order so their meaning
+    /// matches the output layout.
+    ///
+    /// # Arguments
+    ///
+    /// * `axes` - Positions in the final tensor where size-1 axes should be
+    ///   inserted. May be given in any order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any position is out of bounds or is duplicated.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenrso_core::DenseND;
+    ///
+    /// let tensor = DenseND::<f64>::zeros(&[2, 3]);
+    /// let expanded = tensor.unsqueeze_axes(&[0, 2]).unwrap();
+    /// assert_eq!(expanded.shape(), &[1, 2, 1, 3]);
+    /// ```
+    pub fn unsqueeze_axes(&self, axes: &[usize]) -> anyhow::Result<Self> {
+        let final_rank = self.rank() + axes.len();
+
+        let mut sorted_axes: Vec<usize> = axes.to_vec();
+        sorted_axes.sort_unstable();
+
+        // Validate bounds and detect duplicates after sorting.
+        let mut prev: Option<usize> = None;
+        for &axis in &sorted_axes {
+            if axis >= final_rank {
+                anyhow::bail!(
+                    "unsqueeze_axes: axis {} out of bounds for result rank {}",
+                    axis,
+                    final_rank
+                );
+            }
+            if Some(axis) == prev {
+                anyhow::bail!("unsqueeze_axes: duplicate axis {} in axes list", axis);
+            }
+            prev = Some(axis);
+        }
+
+        // Build the final shape by starting with the existing shape and
+        // inserting a 1 at each requested position (ascending) in order.
+        let mut new_shape: Vec<usize> = self.shape().to_vec();
+        for axis in sorted_axes {
+            new_shape.insert(axis, 1);
+        }
 
         self.reshape(&new_shape)
     }
@@ -450,8 +582,10 @@ where
     /// ```
     pub fn atleast_1d(&self) -> Self {
         if self.rank() == 0 {
-            // Convert scalar to 1D array
-            self.reshape(&[1]).unwrap()
+            // Convert scalar to 1D array: a rank-0 tensor has exactly 1
+            // element, so reshaping to `[1]` preserves the element count.
+            self.reshape(&[1])
+                .expect("atleast_1d: scalar has exactly one element")
         } else {
             self.clone()
         }
@@ -478,11 +612,16 @@ where
     /// assert_eq!(result.shape(), &[1, 3]);
     /// ```
     pub fn atleast_2d(&self) -> Self {
+        // Each branch below preserves the total number of elements, so
+        // `reshape` cannot fail. `.expect` documents that invariant.
         match self.rank() {
-            0 => self.reshape(&[1, 1]).unwrap(),
+            0 => self
+                .reshape(&[1, 1])
+                .expect("atleast_2d: scalar has exactly one element"),
             1 => {
                 let n = self.shape()[0];
-                self.reshape(&[1, n]).unwrap()
+                self.reshape(&[1, n])
+                    .expect("atleast_2d: 1×n preserves 1D element count")
             }
             _ => self.clone(),
         }
@@ -514,16 +653,22 @@ where
     /// assert_eq!(result.shape(), &[2, 3, 1]);
     /// ```
     pub fn atleast_3d(&self) -> Self {
+        // Each reshape below preserves element count; any failure would be
+        // an internal logic bug.
         match self.rank() {
-            0 => self.reshape(&[1, 1, 1]).unwrap(),
+            0 => self
+                .reshape(&[1, 1, 1])
+                .expect("atleast_3d: scalar has exactly one element"),
             1 => {
                 let n = self.shape()[0];
-                self.reshape(&[1, n, 1]).unwrap()
+                self.reshape(&[1, n, 1])
+                    .expect("atleast_3d: 1×n×1 preserves 1D element count")
             }
             2 => {
                 let m = self.shape()[0];
                 let n = self.shape()[1];
-                self.reshape(&[m, n, 1]).unwrap()
+                self.reshape(&[m, n, 1])
+                    .expect("atleast_3d: m×n×1 preserves 2D element count")
             }
             _ => self.clone(),
         }
@@ -544,5 +689,269 @@ where
     /// ```
     pub fn expand_dims(&self, axis: usize) -> anyhow::Result<Self> {
         self.unsqueeze(axis)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scirs2_core::ndarray_ext::array;
+
+    // -- squeeze --------------------------------------------------------
+
+    #[test]
+    fn test_squeeze_no_singletons_is_noop_with_data() {
+        let tensor = DenseND::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let squeezed = tensor.squeeze();
+        assert_eq!(squeezed.shape(), &[2, 3]);
+        assert_eq!(squeezed.to_vec(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_squeeze_single_interior_axis() {
+        // Shape [3, 1, 4] -> [3, 4] with element order preserved.
+        let data: Vec<f64> = (0..12).map(|x| x as f64).collect();
+        let tensor = DenseND::<f64>::from_vec(data.clone(), &[3, 1, 4]).unwrap();
+        let squeezed = tensor.squeeze();
+        assert_eq!(squeezed.shape(), &[3, 4]);
+        assert_eq!(squeezed.to_vec(), data);
+    }
+
+    #[test]
+    fn test_squeeze_multiple_axes() {
+        let tensor = DenseND::<f64>::zeros(&[1, 2, 1, 3, 1]);
+        let squeezed = tensor.squeeze();
+        assert_eq!(squeezed.shape(), &[2, 3]);
+        assert_eq!(squeezed.rank(), 2);
+    }
+
+    #[test]
+    fn test_squeeze_to_scalar() {
+        // All axes of size 1 collapse to a rank-0 tensor with 1 element.
+        let tensor = DenseND::<f64>::from_elem(&[1, 1, 1], 42.0);
+        let squeezed = tensor.squeeze();
+        assert_eq!(squeezed.shape(), &[] as &[usize]);
+        assert_eq!(squeezed.rank(), 0);
+        assert_eq!(squeezed.len(), 1);
+        let iter_val = *squeezed.iter().next().expect("scalar has one element");
+        assert_eq!(iter_val, 42.0);
+    }
+
+    #[test]
+    fn test_squeeze_preserves_data_values() {
+        let src = array![[[1.0_f64, 2.0, 3.0]]]; // shape [1, 1, 3]
+        let tensor = DenseND::from_array(src.into_dyn());
+        let squeezed = tensor.squeeze();
+        assert_eq!(squeezed.shape(), &[3]);
+        assert_eq!(squeezed.to_vec(), vec![1.0, 2.0, 3.0]);
+    }
+
+    // -- squeeze_axis ---------------------------------------------------
+
+    #[test]
+    fn test_squeeze_axis_success() {
+        let data: Vec<f64> = (0..12).map(|x| x as f64).collect();
+        let tensor = DenseND::<f64>::from_vec(data.clone(), &[3, 1, 4]).unwrap();
+        let squeezed = tensor.squeeze_axis(1).unwrap();
+        assert_eq!(squeezed.shape(), &[3, 4]);
+        assert_eq!(squeezed.to_vec(), data);
+    }
+
+    #[test]
+    fn test_squeeze_axis_out_of_bounds() {
+        let tensor = DenseND::<f64>::zeros(&[2, 1, 3]);
+        let err = tensor.squeeze_axis(3).expect_err("axis out of bounds");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("out of bounds"),
+            "expected OOB error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_squeeze_axis_not_size_one() {
+        let tensor = DenseND::<f64>::zeros(&[2, 3, 4]);
+        let err = tensor.squeeze_axis(1).expect_err("axis not size 1");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("expected size 1"),
+            "expected size-1 error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_squeeze_axis_rejects_rank_equal_index() {
+        // axis == rank() is out of bounds for squeeze_axis.
+        let tensor = DenseND::<f64>::zeros(&[1, 1]);
+        assert!(tensor.squeeze_axis(2).is_err());
+    }
+
+    // -- squeeze_axes ---------------------------------------------------
+
+    #[test]
+    fn test_squeeze_axes_multiple() {
+        let tensor = DenseND::<f64>::from_elem(&[1, 3, 1, 5], 7.0);
+        let squeezed = tensor.squeeze_axes(&[0, 2]).unwrap();
+        assert_eq!(squeezed.shape(), &[3, 5]);
+        assert_eq!(squeezed.rank(), 2);
+        // Data values preserved.
+        assert!(squeezed.iter().all(|&v| v == 7.0));
+    }
+
+    #[test]
+    fn test_squeeze_axes_unordered_input() {
+        let tensor = DenseND::<f64>::zeros(&[1, 2, 1, 3, 1]);
+        // Pass indices out of order; function must handle internally.
+        let squeezed = tensor.squeeze_axes(&[4, 0, 2]).unwrap();
+        assert_eq!(squeezed.shape(), &[2, 3]);
+    }
+
+    #[test]
+    fn test_squeeze_axes_empty_is_noop() {
+        let tensor = DenseND::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let squeezed = tensor.squeeze_axes(&[]).unwrap();
+        assert_eq!(squeezed.shape(), &[2, 2]);
+        assert_eq!(squeezed.to_vec(), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_squeeze_axes_rejects_non_singleton() {
+        let tensor = DenseND::<f64>::zeros(&[1, 2, 1]);
+        assert!(tensor.squeeze_axes(&[0, 1]).is_err());
+    }
+
+    #[test]
+    fn test_squeeze_axes_rejects_duplicate() {
+        let tensor = DenseND::<f64>::zeros(&[1, 2, 1]);
+        let err = tensor
+            .squeeze_axes(&[0, 0])
+            .expect_err("duplicate axis must error");
+        let msg = format!("{err}");
+        assert!(msg.contains("duplicate"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_squeeze_axes_rejects_out_of_bounds() {
+        let tensor = DenseND::<f64>::zeros(&[1, 2, 1]);
+        assert!(tensor.squeeze_axes(&[5]).is_err());
+    }
+
+    // -- unsqueeze ------------------------------------------------------
+
+    #[test]
+    fn test_unsqueeze_at_front_preserves_data() {
+        let data = vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let tensor = DenseND::<f64>::from_vec(data.clone(), &[2, 3]).unwrap();
+        let expanded = tensor.unsqueeze(0).unwrap();
+        assert_eq!(expanded.shape(), &[1, 2, 3]);
+        assert_eq!(expanded.to_vec(), data);
+    }
+
+    #[test]
+    fn test_unsqueeze_at_end_equals_rank() {
+        // Inserting at `rank()` appends a trailing size-1 axis.
+        let tensor = DenseND::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let expanded = tensor.unsqueeze(2).unwrap();
+        assert_eq!(expanded.shape(), &[2, 2, 1]);
+        assert_eq!(expanded.to_vec(), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_unsqueeze_out_of_bounds() {
+        let tensor = DenseND::<f64>::zeros(&[2, 3]);
+        // axis > rank() is invalid.
+        let err = tensor
+            .unsqueeze(3)
+            .expect_err("axis beyond rank must error");
+        let msg = format!("{err}");
+        assert!(msg.contains("out of bounds"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_unsqueeze_on_scalar_creates_1d() {
+        let scalar = DenseND::<f64>::from_elem(&[], 9.0);
+        let expanded = scalar.unsqueeze(0).unwrap();
+        assert_eq!(expanded.shape(), &[1]);
+        assert_eq!(expanded[&[0]], 9.0);
+    }
+
+    // -- unsqueeze_axes -------------------------------------------------
+
+    #[test]
+    fn test_unsqueeze_axes_multiple_positions() {
+        let tensor = DenseND::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        // Final rank = 2 + 2 = 4. Insert size-1 axes at positions 0 and 2.
+        let expanded = tensor.unsqueeze_axes(&[0, 2]).unwrap();
+        assert_eq!(expanded.shape(), &[1, 2, 1, 3]);
+        // Data values unchanged.
+        assert_eq!(expanded.to_vec(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_unsqueeze_axes_unsorted_input() {
+        let tensor = DenseND::<f64>::zeros(&[2, 3]);
+        // Same as [0, 2] since the implementation sorts internally.
+        let expanded = tensor.unsqueeze_axes(&[2, 0]).unwrap();
+        assert_eq!(expanded.shape(), &[1, 2, 1, 3]);
+    }
+
+    #[test]
+    fn test_unsqueeze_axes_empty_is_noop() {
+        let tensor = DenseND::<f64>::zeros(&[2, 3]);
+        let expanded = tensor.unsqueeze_axes(&[]).unwrap();
+        assert_eq!(expanded.shape(), &[2, 3]);
+    }
+
+    #[test]
+    fn test_unsqueeze_axes_rejects_out_of_bounds() {
+        let tensor = DenseND::<f64>::zeros(&[2, 3]);
+        // final_rank = 3, so axis 5 is invalid.
+        assert!(tensor.unsqueeze_axes(&[5]).is_err());
+    }
+
+    #[test]
+    fn test_unsqueeze_axes_rejects_duplicate_positions() {
+        let tensor = DenseND::<f64>::zeros(&[2, 3]);
+        let err = tensor
+            .unsqueeze_axes(&[1, 1])
+            .expect_err("duplicate positions must error");
+        let msg = format!("{err}");
+        assert!(msg.contains("duplicate"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_unsqueeze_axes_append_at_final_boundary() {
+        // Valid boundary: largest index is final_rank - 1. Here final_rank = 3,
+        // so position 2 appends the new size-1 axis at the end.
+        let tensor = DenseND::<f64>::zeros(&[2, 3]);
+        let expanded = tensor.unsqueeze_axes(&[2]).unwrap();
+        assert_eq!(expanded.shape(), &[2, 3, 1]);
+        // And index >= final_rank is rejected.
+        let tensor2 = DenseND::<f64>::zeros(&[2, 3]);
+        assert!(tensor2.unsqueeze_axes(&[3]).is_err());
+    }
+
+    // -- round-trips ----------------------------------------------------
+
+    #[test]
+    fn test_unsqueeze_then_squeeze_returns_original_shape() {
+        let original =
+            DenseND::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let expanded = original.unsqueeze(1).unwrap();
+        assert_eq!(expanded.shape(), &[2, 1, 3]);
+        let restored = expanded.squeeze();
+        assert_eq!(restored.shape(), original.shape());
+        assert_eq!(restored.to_vec(), original.to_vec());
+    }
+
+    #[test]
+    fn test_unsqueeze_axes_then_squeeze_axes_roundtrip() {
+        let original =
+            DenseND::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let expanded = original.unsqueeze_axes(&[0, 2]).unwrap();
+        assert_eq!(expanded.shape(), &[1, 2, 1, 3]);
+        let restored = expanded.squeeze_axes(&[0, 2]).unwrap();
+        assert_eq!(restored.shape(), original.shape());
+        assert_eq!(restored.to_vec(), original.to_vec());
     }
 }

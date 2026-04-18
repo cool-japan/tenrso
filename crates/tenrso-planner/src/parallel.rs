@@ -134,7 +134,9 @@ impl EnsemblePlanner {
 
             let handle = thread::spawn(move || {
                 let plan_result = run_planner(&planner_name, &spec_str, &shapes, &hints);
-                let mut results_lock = results.lock().unwrap();
+                // If the mutex is poisoned (a worker panicked while holding the lock)
+                // we still want to record this worker's result, so recover the guard.
+                let mut results_lock = results.lock().unwrap_or_else(|poison| poison.into_inner());
                 results_lock.push((planner_name, plan_result));
             });
 
@@ -152,7 +154,7 @@ impl EnsemblePlanner {
         let results = Arc::try_unwrap(results)
             .map_err(|_| anyhow::anyhow!("Failed to unwrap results"))?
             .into_inner()
-            .unwrap();
+            .map_err(|e| anyhow::anyhow!("EnsemblePlanner: results mutex poisoned: {}", e))?;
 
         // Find best plan
         self.select_best_plan(results)

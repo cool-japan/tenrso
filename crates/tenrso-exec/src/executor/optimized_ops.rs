@@ -265,7 +265,10 @@ where
             // Small tensor - use simple mean
             let total_elements = input.view().len();
             let sum: T = input.view().iter().cloned().sum();
-            let mean = sum / T::from_usize(total_elements).unwrap();
+            let divisor = T::from_usize(total_elements).ok_or_else(|| {
+                anyhow::anyhow!("optimized_ops mean: cannot convert element count to T")
+            })?;
+            let mean = sum / divisor;
             let result = scirs2_core::ndarray_ext::Array::from_elem(
                 scirs2_core::ndarray_ext::IxDyn(&[]),
                 mean,
