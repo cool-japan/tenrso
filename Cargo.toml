@@ -55,7 +55,7 @@ dashmap = "6.1.0"
 tonic = { version = "0.14.5", features = ["transport"] }
 tonic-build = "0.14.5"
 prost = "0.14.3"
-oxicode = { version = "0.2", features = ["serde"] }
+oxicode = { version = "0.2.2", features = ["serde"] }
 bytes = "1.11.1"
 futures = "0.3.32"
 crc32fast = "1.5.0"
@@ -63,9 +63,9 @@ xxhash-rust = { version = "0.8.15", features = ["xxh64"] }
 blake3 = "1.8.4"
 
 # SciRS2 ecosystem (MANDATORY - see SCIRS2_INTEGRATION_POLICY.md)
-scirs2-core = { version = "0.4.2", features = ["array", "random", "parallel"] }
-scirs2-linalg = { version = "0.4.2" }
-scirs2-fft = { version = "0.4.2" }
+scirs2-core = { version = "0.4.3", features = ["array", "random", "parallel"] }
+scirs2-linalg = { version = "0.4.3" }
+scirs2-fft = { version = "0.4.3" }
 
 # TenRSo internal crates
 tenrso = { version = "0.1.0", path = "crates/tenrso" }
