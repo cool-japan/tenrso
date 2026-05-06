@@ -255,24 +255,54 @@ impl TensorlogicAdapter {
     ///
     /// # Note
     ///
-    /// This is a placeholder. Actual implementation pending Tensorlogic API.
+    /// Requires the `tensorlogic` feature flag. Enable with:
+    /// `cargo build --features tensorlogic`
+    ///
+    /// The tensorlogic crate API is not yet available in this workspace;
+    /// enabling the feature gate marks the migration path once the dep lands.
     pub fn to_tensorlogic<T>(&self, _tensor: &DenseND<T>) -> Result<()>
     where
         T: Float + 'static,
     {
-        anyhow::bail!("Tensorlogic integration not yet implemented")
+        #[cfg(feature = "tensorlogic")]
+        anyhow::bail!(
+            "Tensorlogic integration: tensorlogic crate API not yet available; \
+             implementation pending — the 'tensorlogic' feature gate is present \
+             but the crate is not yet wired into the workspace"
+        );
+
+        #[cfg(not(feature = "tensorlogic"))]
+        anyhow::bail!(
+            "Tensorlogic integration requires the 'tensorlogic' feature: \
+             rebuild with --features tensorlogic"
+        );
     }
 
     /// Convert Tensorlogic tensor to TenRSo tensor
     ///
     /// # Note
     ///
-    /// This is a placeholder. Actual implementation pending Tensorlogic API.
+    /// Requires the `tensorlogic` feature flag. Enable with:
+    /// `cargo build --features tensorlogic`
+    ///
+    /// The tensorlogic crate API is not yet available in this workspace;
+    /// enabling the feature gate marks the migration path once the dep lands.
     pub fn from_tensorlogic<T>(&self) -> Result<DenseND<T>>
     where
         T: Float + 'static,
     {
-        anyhow::bail!("Tensorlogic integration not yet implemented")
+        #[cfg(feature = "tensorlogic")]
+        anyhow::bail!(
+            "Tensorlogic integration: tensorlogic crate API not yet available; \
+             implementation pending — the 'tensorlogic' feature gate is present \
+             but the crate is not yet wired into the workspace"
+        );
+
+        #[cfg(not(feature = "tensorlogic"))]
+        anyhow::bail!(
+            "Tensorlogic integration requires the 'tensorlogic' feature: \
+             rebuild with --features tensorlogic"
+        );
     }
 }
 

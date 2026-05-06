@@ -20,6 +20,14 @@ thiserror.workspace = true
 rayon.workspace = true
 num-traits = "0.2"
 
+[features]
+default = []
+# Feature gate for Tensorlogic integration.
+# When enabled, the TensorlogicAdapter methods become available once
+# the tensorlogic crate API is wired in. For now this gate marks the
+# migration path; enabling it returns a more-specific error message.
+tensorlogic = []
+
 [dev-dependencies]
 proptest.workspace = true
 criterion.workspace = true

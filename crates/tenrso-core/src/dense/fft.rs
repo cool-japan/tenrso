@@ -77,36 +77,6 @@ impl DenseND<f64> {
         DenseND::from_vec(spectrum, self.shape()).context("Failed to reshape FFT result")
     }
 
-    /// Compute the inverse 1-dimensional Fourier Transform.
-    ///
-    /// This is the inverse operation of [`fft`](Self::fft).
-    ///
-    /// # Complexity
-    ///
-    /// O(n log n) where n is the total number of elements.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # #[cfg(feature = "fft")]
-    /// # {
-    /// use tenrso_core::DenseND;
-    ///
-    /// let signal = DenseND::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
-    /// let spectrum = signal.fft().unwrap();
-    /// let recovered = spectrum.ifft().unwrap();
-    ///
-    /// // Check roundtrip accuracy
-    /// for i in 0..signal.len() {
-    ///     assert!((recovered[&[i]].re - signal[&[i]]).abs() < 1e-10);
-    /// }
-    /// # }
-    /// ```
-    #[cfg(feature = "fft")]
-    pub fn ifft(&self) -> Result<DenseND<Complex64>> {
-        anyhow::bail!("IFFT for complex tensors not yet implemented - input must be Complex64")
-    }
-
     /// Compute the real-valued FFT (optimized for real inputs).
     ///
     /// This function is optimized for real-valued inputs and returns only the positive

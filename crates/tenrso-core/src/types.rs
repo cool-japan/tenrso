@@ -585,10 +585,28 @@ where
         match &self.repr {
             TensorRepr::Dense(d) => Ok(d.clone()),
             TensorRepr::Sparse(_) => {
-                anyhow::bail!("Sparse to dense conversion not yet implemented")
+                // Note: TensorRepr::Sparse holds a SparseND<T>, which is a placeholder
+                // type in tenrso-core with no storage fields. Real sparse tensors are
+                // implemented in the tenrso-sparse crate (CooTensor, CsrTensor, etc.)
+                // and are not yet wired into TensorHandle. There is no constructor
+                // that produces TensorRepr::Sparse, so this arm is currently unreachable.
+                anyhow::bail!(
+                    "TensorRepr::Sparse is a placeholder variant in tenrso-core; \
+                     real sparse tensors live in tenrso-sparse (CooTensor, CsrTensor, etc.) \
+                     and are not yet wired into TensorHandle"
+                )
             }
             TensorRepr::LowRank(_) => {
-                anyhow::bail!("Low-rank to dense conversion not yet implemented")
+                // Note: TensorRepr::LowRank holds a LowRank<T>, which is a placeholder
+                // type in tenrso-core with no storage fields. Real low-rank decompositions
+                // are implemented in the tenrso-decomp crate (CpTensor, TuckerTensor, etc.)
+                // and are not yet wired into TensorHandle. There is no constructor
+                // that produces TensorRepr::LowRank, so this arm is currently unreachable.
+                anyhow::bail!(
+                    "TensorRepr::LowRank is a placeholder variant in tenrso-core; \
+                     real low-rank decompositions live in tenrso-decomp (CpTensor, TuckerTensor, etc.) \
+                     and are not yet wired into TensorHandle"
+                )
             }
         }
     }
