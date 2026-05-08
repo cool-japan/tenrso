@@ -297,6 +297,37 @@ impl DistributedRegistry {
         placement
     }
 
+    /// Get all chunk IDs whose primary (first) location is on the given node.
+    ///
+    /// This must be called **before** `unregister_node` to capture which chunks
+    /// were assigned to a node that is about to be removed.
+    pub fn chunks_on_node(&self, node_id: NodeId) -> Vec<String> {
+        let chunks = self.chunks.read();
+        chunks
+            .iter()
+            .filter(|(_, placement)| {
+                placement.locations.iter().any(|loc| loc.node_id == node_id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Return a snapshot of all currently registered chunk placements.
+    pub fn all_chunk_placements(&self) -> Vec<ChunkPlacement> {
+        let chunks = self.chunks.read();
+        chunks.values().cloned().collect()
+    }
+
+    /// Add a new replica location for an existing chunk.
+    ///
+    /// If the chunk is not registered this is a no-op.
+    pub fn add_chunk_location(&self, chunk_id: &str, location: ChunkLocation) {
+        let mut chunks = self.chunks.write();
+        if let Some(placement) = chunks.get_mut(chunk_id) {
+            placement.locations.push(location);
+        }
+    }
+
     /// Get current statistics.
     pub fn stats(&self) -> RegistryStats {
         self.stats.read().clone()

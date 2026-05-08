@@ -16,22 +16,17 @@ use serde::{Deserialize, Serialize};
 use std::hash::Hasher;
 
 /// Checksum algorithm selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ChecksumAlgorithm {
     /// No checksumming (fastest, no validation)
     None,
     /// CRC32 (fast, good for detecting errors)
     Crc32,
     /// XXHash64 (very fast, good distribution)
+    #[default]
     XxHash64,
     /// Blake3 (cryptographically secure, slower)
     Blake3,
-}
-
-impl Default for ChecksumAlgorithm {
-    fn default() -> Self {
-        Self::XxHash64
-    }
 }
 
 /// Chunk metadata with integrity information.
@@ -136,20 +131,15 @@ pub fn compute_checksum(algorithm: ChecksumAlgorithm, data: &[u8]) -> u64 {
 }
 
 /// Validation policy for chunk loading.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ValidationPolicy {
     /// Always validate checksums
+    #[default]
     Strict,
     /// Validate only if metadata is present
     Opportunistic,
     /// Never validate (fastest, least safe)
     None,
-}
-
-impl Default for ValidationPolicy {
-    fn default() -> Self {
-        Self::Strict
-    }
 }
 
 /// Data integrity checker for managing chunk validation.

@@ -45,7 +45,7 @@ pub enum DataPattern {
 }
 
 /// Codec selection policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SelectionPolicy {
     /// Maximize compression ratio (slower, smaller)
     MaxCompression,
@@ -54,13 +54,8 @@ pub enum SelectionPolicy {
     /// Balance compression and speed
     Balanced,
     /// Adaptive based on data characteristics
+    #[default]
     Adaptive,
-}
-
-impl Default for SelectionPolicy {
-    fn default() -> Self {
-        Self::Adaptive
-    }
 }
 
 /// Configuration for compression auto-selection.

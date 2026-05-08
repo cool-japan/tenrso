@@ -33,9 +33,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// NUMA allocation policy
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum NumaPolicy {
     /// Allocate on the same NUMA node as the calling thread (default)
+    #[default]
     Local,
 
     /// Interleave allocations across all NUMA nodes
@@ -52,12 +53,6 @@ pub enum NumaPolicy {
 
     /// No specific NUMA policy (system default)
     Default,
-}
-
-impl Default for NumaPolicy {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 /// NUMA node information

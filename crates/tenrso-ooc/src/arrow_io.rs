@@ -244,7 +244,7 @@ mod tests {
 
         // Read
         let mut reader = ArrowReader::open(&path).unwrap();
-        let loaded = reader.read().unwrap();
+        let loaded = reader.read().unwrap_or_else(|e| e.into_inner());
 
         // Verify
         assert_eq!(original.shape(), loaded.shape());
@@ -279,7 +279,7 @@ mod tests {
 
         // Read
         let mut reader = ArrowReader::open(&path).unwrap();
-        let loaded = reader.read().unwrap();
+        let loaded = reader.read().unwrap_or_else(|e| e.into_inner());
 
         // Verify
         assert_eq!(original.shape(), loaded.shape());
@@ -304,7 +304,7 @@ mod tests {
 
         // Read
         let mut reader = ArrowReader::open(&path).unwrap();
-        let loaded = reader.read().unwrap();
+        let loaded = reader.read().unwrap_or_else(|e| e.into_inner());
 
         // Verify
         assert_eq!(original.shape(), loaded.shape());

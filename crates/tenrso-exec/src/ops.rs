@@ -314,14 +314,114 @@ where
         return DenseND::from_vec(output, output_shape);
     }
 
-    // TODO: Implement full general einsum
-    // For now, return error for unsupported cases
-    Err(anyhow!(
-        "General einsum not yet fully implemented for spec: {},{},->{}",
-        spec_a,
-        spec_b,
-        spec_out
-    ))
+    // General index-based einsum contraction.
+    //
+    // Algorithm:
+    //  1. Build a map from each index character to its size.
+    //  2. Identify contraction indices (appear in inputs but not output).
+    //  3. Enumerate all output index combinations (flat loop decoded via
+    //     mixed-radix arithmetic).
+    //  4. For each output position: sum over all contraction index combinations
+    //     the product of corresponding input elements.
+    //  5. Write result to output tensor.
+
+    // Step 1: map each index char to its dimension size.
+    let mut dim_for: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
+    for (i, c) in spec_a.chars().enumerate() {
+        dim_for.entry(c).or_insert(a.shape()[i]);
+    }
+    for (i, c) in spec_b.chars().enumerate() {
+        dim_for.entry(c).or_insert(b.shape()[i]);
+    }
+
+    // Step 2: identify contraction indices (in inputs, absent from output).
+    let contracted: Vec<char> = a_chars
+        .iter()
+        .chain(b_chars.iter())
+        .copied()
+        .filter(|c| !out_chars.contains(c))
+        .collect::<std::collections::HashSet<char>>()
+        .into_iter()
+        .collect();
+
+    // Build sorted contraction index list for deterministic iteration.
+    let mut contracted_sorted = contracted.clone();
+    contracted_sorted.sort_unstable();
+
+    // Sizes for contraction dimensions.
+    let contracted_sizes: Vec<usize> = contracted_sorted
+        .iter()
+        .map(|c| *dim_for.get(c).unwrap_or(&1))
+        .collect();
+
+    // Sizes for output dimensions.
+    let out_sizes: Vec<usize> = out_chars
+        .iter()
+        .map(|c| *dim_for.get(c).unwrap_or(&1))
+        .collect();
+
+    let output_total: usize = out_sizes.iter().product::<usize>().max(1);
+    let contracted_total: usize = contracted_sizes.iter().product::<usize>().max(1);
+
+    let mut output = vec![T::default(); output_total];
+
+    let a_view = a.view();
+    let b_view = b.view();
+
+    // Helper: decode a flat index into a multi-dimensional index given sizes.
+    let decode_flat = |flat: usize, sizes: &[usize]| -> Vec<usize> {
+        let mut idx = vec![0usize; sizes.len()];
+        let mut remaining = flat;
+        for (d, &sz) in sizes.iter().enumerate().rev() {
+            idx[d] = remaining % sz;
+            remaining /= sz;
+        }
+        idx
+    };
+
+    // Iterate over all output positions.
+    for (out_flat, out_elem) in output.iter_mut().enumerate().take(output_total) {
+        let out_idx = decode_flat(out_flat, &out_sizes);
+
+        // Build a mapping from char -> position value for output indices.
+        let mut char_val: std::collections::HashMap<char, usize> =
+            out_chars.iter().copied().zip(out_idx.iter().copied()).collect();
+
+        let mut acc = T::default();
+
+        // Iterate over all contraction index combinations.
+        for con_flat in 0..contracted_total {
+            let con_idx = decode_flat(con_flat, &contracted_sizes);
+
+            // Extend char_val with contraction indices.
+            for (c, &v) in contracted_sorted.iter().zip(con_idx.iter()) {
+                char_val.insert(*c, v);
+            }
+
+            // Build a_index and b_index from char_val.
+            let a_index: Vec<usize> = spec_a
+                .chars()
+                .map(|c| *char_val.get(&c).unwrap_or(&0))
+                .collect();
+            let b_index: Vec<usize> = spec_b
+                .chars()
+                .map(|c| *char_val.get(&c).unwrap_or(&0))
+                .collect();
+
+            let a_val = a_view[a_index.as_slice()].clone();
+            let b_val = b_view[b_index.as_slice()].clone();
+            acc += a_val * b_val;
+        }
+
+        *out_elem = acc;
+    }
+
+    // Handle scalar output (empty spec_out) — shape is [].
+    if spec_out.is_empty() {
+        DenseND::from_vec(output, &[])
+    } else {
+        DenseND::from_vec(output, output_shape)
+    }
 }
 
 #[cfg(test)]
@@ -372,5 +472,85 @@ mod tests {
         // C[0,0] = 1*7 + 2*9 + 3*11 = 7 + 18 + 33 = 58
         let diff: f64 = result_view[[0, 0]] - 58.0;
         assert!(diff.abs() < 1e-10);
+    }
+
+    /// Test the general einsum fallback for a 3D × 2D contraction: "ijk,kl->ijl".
+    ///
+    /// a[i,j,k] × b[k,l]  =>  c[i,j,l] = Σ_k a[i,j,k] * b[k,l]
+    ///
+    /// With shapes a[2,2,2] and b[2,2] we can verify every element by hand.
+    #[test]
+    fn test_general_einsum_3d_times_2d() {
+        // a[2,2,2]: row-major values 1..8
+        let a = DenseND::from_vec(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            &[2, 2, 2],
+        )
+        .unwrap();
+        // b[2,2]: [[1,0],[0,1]] (identity — result should equal a's k-slices unchanged)
+        let b = DenseND::from_vec(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
+
+        let spec = EinsumSpec::parse("ijk,kl->ijl").unwrap();
+        let c = execute_dense_contraction(&spec, &a, &b).unwrap();
+
+        assert_eq!(c.shape(), &[2, 2, 2]);
+
+        // With identity b the result should equal a.
+        let a_view = a.view();
+        let c_view = c.view();
+        for i in 0..2 {
+            for j in 0..2 {
+                for l in 0..2 {
+                    let diff: f64 = c_view[[i, j, l]] - a_view[[i, j, l]];
+                    assert!(
+                        diff.abs() < 1e-10,
+                        "c[{i},{j},{l}] = {} != {} (expected a[{i},{j},{l}])",
+                        c_view[[i, j, l]],
+                        a_view[[i, j, l]]
+                    );
+                }
+            }
+        }
+    }
+
+    /// Test the general einsum fallback for contraction with a non-trivial b.
+    ///
+    /// "ijk,jl->ikl": contract over j.  a[2,2,2], b[2,3] -> c[2,2,3]
+    ///
+    /// c[i,k,l] = Σ_j a[i,j,k] * b[j,l]
+    #[test]
+    fn test_general_einsum_middle_contraction() {
+        // a[2,2,2] row-major: [[[ 1, 2],[ 3, 4]], [[ 5, 6],[ 7, 8]]]
+        let a = DenseND::from_vec(
+            vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            &[2, 2, 2],
+        )
+        .unwrap();
+        // b[2,3]: [[1,2,3],[4,5,6]]
+        let b =
+            DenseND::from_vec(vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+
+        let spec = EinsumSpec::parse("ijk,jl->ikl").unwrap();
+        let c = execute_dense_contraction(&spec, &a, &b).unwrap();
+
+        assert_eq!(c.shape(), &[2, 2, 3]);
+
+        // Compute reference by naive triple loop.
+        let a_view = a.view();
+        let b_view = b.view();
+        let c_view = c.view();
+        for i in 0..2usize {
+            for k in 0..2usize {
+                for l in 0..3usize {
+                    let expected: f64 = (0..2).map(|j| a_view[[i, j, k]] * b_view[[j, l]]).sum();
+                    let diff = (c_view[[i, k, l]] - expected).abs();
+                    assert!(
+                        diff < 1e-10,
+                        "c[{i},{k},{l}] = {} != {expected}",
+                        c_view[[i, k, l]]
+                    );
+                }
+            }
+        }
     }
 }

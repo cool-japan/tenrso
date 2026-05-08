@@ -3,7 +3,7 @@
 //! Provides node failure detection, chunk replication, and automatic recovery.
 
 use super::network::NetworkClient;
-use super::protocol::{HeartbeatRequest, NodeId};
+use super::protocol::{ChunkLocation, HeartbeatRequest, NodeId};
 use super::registry::DistributedRegistry;
 use anyhow::{anyhow, Result};
 use parking_lot::RwLock;
@@ -306,16 +306,130 @@ impl FaultToleranceManager {
 
     /// Handle a node failure.
     async fn handle_node_failure(&self, node_id: NodeId) -> Result<()> {
-        // Unregister node from registry
+        // Determine the target replication factor from policy.
+        let target_replicas: usize = match self.config.replication_policy {
+            ReplicationPolicy::None => 0,
+            ReplicationPolicy::Fixed(n) => n,
+            ReplicationPolicy::Dynamic { min, .. } => min,
+        };
+
+        // If auto-recovery is enabled, capture affected chunks BEFORE
+        // unregistering the node (unregister_node removes the node's locations).
+        let affected_chunks: Vec<String> = if self.config.auto_recovery && target_replicas > 0 {
+            self.registry.chunks_on_node(node_id)
+        } else {
+            Vec::new()
+        };
+
+        // Unregister node from registry (strips its chunk locations).
         self.registry.unregister_node(node_id)?;
 
-        // If auto-recovery is enabled, trigger recovery
-        if self.config.auto_recovery {
-            // TODO: Implement chunk re-replication
-            // This would involve:
-            // 1. Finding all chunks hosted on failed node
-            // 2. Checking if they have other replicas
-            // 3. Creating new replicas on healthy nodes if needed
+        // Trigger chunk re-replication for affected chunks.
+        if self.config.auto_recovery && target_replicas > 0 && !affected_chunks.is_empty() {
+            let healthy = self.healthy_nodes();
+
+            eprintln!(
+                "[fault_tolerance] Node {} failed; {} chunks affected, {} healthy nodes available",
+                node_id,
+                affected_chunks.len(),
+                healthy.len(),
+            );
+
+            if healthy.is_empty() {
+                eprintln!(
+                    "[fault_tolerance] No healthy nodes available for re-replication; {} chunks are under-replicated",
+                    affected_chunks.len(),
+                );
+                self.stats
+                    .recovery_failures
+                    .fetch_add(affected_chunks.len() as u64, Ordering::Relaxed);
+                return Ok(());
+            }
+
+            let mut recovered: u64 = 0;
+            let mut failed: u64 = 0;
+
+            for chunk_id in &affected_chunks {
+                // Re-read current placement (after unregister stripped the failed node).
+                let placement = match self.registry.get_chunk_placement(chunk_id) {
+                    Some(p) => p,
+                    None => {
+                        // Chunk had no other replicas and was dropped from registry.
+                        eprintln!(
+                            "[fault_tolerance] Chunk {} lost: no surviving replicas",
+                            chunk_id
+                        );
+                        failed += 1;
+                        continue;
+                    }
+                };
+
+                let current_replicas = placement.locations.len();
+                let needed = target_replicas.saturating_sub(current_replicas);
+
+                if needed == 0 {
+                    // Already sufficiently replicated.
+                    continue;
+                }
+
+                // Collect node IDs that already hold this chunk.
+                let existing_nodes: std::collections::HashSet<NodeId> =
+                    placement.locations.iter().map(|l| l.node_id).collect();
+
+                // Find healthy nodes that do NOT already hold this chunk.
+                let candidates: Vec<NodeId> = healthy
+                    .iter()
+                    .copied()
+                    .filter(|n| !existing_nodes.contains(n))
+                    .take(needed)
+                    .collect();
+
+                if candidates.is_empty() {
+                    eprintln!(
+                        "[fault_tolerance] Chunk {}: need {} more replicas but no suitable candidates",
+                        chunk_id, needed
+                    );
+                    failed += 1;
+                    continue;
+                }
+
+                for dest_node in &candidates {
+                    // Register a new synthetic location on the destination node.
+                    // The actual data transfer is out of scope for the registry layer;
+                    // an external scheduler or the caller is expected to act on the
+                    // updated placement information.
+                    let new_location = ChunkLocation {
+                        node_id: *dest_node,
+                        // Mirror the path convention from the first surviving replica.
+                        path: placement
+                            .locations
+                            .first()
+                            .map(|l| l.path.clone())
+                            .unwrap_or_else(|| format!("/chunks/{}", chunk_id)),
+                        in_memory: false,
+                    };
+
+                    self.registry.add_chunk_location(chunk_id, new_location);
+
+                    eprintln!(
+                        "[fault_tolerance] Chunk {} queued for re-replication to node {}",
+                        chunk_id, dest_node
+                    );
+                    recovered += 1;
+                }
+            }
+
+            self.stats
+                .chunks_recovered
+                .fetch_add(recovered, Ordering::Relaxed);
+            self.stats
+                .recovery_failures
+                .fetch_add(failed, Ordering::Relaxed);
+
+            eprintln!(
+                "[fault_tolerance] Re-replication complete: {} chunks queued, {} unrecoverable",
+                recovered, failed
+            );
         }
 
         Ok(())

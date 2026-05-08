@@ -1,15 +1,59 @@
 //! Execution hints and configuration
 
-/// Mask specification (placeholder)
+/// Mask specification — a flat boolean mask over tensor elements.
+///
+/// The mask is stored as a flat `Vec<bool>` in row-major (C) order together
+/// with the matching shape so that callers can reconstruct the multi-dimensional
+/// structure without pulling in a tensor dependency here.
 #[derive(Clone, Debug)]
 pub struct MaskPack {
-    // TODO: Implement mask storage
+    /// Boolean mask values in row-major order.
+    pub mask: Option<Vec<bool>>,
+    /// Shape of the mask tensor (same rank as the target tensor).
+    pub shape: Vec<usize>,
 }
 
-/// Subset specification (placeholder)
+impl MaskPack {
+    /// Create a new mask pack.
+    pub fn new(mask: Vec<bool>, shape: Vec<usize>) -> Self {
+        Self {
+            mask: Some(mask),
+            shape,
+        }
+    }
+
+    /// Create an empty (no-op) mask pack.
+    pub fn empty() -> Self {
+        Self {
+            mask: None,
+            shape: Vec::new(),
+        }
+    }
+}
+
+/// Subset specification — a list of flat indices to select from a tensor.
+///
+/// Indices are stored in the order they should be processed; callers are
+/// responsible for interpreting them relative to a specific axis or
+/// flattened layout.
 #[derive(Clone, Debug)]
 pub struct SubsetSpec {
-    // TODO: Implement subset/index-list storage
+    /// Flat indices selecting a subset of tensor elements (row-major order).
+    pub indices: Option<Vec<usize>>,
+}
+
+impl SubsetSpec {
+    /// Create a new subset specification from a list of indices.
+    pub fn new(indices: Vec<usize>) -> Self {
+        Self {
+            indices: Some(indices),
+        }
+    }
+
+    /// Create an empty (no-op) subset specification.
+    pub fn empty() -> Self {
+        Self { indices: None }
+    }
 }
 
 /// Execution hints for controlling tensor operations
