@@ -112,7 +112,12 @@ pub fn power_iteration<T: Float>(
     } else {
         // Use a deterministic but non-constant initialization
         // to avoid accidentally starting with an eigenvector
-        (0..n).map(|i| T::from(i + 1).unwrap()).collect()
+        (0..n)
+            .map(|i| {
+                T::from(i + 1)
+                    .ok_or_else(|| SparseError::validation("cannot represent index as T"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
     };
 
     // Normalize x
@@ -148,7 +153,9 @@ pub fn power_iteration<T: Float>(
                 x,
                 EigensolverInfo {
                     iterations: iter + 1,
-                    residual: res_norm.to_f64().unwrap(),
+                    residual: res_norm
+                        .to_f64()
+                        .ok_or_else(|| SparseError::validation("cannot convert residual to f64"))?,
                     converged: true,
                 },
             ));
@@ -172,7 +179,9 @@ pub fn power_iteration<T: Float>(
         x,
         EigensolverInfo {
             iterations: max_iter,
-            residual: T::infinity().to_f64().unwrap(),
+            residual: T::infinity()
+                .to_f64()
+                .ok_or_else(|| SparseError::validation("cannot convert infinity to f64"))?,
             converged: false,
         },
     ))
@@ -229,7 +238,12 @@ pub fn inverse_power_iteration<T: Float>(
         x_init.to_vec()
     } else {
         // Use non-constant initialization
-        (0..n).map(|i| T::from(i + 1).unwrap()).collect()
+        (0..n)
+            .map(|i| {
+                T::from(i + 1)
+                    .ok_or_else(|| SparseError::validation("cannot represent index as T"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
     };
 
     // Normalize x
@@ -271,7 +285,9 @@ pub fn inverse_power_iteration<T: Float>(
                 x,
                 EigensolverInfo {
                     iterations: iter + 1,
-                    residual: res_norm.to_f64().unwrap(),
+                    residual: res_norm
+                        .to_f64()
+                        .ok_or_else(|| SparseError::validation("cannot convert residual to f64"))?,
                     converged: true,
                 },
             ));
@@ -295,7 +311,9 @@ pub fn inverse_power_iteration<T: Float>(
         x,
         EigensolverInfo {
             iterations: max_iter,
-            residual: T::infinity().to_f64().unwrap(),
+            residual: T::infinity()
+                .to_f64()
+                .ok_or_else(|| SparseError::validation("cannot convert infinity to f64"))?,
             converged: false,
         },
     ))
@@ -440,7 +458,9 @@ pub fn lanczos<T: Float>(
         eigenvectors,
         EigensolverInfo {
             iterations: k,
-            residual: tol.to_f64().unwrap(),
+            residual: tol
+                .to_f64()
+                .ok_or_else(|| SparseError::validation("cannot convert tolerance to f64"))?,
             converged,
         },
     ))

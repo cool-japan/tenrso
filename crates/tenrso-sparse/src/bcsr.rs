@@ -301,7 +301,8 @@ impl<T: Float> BcsrMatrix<T> {
                 let block_data = &self.blocks[block_start..block_start + block_size];
 
                 return Some(
-                    Array2::from_shape_vec(self.block_shape, block_data.to_vec()).unwrap(),
+                    Array2::from_shape_vec(self.block_shape, block_data.to_vec())
+                        .expect("block data length matches block shape by construction"),
                 );
             }
         }
@@ -437,7 +438,8 @@ impl<T: Float> BcsrMatrix<T> {
             }
         }
 
-        CsrMatrix::new(csr_row_ptr, csr_col_indices, csr_values, self.shape).unwrap()
+        CsrMatrix::new(csr_row_ptr, csr_col_indices, csr_values, self.shape)
+            .expect("CSR parameters built from valid BCSR are valid by construction")
     }
 
     /// Sparse matrix-vector multiply: y = A * x

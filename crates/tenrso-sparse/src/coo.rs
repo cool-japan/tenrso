@@ -312,8 +312,9 @@ impl<T: Float> CooTensor<T> {
             }
         }
 
-        // Safe to unwrap: we control the construction
-        Self::new(indices, values, shape).unwrap()
+        // Safe: indices and values are constructed from a valid dense array
+        Self::new(indices, values, shape)
+            .expect("indices and values constructed from valid dense array are always valid")
     }
 
     /// Deduplicate entries by summing values at the same coordinate

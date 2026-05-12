@@ -323,7 +323,8 @@ impl<T: Float> CscMatrix<T> {
         }
 
         let shape = vec![self.nrows(), self.ncols()];
-        CooTensor::new(indices, values, shape).unwrap()
+        CooTensor::new(indices, values, shape)
+            .expect("indices and values built from valid CSC are always valid")
     }
 
     /// Convert to CSR format (transpose storage)
@@ -331,14 +332,14 @@ impl<T: Float> CscMatrix<T> {
         // CSC is essentially the transpose of CSR
         // So CSC(A) -> CSR(A^T)
         let coo = self.to_coo();
-        CsrMatrix::from_coo(&coo).unwrap()
+        CsrMatrix::from_coo(&coo).expect("COO built from valid CSC produces valid CSR")
     }
 
     /// Convert from CSR format (transpose storage)
     pub fn from_csr(csr: &CsrMatrix<T>) -> Self {
         // CSR(A) -> CSC(A^T)
         let coo = csr.to_coo();
-        Self::from_coo(&coo).unwrap()
+        Self::from_coo(&coo).expect("COO built from valid CSR produces valid CSC")
     }
 
     /// Convert to dense matrix

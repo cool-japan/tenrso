@@ -275,7 +275,7 @@ pub fn amd<T: Float>(matrix: &CsrMatrix<T>) -> SparseResult<Vec<usize>> {
         let v = (0..n)
             .filter(|&i| !eliminated[i])
             .min_by_key(|&i| (degree[i], i))
-            .unwrap();
+            .expect("at least one non-eliminated vertex remains in each loop iteration");
 
         // Add all vertices in supervar to ordering
         for &u in &supervars[v] {

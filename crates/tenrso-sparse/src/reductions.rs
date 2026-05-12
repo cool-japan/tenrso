@@ -568,7 +568,7 @@ pub fn min_axis<T: Float + Clone>(tensor: &CooTensor<T>, axis: usize) -> Result<
     let mut result_values = Vec::new();
 
     for (idx, val) in min_map {
-        let count = count_map.get(&idx).unwrap();
+        let count = count_map.get(&idx).expect("count_map has the same keys as min_map by construction");
 
         // If we haven't seen all positions along this axis, there are implicit zeros
         let has_implicit_zeros = *count < axis_size;

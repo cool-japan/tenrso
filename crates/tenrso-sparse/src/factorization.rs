@@ -107,7 +107,10 @@ pub fn ilu0<T: Float>(a: &CsrMatrix<T>) -> SparseResult<(CsrMatrix<T>, CsrMatrix
                 }
             }
 
-            if u_kk.abs() < T::from(1e-14).unwrap() {
+            if u_kk.abs()
+                < T::from(1e-14)
+                    .ok_or_else(|| SparseError::validation("cannot represent 1e-14 as T"))?
+            {
                 return Err(SparseError::validation("Near-zero pivot in ILU"));
             }
 
@@ -129,7 +132,10 @@ pub fn ilu0<T: Float>(a: &CsrMatrix<T>) -> SparseResult<(CsrMatrix<T>, CsrMatrix
         // Normalize L row by diagonal of U
         if let Some(diag_pos) = u_row.iter().position(|(col, _)| *col == i) {
             let u_ii = u_row[diag_pos].1;
-            if u_ii.abs() < T::from(1e-14).unwrap() {
+            if u_ii.abs()
+                < T::from(1e-14)
+                    .ok_or_else(|| SparseError::validation("cannot represent 1e-14 as T"))?
+            {
                 return Err(SparseError::validation("Near-zero pivot in ILU"));
             }
 
@@ -244,7 +250,10 @@ pub fn ic0<T: Float>(a: &CsrMatrix<T>) -> SparseResult<CsrMatrix<T>> {
                     .get(&(j, j))
                     .ok_or_else(|| SparseError::validation("Missing diagonal in IC"))?;
 
-                if l_jj.abs() < T::from(1e-14).unwrap() {
+                if l_jj.abs()
+                    < T::from(1e-14)
+                        .ok_or_else(|| SparseError::validation("cannot represent 1e-14 as T"))?
+                {
                     return Err(SparseError::validation("Near-zero diagonal in IC"));
                 }
 
@@ -332,7 +341,10 @@ pub fn forward_substitution<T: Float>(
                     break;
                 }
             }
-            if diag.abs() < T::from(1e-14).unwrap() {
+            if diag.abs()
+                < T::from(1e-14)
+                    .ok_or_else(|| SparseError::validation("cannot represent 1e-14 as T"))?
+            {
                 return Err(SparseError::validation("Near-zero diagonal in solve"));
             }
             y[i] = sum / diag;
@@ -392,7 +404,10 @@ pub fn backward_substitution<T: Float>(
             }
         }
 
-        if diag.abs() < T::from(1e-14).unwrap() {
+        if diag.abs()
+            < T::from(1e-14)
+                .ok_or_else(|| SparseError::validation("cannot represent 1e-14 as T"))?
+        {
             return Err(SparseError::validation("Near-zero diagonal in solve"));
         }
         x[i] = sum / diag;

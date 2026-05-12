@@ -271,7 +271,7 @@ pub fn poisson_2d<T: Float>(nx: usize, ny: usize) -> SparseResult<CsrMatrix<T>> 
     let mut values = Vec::new();
 
     // 5-point stencil
-    let four = T::from(4.0).unwrap();
+    let four = T::from(4.0).ok_or_else(|| SparseError::validation("cannot represent 4.0 as T"))?;
     let neg_one = -T::one();
 
     for iy in 0..ny {

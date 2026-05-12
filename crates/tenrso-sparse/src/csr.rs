@@ -321,7 +321,8 @@ impl<T: Float> CsrMatrix<T> {
         }
 
         let shape = vec![self.nrows(), self.ncols()];
-        CooTensor::new(indices, values, shape).unwrap()
+        CooTensor::new(indices, values, shape)
+            .expect("indices and values built from valid CSR are always valid")
     }
 
     /// Convert to dense matrix
@@ -430,7 +431,8 @@ impl<T: Float> CsrMatrix<T> {
             }
         }
 
-        CscMatrix::new(col_ptr, row_indices, values, (n, m)).unwrap()
+        CscMatrix::new(col_ptr, row_indices, values, (n, m))
+            .expect("CSC parameters built from transposed CSR are valid by construction")
     }
 
     /// Create CSR from CSC format (transpose)
@@ -511,7 +513,8 @@ impl<T: Float> CsrMatrix<T> {
             }
         }
 
-        Self::new(row_ptr, col_indices, values, (m, n)).unwrap()
+        Self::new(row_ptr, col_indices, values, (m, n))
+            .expect("CSR parameters built from transposed CSC are valid by construction")
     }
 
     /// Sparse Matrix-Vector product: y = A * x
