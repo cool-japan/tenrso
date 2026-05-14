@@ -3,7 +3,7 @@
 //! Caches chunks fetched from remote nodes to minimize network traffic.
 
 use super::network::NetworkClient;
-use super::protocol::{ChunkMetadata, ChunkRequest, NodeId};
+use super::protocol::{ChunkMetadata, ChunkRequest, NodeId, PutChunkRequest};
 use super::registry::DistributedRegistry;
 use crate::ml_eviction::{MLConfig, MLEvictionPolicy};
 use anyhow::{anyhow, Result};
@@ -48,6 +48,12 @@ pub struct RemoteCacheConfig {
     pub prefetch_on_miss: bool,
     /// ML configuration (if using ML policy)
     pub ml_config: Option<MLConfig>,
+    /// Node ID of this cache host (required when `write_policy == WriteBack`).
+    ///
+    /// Used as the `sender` field of write-back `PutChunkRequest` messages so
+    /// the destination node can identify the origin.  `None` is fine for
+    /// `WriteThrough` and `NoWrite` policies.
+    pub local_node_id: Option<NodeId>,
 }
 
 impl Default for RemoteCacheConfig {
@@ -58,6 +64,7 @@ impl Default for RemoteCacheConfig {
             write_policy: WritePolicy::NoWrite,
             prefetch_on_miss: true,
             ml_config: Some(MLConfig::default()),
+            local_node_id: None,
         }
     }
 }
@@ -444,18 +451,91 @@ impl RemoteCache {
     }
 
     /// Evict a chunk from cache.
+    ///
+    /// When `WritePolicy::WriteBack` is active and the entry is dirty, the
+    /// chunk is flushed to the source node before it is dropped from the cache.
+    /// The caller receives an error if the write-back network call fails; the
+    /// entry has already been removed from the in-memory cache at that point.
     async fn evict_chunk(&self, chunk_id: &str) -> Result<()> {
         if let Some((_, entry_ref)) = self.cache.remove(chunk_id) {
-            let entry = entry_ref.read();
-            let size = entry.size();
+            // Extract all data we need while holding the read-lock, then drop
+            // the guard *before* any `.await` point to satisfy clippy's
+            // `await_holding_lock` lint (parking_lot guards are not Send).
+            let write_back_payload: Option<(u64, PutChunkRequest)> = {
+                let entry = entry_ref.read();
+                let size = entry.size();
+                if entry.dirty && self.config.write_policy == WritePolicy::WriteBack {
+                    let sender = self.config.local_node_id.unwrap_or(NodeId(0));
+                    let request = PutChunkRequest::new(
+                        chunk_id.to_string(),
+                        entry.metadata.clone(),
+                        entry.data.clone(),
+                        sender,
+                    );
+                    Some((size, request))
+                } else {
+                    // Not dirty or no write-back policy; just record size.
+                    // We stash `size` as a dummy payload so we can update
+                    // stats after the lock is released.
+                    drop(entry);
+                    None
+                }
+            };
+            // Lock is released here.
 
-            // Handle write-back if needed
-            if entry.dirty && self.config.write_policy == WritePolicy::WriteBack {
-                // TODO: Implement write-back to remote node
+            // Re-read size for the non-write-back path.
+            let size = entry_ref.read().size();
+
+            match write_back_payload {
+                Some((_wb_size, request)) => {
+                    // Update stats before the async send; the entry is already
+                    // gone from the map so it must not be double-counted.
+                    self.stats.current_size.fetch_sub(size, Ordering::Relaxed);
+                    self.stats.evictions.fetch_add(1, Ordering::Relaxed);
+
+                    // Look up the target node address via the registry.  The
+                    // chunk's primary placement location is used as the
+                    // write-back destination (where the authoritative copy lives).
+                    let placement = self
+                        .registry
+                        .get_chunk_placement(&request.chunk_id)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "write-back: chunk {} not found in registry",
+                                request.chunk_id
+                            )
+                        })?;
+
+                    let location = placement.locations.first().ok_or_else(|| {
+                        anyhow!(
+                            "write-back: no locations for chunk {}",
+                            request.chunk_id
+                        )
+                    })?;
+
+                    let node_info = self
+                        .registry
+                        .get_node_info(location.node_id)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "write-back: source node {} not in registry",
+                                location.node_id
+                            )
+                        })?;
+
+                    // Perform the network write (may fail if node is unreachable).
+                    self.network_client
+                        .put_chunk(node_info.address, request)
+                        .await
+                        .map_err(|e| {
+                            anyhow!("write-back failed for chunk {}: {}", chunk_id, e)
+                        })?;
+                }
+                None => {
+                    self.stats.current_size.fetch_sub(size, Ordering::Relaxed);
+                    self.stats.evictions.fetch_add(1, Ordering::Relaxed);
+                }
             }
-
-            self.stats.current_size.fetch_sub(size, Ordering::Relaxed);
-            self.stats.evictions.fetch_add(1, Ordering::Relaxed);
         }
 
         Ok(())

@@ -176,6 +176,7 @@ fn main() -> Result<()> {
         write_policy: WritePolicy::NoWrite,
         prefetch_on_miss: true,
         ml_config: Some(MLConfig::default()),
+        local_node_id: None,
     };
 
     println!("Cache Configuration:");

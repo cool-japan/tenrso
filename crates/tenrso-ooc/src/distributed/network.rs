@@ -3,7 +3,8 @@
 //! Uses tokio for async I/O and oxicode for efficient serialization.
 
 use super::protocol::{
-    ChunkRequest, ChunkResponse, HeartbeatRequest, HeartbeatResponse, MessageType,
+    ChunkRequest, ChunkResponse, HeartbeatRequest, HeartbeatResponse, MessageType, PutChunkAck,
+    PutChunkRequest,
 };
 use super::registry::DistributedRegistry;
 use anyhow::{anyhow, Result};
@@ -71,6 +72,8 @@ pub struct NetworkServer {
     registry: Arc<DistributedRegistry>,
     stats: Arc<NetworkStatsInternal>,
     chunk_provider: Arc<dyn ChunkProvider>,
+    /// Optional write backend; enables `PutChunk` handling for write-back caching.
+    chunk_store: Option<Arc<dyn ChunkStore>>,
 }
 
 /// Internal statistics with atomic counters.
@@ -113,6 +116,18 @@ pub trait ChunkProvider: Send + Sync {
     fn load_chunk(&self, chunk_id: &str) -> Result<Vec<u8>>;
 }
 
+/// Trait for storing chunks received from the network layer.
+///
+/// Implement this alongside [`ChunkProvider`] for nodes that accept write-back
+/// from caching peers.  Servers without write support can use the no-op default.
+pub trait ChunkStore: Send + Sync {
+    /// Persist a chunk received from a remote node.
+    ///
+    /// The implementation is responsible for durability semantics; the network
+    /// layer simply forwards the raw bytes and metadata.
+    fn store_chunk(&self, chunk_id: &str, metadata: &PutChunkRequest, data: &[u8]) -> Result<()>;
+}
+
 impl NetworkServer {
     /// Create a new network server.
     pub fn new(
@@ -125,6 +140,26 @@ impl NetworkServer {
             registry,
             stats: Arc::new(NetworkStatsInternal::new()),
             chunk_provider,
+            chunk_store: None,
+        }
+    }
+
+    /// Create a server that also accepts `PutChunk` write-back requests.
+    ///
+    /// Nodes that act as the authoritative store for chunks should use this
+    /// constructor so that caching peers can flush dirty chunks back on eviction.
+    pub fn new_with_store(
+        config: NetworkConfig,
+        registry: Arc<DistributedRegistry>,
+        chunk_provider: Arc<dyn ChunkProvider>,
+        chunk_store: Arc<dyn ChunkStore>,
+    ) -> Self {
+        Self {
+            config,
+            registry,
+            stats: Arc::new(NetworkStatsInternal::new()),
+            chunk_provider,
+            chunk_store: Some(chunk_store),
         }
     }
 
@@ -139,14 +174,21 @@ impl NetworkServer {
             let registry = Arc::clone(&self.registry);
             let stats = Arc::clone(&self.stats);
             let chunk_provider = Arc::clone(&self.chunk_provider);
+            let chunk_store = self.chunk_store.clone();
             let config = self.config.clone();
 
             tokio::spawn(async move {
                 stats.active_connections.fetch_add(1, Ordering::Relaxed);
 
-                if let Err(e) =
-                    Self::handle_connection(stream, registry, stats.clone(), chunk_provider, config)
-                        .await
+                if let Err(e) = Self::handle_connection(
+                    stream,
+                    registry,
+                    stats.clone(),
+                    chunk_provider,
+                    chunk_store,
+                    config,
+                )
+                .await
                 {
                     eprintln!("Error handling connection from {}: {}", peer_addr, e);
                     stats.failed_connections.fetch_add(1, Ordering::Relaxed);
@@ -163,6 +205,7 @@ impl NetworkServer {
         registry: Arc<DistributedRegistry>,
         stats: Arc<NetworkStatsInternal>,
         chunk_provider: Arc<dyn ChunkProvider>,
+        chunk_store: Option<Arc<dyn ChunkStore>>,
         config: NetworkConfig,
     ) -> Result<()> {
         loop {
@@ -198,7 +241,8 @@ impl NetworkServer {
                 oxicode::serde::decode_from_slice(&data_buf, oxicode_config)?;
 
             // Handle message and generate response
-            let response = Self::handle_message(message, &registry, &chunk_provider).await?;
+            let response =
+                Self::handle_message(message, &registry, &chunk_provider, &chunk_store).await?;
 
             // Serialize response
             let oxicode_config = oxicode::config::standard();
@@ -236,6 +280,7 @@ impl NetworkServer {
         message: MessageType,
         registry: &Arc<DistributedRegistry>,
         chunk_provider: &Arc<dyn ChunkProvider>,
+        chunk_store: &Option<Arc<dyn ChunkStore>>,
     ) -> Result<MessageType> {
         match message {
             MessageType::ChunkRequest(req) => {
@@ -269,6 +314,23 @@ impl NetworkServer {
 
                 let response = HeartbeatResponse::new(node_info);
                 Ok(MessageType::HeartbeatResponse(response))
+            }
+            MessageType::PutChunk(req) => {
+                // Write-back from a caching peer on cache eviction.
+                let chunk_id = req.chunk_id.clone();
+                match chunk_store {
+                    Some(store) => match store.store_chunk(&chunk_id, &req, &req.data) {
+                        Ok(()) => Ok(MessageType::PutAck(PutChunkAck::success(chunk_id))),
+                        Err(e) => Ok(MessageType::PutAck(PutChunkAck::error(
+                            chunk_id,
+                            e.to_string(),
+                        ))),
+                    },
+                    None => Ok(MessageType::PutAck(PutChunkAck::error(
+                        chunk_id,
+                        "this node does not accept chunk writes".to_string(),
+                    ))),
+                }
             }
             _ => Err(anyhow!("Unsupported message type")),
         }
@@ -325,6 +387,42 @@ impl NetworkClient {
         match response {
             MessageType::HeartbeatResponse(resp) => Ok(resp),
             _ => Err(anyhow!("Unexpected response type")),
+        }
+    }
+
+    /// Write (put) a chunk to a remote node.
+    ///
+    /// Used for write-back on cache eviction when `WritePolicy::WriteBack` is active.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr`    - Address of the destination node
+    /// * `request` - Put-chunk request containing the chunk data and metadata
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success; `Err` if the remote node rejected or was unreachable.
+    pub async fn put_chunk(&self, addr: SocketAddr, request: PutChunkRequest) -> Result<()> {
+        let chunk_id = request.chunk_id.clone();
+        let message = MessageType::PutChunk(request);
+        let response = self.send_message(addr, message).await?;
+
+        match response {
+            MessageType::PutAck(ack) => {
+                if ack.success {
+                    Ok(())
+                } else {
+                    Err(anyhow!(
+                        "Remote node rejected write-back for chunk {}: {}",
+                        chunk_id,
+                        ack.error.unwrap_or_else(|| "unknown error".to_string())
+                    ))
+                }
+            }
+            _ => Err(anyhow!(
+                "Unexpected response type for PutChunk (chunk {})",
+                chunk_id
+            )),
         }
     }
 

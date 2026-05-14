@@ -161,6 +161,78 @@ pub enum MessageType {
     },
     /// Acknowledge chunk replication
     ReplicateAck { chunk_id: String, success: bool },
+    /// Write (put) a chunk to a remote node (write-back on eviction)
+    PutChunk(PutChunkRequest),
+    /// Acknowledge a PutChunk request
+    PutAck(PutChunkAck),
+}
+
+/// Request to write a chunk to a remote node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PutChunkRequest {
+    /// ID of the chunk being written
+    pub chunk_id: String,
+    /// Chunk metadata
+    pub metadata: ChunkMetadata,
+    /// Raw chunk data
+    pub data: Vec<u8>,
+    /// Node initiating the write
+    pub sender: NodeId,
+    /// Request timestamp
+    pub timestamp: u64,
+}
+
+impl PutChunkRequest {
+    /// Create a new put-chunk request.
+    pub fn new(
+        chunk_id: String,
+        metadata: ChunkMetadata,
+        data: Vec<u8>,
+        sender: NodeId,
+    ) -> Self {
+        Self {
+            chunk_id,
+            metadata,
+            data,
+            sender,
+            timestamp: current_timestamp(),
+        }
+    }
+}
+
+/// Acknowledgement for a PutChunk request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PutChunkAck {
+    /// ID of the chunk that was written
+    pub chunk_id: String,
+    /// Whether the write succeeded
+    pub success: bool,
+    /// Error message if failed
+    pub error: Option<String>,
+    /// Response timestamp
+    pub timestamp: u64,
+}
+
+impl PutChunkAck {
+    /// Create a successful acknowledgement.
+    pub fn success(chunk_id: String) -> Self {
+        Self {
+            chunk_id,
+            success: true,
+            error: None,
+            timestamp: current_timestamp(),
+        }
+    }
+
+    /// Create a failed acknowledgement.
+    pub fn error(chunk_id: String, error: String) -> Self {
+        Self {
+            chunk_id,
+            success: false,
+            error: Some(error),
+            timestamp: current_timestamp(),
+        }
+    }
 }
 
 /// Request to fetch a chunk from a remote node.

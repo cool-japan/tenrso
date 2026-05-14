@@ -66,7 +66,7 @@ use scirs2_core::ndarray_ext::{
     s, Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, ScalarOperand,
 };
 use scirs2_core::num_traits::{Float, Num, NumAssign};
-use scirs2_linalg::qr;
+use scirs2_linalg::{qr, svd};
 use std::iter::Sum;
 
 /// Left-orthogonalize a single TT core using QR decomposition.
@@ -182,7 +182,11 @@ where
 
 /// Perform QR decomposition using scirs2-linalg.
 ///
-/// Handles both tall (m >= n) and wide (m < n) matrices.
+/// For left-orthogonalization we need Q of shape `(m, k)` where `k = min(m, n)`,
+/// and R of shape `(k, n)`. For a tall matrix (`m >= n`) this is the reduced QR.
+/// For a wide matrix (`m < n`) we use SVD to extract an orthonormal basis: SVD gives
+/// `A = U * diag(S) * V^T`, so we return `Q = U` (shape `(m, m)`) and `R = diag(S) * V^T`
+/// (shape `(m, n)`), which satisfies `A = Q * R` with Q having orthonormal columns.
 ///
 /// # Arguments
 ///
@@ -190,7 +194,7 @@ where
 ///
 /// # Returns
 ///
-/// * `(Q, R)` - Orthogonal matrix Q and upper triangular R
+/// * `(Q, R)` where `Q` has orthonormal columns and `A = Q * R`
 fn tt_qr_decomposition<T>(matrix: &ArrayView2<T>) -> KernelResult<(Array2<T>, Array2<T>)>
 where
     T: Float + NumAssign + Sum + Send + Sync + ScalarOperand + 'static,
@@ -198,24 +202,30 @@ where
     let (m, n) = (matrix.nrows(), matrix.ncols());
 
     if m >= n {
-        // Standard QR: m >= n
+        // Standard reduced QR: Q is (m, n), R is (n, n)
         qr(matrix, None).map_err(|e| {
             KernelError::operation_error("tt_qr_decomposition", format!("QR failed: {}", e))
         })
     } else {
-        // Wide matrix: transpose, do QR, transpose back
-        let matrix_t = matrix.t().to_owned();
-        let (q_t, r_t) = qr(&matrix_t.view(), None).map_err(|e| {
+        // Wide matrix (m < n): use SVD A = U * diag(S) * V^T.
+        // Return Q = U (m×m) and R = diag(S) * V^T (m×n) so that A = Q * R.
+        let (u, s, vt) = svd(matrix, false, None).map_err(|e| {
             KernelError::operation_error(
                 "tt_qr_decomposition",
-                format!("QR on transpose failed: {}", e),
+                format!("SVD for wide-matrix QR failed: {}", e),
             )
         })?;
 
-        // For A = Q @ R, we have A^T = R^T @ Q^T
-        // So A = (A^T)^T = (R^T @ Q^T)^T = Q @ R^T
-        // Return Q and R^T
-        Ok((q_t.t().to_owned(), r_t.t().to_owned()))
+        // Build R = diag(s) @ vt, shape (m, n)
+        let mut r = vt; // shape (m, n) since we asked for non-full matrices
+        for (row_idx, &sv) in s.iter().enumerate() {
+            for col_idx in 0..n {
+                r[[row_idx, col_idx]] *= sv;
+            }
+        }
+
+        // u has shape (m, m) — orthonormal columns
+        Ok((u, r))
     }
 }
 
@@ -452,7 +462,6 @@ where
 /// ```text
 /// ∑_{i=r+1}^{n} σᵢ² ≤ ε² · ∑_{i=1}^{n} σᵢ²
 /// ```
-#[allow(dead_code)]
 fn determine_truncation_rank<T>(
     singular_values: &Array1<T>,
     epsilon_sq: T,
@@ -505,33 +514,28 @@ where
 
 /// Round TT tensor using SVD-based rank truncation with error control.
 ///
-/// This function implements SVD-based TT rounding with rank truncation.
-/// **Note:** This is a simplified implementation that truncates each core independently
-/// without optimal remainder propagation. Full TT-SVD with optimal propagation will be
-/// added in a future enhancement.
+/// Implements Oseledets (2011) Algorithm 2 (TT-SVD rounding):
+/// 1. **Left-to-right QR sweep** — orthogonalize all cores so the full norm
+///    is concentrated in the last core.
+/// 2. **Right-to-left SVD sweep** — for each interior bond `d-1 .. 1`, reshape
+///    the core as a left-unfolded matrix `(r_{k-1}, n_k × r_k)`, compute SVD,
+///    truncate singular values below the per-bond threshold
+///    `δ = ε · ||TT|| / √(d−1)`, and push `U·Σ` leftward into `cores[k-1]`.
 ///
 /// # Arguments
 ///
 /// * `cores` - TT cores to round (will be modified in-place)
 /// * `max_rank` - Optional maximum rank constraint for all bonds
-/// * `epsilon` - Relative Frobenius norm error tolerance
+/// * `epsilon` - Relative Frobenius norm error tolerance (≥ 0)
 ///
 /// # Returns
 ///
-/// * `Ok(())` on success
+/// * `Ok(())` on success; the cores slice is updated in-place with potentially
+///   reduced-rank tensors.
 ///
 /// # Complexity
 ///
 /// O(∑ᵢ rᵢ³ + rᵢ² nᵢ) where rᵢ and nᵢ are ranks and mode sizes
-///
-/// # Algorithm (Simplified)
-///
-/// For each core:
-///    - Reshape core to matrix
-///    - Compute SVD: M = U · S · Vᵀ
-///    - Determine new rank based on singular values
-///    - Reconstruct core with truncated SVD components
-///    - Absorb singular values into the core
 ///
 /// # Example
 ///
@@ -570,41 +574,142 @@ where
         ));
     }
 
-    // For now, use a simplified approach: just apply orthogonalization
-    // Full SVD-based truncation with optimal remainder propagation requires
-    // careful handling of TT canonical forms and will be implemented in a future enhancement
+    let d = cores.len();
 
-    // The epsilon_sq and max_rank parameters are noted for future use
-    let _epsilon_sq = epsilon * epsilon;
-    let _max_rank_val = max_rank;
+    // Single-core TT: nothing to truncate.
+    if d == 1 {
+        return Ok(());
+    }
 
-    // Use orthogonalization which provides numerical stability
-    // This doesn't do SVD-based rank reduction yet, but ensures cores are well-conditioned
+    // Phase 1: left-to-right QR orthogonalization.
+    // After this the full Frobenius norm of the TT equals ||cores[d-1]||_F.
     tt_left_orthogonalize(cores)?;
 
-    // TODO (Future enhancement): Implement full TT-SVD rounding with:
-    // 1. Left-to-right QR orthogonalization
-    // 2. Right-to-left SVD truncation with proper remainder propagation
-    // 3. Epsilon-based rank selection using singular value decay
-    // 4. Per-bond max_rank constraints
-    //
-    // See Oseledets (2011) "Tensor-Train Decomposition" for the complete algorithm
+    // Compute ||TT||_F from the last (now un-orthogonalized) core.
+    let last_core_frob: T = cores[d - 1]
+        .iter()
+        .map(|&x| x * x)
+        .fold(T::zero(), |a, b| a + b)
+        .sqrt();
+
+    // Per-bond absolute error budget: δ = ε * ||TT|| / sqrt(d-1).
+    // We will compare δ² against the cumulative tail energy at each bond.
+    let d_minus_1 = T::from(d - 1).ok_or_else(|| {
+        KernelError::operation_error("tt_round", "failed to convert dimension to float")
+    })?;
+    let delta_sq = if d_minus_1 > T::zero() {
+        epsilon * epsilon * last_core_frob * last_core_frob / d_minus_1
+    } else {
+        T::zero()
+    };
+
+    // Phase 2: right-to-left SVD sweep over bonds d-1 .. 1.
+    for k in (1..d).rev() {
+        let (r_left, n_k, r_right) = {
+            let sh = cores[k].shape();
+            (sh[0], sh[1], sh[2])
+        };
+
+        // Right-unfold: (r_left, n_k * r_right)
+        let mat = cores[k]
+            .view()
+            .to_shape((r_left, n_k * r_right))
+            .map_err(|e| {
+                KernelError::operation_error(
+                    "tt_round",
+                    format!("reshape core {} to matrix failed: {}", k, e),
+                )
+            })?
+            .to_owned();
+
+        // SVD: mat = U * diag(S) * Vt
+        let (u, s, vt) = svd(&mat.view(), false, None).map_err(|e| {
+            KernelError::operation_error("tt_round", format!("SVD of core {} failed: {}", k, e))
+        })?;
+
+        // Determine new rank from singular values and threshold.
+        // determine_truncation_rank uses relative threshold epsilon_sq such that
+        //   threshold = epsilon_sq * total_energy.
+        // We want absolute threshold delta_sq, so pass epsilon_sq = delta_sq / total_energy.
+        let total_energy: T = s.iter().map(|&sv| sv * sv).fold(T::zero(), |a, b| a + b);
+        let epsilon_sq_rel = if total_energy > T::zero() {
+            delta_sq / total_energy
+        } else {
+            T::zero()
+        };
+        let new_rank = determine_truncation_rank(&s, epsilon_sq_rel, max_rank);
+        let new_rank = new_rank.max(1).min(r_left);
+
+        // Truncated V^T: shape (new_rank, n_k * r_right) → reshape to (new_rank, n_k, r_right)
+        let vt_trunc = vt.slice(s![..new_rank, ..]).to_owned();
+        cores[k] = vt_trunc
+            .to_shape((new_rank, n_k, r_right))
+            .map_err(|e| {
+                KernelError::operation_error(
+                    "tt_round",
+                    format!("reshape truncated Vt for core {} failed: {}", k, e),
+                )
+            })?
+            .to_owned();
+
+        // Build U_trunc * diag(S_trunc): shape (r_left, new_rank)
+        let u_trunc = u.slice(s![.., ..new_rank]).to_owned();
+        let mut us = u_trunc;
+        for j in 0..new_rank {
+            for i in 0..r_left {
+                us[[i, j]] *= s[j];
+            }
+        }
+
+        // Absorb U·S into cores[k-1]:
+        // cores[k-1] has shape (r_{k-2}, n_{k-1}, r_{k-1}) == (r_{k-2}, n_{k-1}, r_left)
+        let (r_km2, n_km1, _r_km1) = {
+            let sh = cores[k - 1].shape();
+            (sh[0], sh[1], sh[2])
+        };
+
+        // Left-unfold cores[k-1]: (r_{k-2} * n_{k-1}, r_{k-1})
+        let prev_mat = cores[k - 1]
+            .view()
+            .to_shape((r_km2 * n_km1, r_left))
+            .map_err(|e| {
+                KernelError::operation_error(
+                    "tt_round",
+                    format!("reshape core {} for absorption failed: {}", k - 1, e),
+                )
+            })?
+            .to_owned();
+
+        // prev_mat @ us: (r_{k-2} * n_{k-1}, new_rank)
+        let updated = prev_mat.dot(&us);
+        cores[k - 1] = updated
+            .to_shape((r_km2, n_km1, new_rank))
+            .map_err(|e| {
+                KernelError::operation_error(
+                    "tt_round",
+                    format!("reshape updated core {} failed: {}", k - 1, e),
+                )
+            })?
+            .to_owned();
+    }
 
     Ok(())
 }
 
-/// Truncate TT ranks to specified maximum values.
+/// Truncate TT ranks to specified maximum values per bond.
 ///
-/// **Note:** This is a simplified implementation that validates inputs and applies
-/// orthogonalization but does not yet perform full SVD-based rank truncation.
-/// Full per-bond truncation will be added in a future enhancement.
+/// Implements the same Oseledets (2011) two-phase algorithm as [`tt_round`] but
+/// uses a hard per-bond rank cap instead of an epsilon-based singular-value
+/// threshold:
+/// 1. **Left-to-right QR sweep** — orthogonalize all cores.
+/// 2. **Right-to-left SVD sweep** — for each interior bond, compute SVD and
+///    keep at most `max_ranks[k-1]` singular values.
 ///
 /// # Arguments
 ///
 /// * `cores` - TT cores to process (will be modified in-place)
-/// * `max_ranks` - Maximum rank for each bond (length must be cores.len() - 1)
-///   - `max_ranks[0]` controls the rank between core 0 and core 1
-///   - `max_ranks[k]` controls the rank between core k and core k+1
+/// * `max_ranks` - Maximum rank for each bond; length must equal `cores.len() - 1`.
+///   `max_ranks[k]` bounds the rank of the bond between `cores[k]` and `cores[k+1]`.
 ///
 /// # Returns
 ///
@@ -612,7 +717,7 @@ where
 ///
 /// # Complexity
 ///
-/// O(∑ᵢ rᵢ² nᵢ) for orthogonalization
+/// O(∑ᵢ rᵢ³ + rᵢ² nᵢ) where rᵢ and nᵢ are ranks and mode sizes
 ///
 /// # Example
 ///
@@ -625,10 +730,12 @@ where
 /// let core3 = Array3::<f64>::from_elem((8, 10, 1), 0.1);
 /// let mut cores = vec![core1, core2, core3];
 ///
-/// // Apply orthogonalization (full truncation TBD)
 /// tt_truncate(&mut cores, &[3, 4]).unwrap();
 ///
-/// // Verify boundary ranks preserved
+/// // Bond ranks are now capped
+/// assert!(cores[0].shape()[2] <= 3);
+/// assert!(cores[1].shape()[2] <= 4);
+/// // Boundary ranks preserved
 /// assert_eq!(cores[0].shape()[0], 1);
 /// assert_eq!(cores[2].shape()[2], 1);
 /// ```
@@ -649,18 +756,96 @@ where
         ));
     }
 
-    // For now, use a simplified approach: just apply orthogonalization
-    // Full SVD-based per-bond truncation requires the same careful handling
-    // as tt_round and will be implemented together in a future enhancement
+    let d = cores.len();
 
-    let _d = cores.len();
-    let _max_ranks_val = max_ranks; // Note for future use
+    // Single-core TT: nothing to truncate.
+    if d == 1 {
+        return Ok(());
+    }
 
-    // Use orthogonalization for numerical stability
+    // Phase 1: left-to-right QR orthogonalization.
     tt_left_orthogonalize(cores)?;
 
-    // TODO (Future enhancement): Implement full per-bond TT truncation
-    // This requires the same TT-SVD rounding infrastructure as tt_round
+    // Phase 2: right-to-left SVD sweep with per-bond rank cap.
+    for k in (1..d).rev() {
+        let (r_left, n_k, r_right) = {
+            let sh = cores[k].shape();
+            (sh[0], sh[1], sh[2])
+        };
+
+        // Right-unfold: (r_left, n_k * r_right)
+        let mat = cores[k]
+            .view()
+            .to_shape((r_left, n_k * r_right))
+            .map_err(|e| {
+                KernelError::operation_error(
+                    "tt_truncate",
+                    format!("reshape core {} to matrix failed: {}", k, e),
+                )
+            })?
+            .to_owned();
+
+        // SVD: mat = U * diag(S) * Vt
+        let (u, s, vt) = svd(&mat.view(), false, None).map_err(|e| {
+            KernelError::operation_error(
+                "tt_truncate",
+                format!("SVD of core {} failed: {}", k, e),
+            )
+        })?;
+
+        // Per-bond rank cap: max_ranks[k-1] is the cap for bond k (between core k-1 and k).
+        let cap = max_ranks[k - 1];
+        let new_rank = s.len().min(r_left).min(cap).max(1);
+
+        // Truncated V^T: (new_rank, n_k * r_right) → (new_rank, n_k, r_right)
+        let vt_trunc = vt.slice(s![..new_rank, ..]).to_owned();
+        cores[k] = vt_trunc
+            .to_shape((new_rank, n_k, r_right))
+            .map_err(|e| {
+                KernelError::operation_error(
+                    "tt_truncate",
+                    format!("reshape truncated Vt for core {} failed: {}", k, e),
+                )
+            })?
+            .to_owned();
+
+        // Build U_trunc * diag(S_trunc): (r_left, new_rank)
+        let u_trunc = u.slice(s![.., ..new_rank]).to_owned();
+        let mut us = u_trunc;
+        for j in 0..new_rank {
+            for i in 0..r_left {
+                us[[i, j]] *= s[j];
+            }
+        }
+
+        // Absorb U·S into cores[k-1].
+        let (r_km2, n_km1, _r_km1) = {
+            let sh = cores[k - 1].shape();
+            (sh[0], sh[1], sh[2])
+        };
+
+        let prev_mat = cores[k - 1]
+            .view()
+            .to_shape((r_km2 * n_km1, r_left))
+            .map_err(|e| {
+                KernelError::operation_error(
+                    "tt_truncate",
+                    format!("reshape core {} for absorption failed: {}", k - 1, e),
+                )
+            })?
+            .to_owned();
+
+        let updated = prev_mat.dot(&us);
+        cores[k - 1] = updated
+            .to_shape((r_km2, n_km1, new_rank))
+            .map_err(|e| {
+                KernelError::operation_error(
+                    "tt_truncate",
+                    format!("reshape updated core {} failed: {}", k - 1, e),
+                )
+            })?
+            .to_owned();
+    }
 
     Ok(())
 }
@@ -1419,14 +1604,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Wide matrix QR handling needs refinement"]
     fn test_tt_truncate() {
         let core1 = Array3::<f64>::ones((1, 4, 5));
         let core2 = Array3::<f64>::ones((5, 4, 6));
         let core3 = Array3::<f64>::ones((6, 4, 1));
-
-        let cores_ref = vec![core1.view(), core2.view(), core3.view()];
-        let original_norm = tt_norm(&cores_ref).unwrap();
 
         let mut cores = vec![core1, core2, core3];
         let result = tt_truncate(&mut cores, &[3, 3]);
@@ -1435,10 +1616,12 @@ mod tests {
         }
         assert!(result.is_ok());
 
-        // Norm should be preserved
-        let cores_view: Vec<_> = cores.iter().map(|c| c.view()).collect();
-        let new_norm = tt_norm(&cores_view).unwrap();
-        assert!((original_norm - new_norm).abs() < 1e-8);
+        // Bond ranks must respect the caps.
+        assert!(cores[0].shape()[2] <= 3, "bond 0 rank exceeded cap");
+        assert!(cores[1].shape()[2] <= 3, "bond 1 rank exceeded cap");
+        // Boundary ranks must be preserved.
+        assert_eq!(cores[0].shape()[0], 1);
+        assert_eq!(cores[2].shape()[2], 1);
     }
 
     #[test]
@@ -1610,7 +1793,6 @@ mod tests {
     // These tests verify the current orthogonalization-based approach
 
     #[test]
-    #[ignore = "Full SVD-based rank reduction not yet implemented"]
     fn test_svd_round_rank_reduction() {
         // Create TT with redundant rank that can be reduced
         // Use a rank-deficient structure: core with rank 4 but effective rank 2
@@ -1686,7 +1868,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Wide matrix QR issue - needs refinement"]
     fn test_svd_round_max_rank_constraint() {
         // Create TT with high ranks
         let core1 = Array3::<f64>::from_shape_fn((1, 4, 6), |(_, i, j)| ((i + j + 1) as f64) * 0.1);
@@ -1707,7 +1888,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Wide matrix QR issue - needs refinement"]
     fn test_svd_round_combined_constraints() {
         // Test both epsilon and max_rank together
         let core1 = Array3::<f64>::ones((1, 5, 8));
@@ -1736,7 +1916,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Wide matrix QR issue - needs refinement"]
     fn test_svd_truncate_per_bond_ranks() {
         // Create TT with different ranks
         let core1 = Array3::<f64>::from_shape_fn((1, 4, 7), |(_, i, j)| ((i + j + 1) as f64) * 0.1);
@@ -1759,7 +1938,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Wide matrix QR issue - needs refinement"]
     fn test_svd_round_preserves_boundary_ranks() {
         // Verify that r_0 = 1 and r_d = 1 are preserved
         let core1 = Array3::<f64>::ones((1, 5, 6));
@@ -1776,7 +1954,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Wide matrix QR issue - needs refinement"]
     fn test_svd_round_very_small_epsilon() {
         // Test with very strict epsilon (should keep most ranks)
         let core1 = Array3::<f64>::from_shape_fn((1, 4, 5), |(_, i, j)| ((i + j + 1) as f64) * 0.1);
@@ -1869,5 +2046,117 @@ mod tests {
         // Should truncate zeros and small values
         assert!(rank <= 3);
         assert!(rank >= 1);
+    }
+
+    /// Construct a TT with inflated rank: a rank-1 tensor padded with zero columns.
+    /// After rounding with tight epsilon the max bond rank should drop back to 1.
+    #[test]
+    fn test_tt_round_reduces_rank() {
+        // True rank-1 TT: cores represent the outer product of vectors v1, v2, v3.
+        // v1 = [1, 2, 3],  v2 = [1, 1, 1, 1],  v3 = [2, 3].
+        // We inflate bond ranks to 3 by appending near-zero columns / rows.
+
+        let n1 = 3_usize;
+        let n2 = 4_usize;
+        let n3 = 2_usize;
+        let bond = 3_usize; // inflated bond rank
+
+        // core1: shape (1, n1, bond)
+        // Slice [:, :, 0] = v1, slices [:, :, 1] and [:, :, 2] are 1e-12 noise.
+        let mut core1 = Array3::<f64>::zeros((1, n1, bond));
+        for i in 0..n1 {
+            core1[[0, i, 0]] = (i + 1) as f64;
+            core1[[0, i, 1]] = 1e-12 * (i as f64 + 1.0);
+            core1[[0, i, 2]] = 1e-12 * (i as f64 + 2.0);
+        }
+
+        // core2: shape (bond, n2, bond)
+        // Slice [0, :, 0] = v2; all other entries are 1e-12 noise.
+        let mut core2 = Array3::<f64>::zeros((bond, n2, bond));
+        for j in 0..n2 {
+            core2[[0, j, 0]] = 1.0;
+            for r in 0..bond {
+                for s in 0..bond {
+                    if r == 0 && s == 0 {
+                        continue;
+                    }
+                    core2[[r, j, s]] = 1e-12;
+                }
+            }
+        }
+
+        // core3: shape (bond, n3, 1)
+        // Slice [0, :, 0] = v3; other entries are 1e-12 noise.
+        let mut core3 = Array3::<f64>::zeros((bond, n3, 1));
+        for k in 0..n3 {
+            core3[[0, k, 0]] = (k + 2) as f64;
+            for r in 1..bond {
+                core3[[r, k, 0]] = 1e-12;
+            }
+        }
+
+        let cores_ref = vec![core1.view(), core2.view(), core3.view()];
+        let original_norm = tt_norm(&cores_ref).expect("norm of original TT");
+
+        let mut cores = vec![core1, core2, core3];
+
+        // Round with tight epsilon — should strip the near-zero bonds.
+        tt_round(&mut cores, None, 1e-8).expect("tt_round should succeed");
+
+        // Both internal bond ranks should have decreased from 3 toward 1.
+        let max_bond_rank = cores[0].shape()[2].max(cores[1].shape()[2]);
+        assert!(
+            max_bond_rank < bond,
+            "Expected rank reduction from {} but max bond rank is {}",
+            bond,
+            max_bond_rank
+        );
+
+        // Norm should be approximately preserved (well within epsilon).
+        let cores_view: Vec<_> = cores.iter().map(|c| c.view()).collect();
+        let rounded_norm = tt_norm(&cores_view).expect("norm of rounded TT");
+        let rel_err = (original_norm - rounded_norm).abs() / original_norm.max(1e-14);
+        assert!(
+            rel_err < 1e-6,
+            "Norm changed by relative error {} after rounding",
+            rel_err
+        );
+    }
+
+    /// Construct a TT with large bond ranks and verify that `tt_truncate(max_rank=2)`
+    /// reduces every internal bond rank to at most 2.
+    #[test]
+    fn test_tt_truncate_caps_rank() {
+        // Three cores with rank-5 bonds.
+        let core1 = Array3::<f64>::from_shape_fn((1, 4, 5), |(_, i, j)| {
+            ((i + 1) as f64) * ((j + 1) as f64) * 0.1
+        });
+        let core2 = Array3::<f64>::from_shape_fn((5, 4, 5), |(i, j, k)| {
+            ((i + j + k + 1) as f64) * 0.05
+        });
+        let core3 = Array3::<f64>::from_shape_fn((5, 4, 1), |(i, j, _)| {
+            ((i + j + 1) as f64) * 0.1
+        });
+
+        let mut cores = vec![core1, core2, core3];
+
+        // Truncate both bonds to rank ≤ 2.
+        tt_truncate(&mut cores, &[2, 2]).expect("tt_truncate should succeed");
+
+        // Both internal bond ranks must be ≤ 2.
+        assert!(
+            cores[0].shape()[2] <= 2,
+            "Bond 0 rank {} exceeds cap 2",
+            cores[0].shape()[2]
+        );
+        assert!(
+            cores[1].shape()[2] <= 2,
+            "Bond 1 rank {} exceeds cap 2",
+            cores[1].shape()[2]
+        );
+
+        // Boundary ranks must be preserved.
+        assert_eq!(cores[0].shape()[0], 1, "First core left rank must be 1");
+        assert_eq!(cores[2].shape()[2], 1, "Last core right rank must be 1");
     }
 }
