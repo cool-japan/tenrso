@@ -63,9 +63,9 @@ xxhash-rust = { version = "0.8.15", features = ["xxh64"] }
 blake3 = "1.8.1"
 
 # SciRS2 ecosystem (MANDATORY - see SCIRS2_INTEGRATION_POLICY.md)
-scirs2-core = { version = "0.4.3", features = ["array", "random", "parallel"] }
-scirs2-linalg = { version = "0.4.3" }
-scirs2-fft = { version = "0.4.3" }
+scirs2-core = { version = "0.4.4", features = ["array", "random", "parallel"] }
+scirs2-linalg = { version = "0.4.4" }
+scirs2-fft = { version = "0.4.4" }
 
 # TenRSo internal crates
 tenrso = { version = "0.1.0", path = "crates/tenrso" }

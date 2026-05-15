@@ -832,7 +832,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: Fix RFFT normalization issue - values don't match exactly
     fn test_rfft_roundtrip() {
         let signal = DenseND::from_vec(vec![1.0, 0.5, -0.5, -1.0], &[4]).unwrap();
         let spectrum = signal.rfft().unwrap();

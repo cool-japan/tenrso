@@ -243,7 +243,6 @@ fn test_e2e_recommended_config() -> Result<()> {
 
 #[cfg(feature = "parquet")]
 #[test]
-#[ignore] // TODO: Fix parquet writer flushing issue
 fn test_e2e_parquet_workflow() -> Result<()> {
     use std::fs;
 
@@ -256,11 +255,12 @@ fn test_e2e_parquet_workflow() -> Result<()> {
     // Create and write tensor
     let original = DenseND::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4])?;
 
-    // Write in a scope to ensure writer is dropped before reading
+    // Write with explicit finish() to flush the Parquet footer to disk
     {
         let mut writer = ParquetWriter::new(&path)?;
         writer.write(&original)?;
-    } // Writer drops here, flushing data to disk
+        writer.finish()?; // ArrowWriter requires explicit close() to write the file footer
+    }
 
     // Read back and verify
     let reader = ParquetReader::open(&path)?;
