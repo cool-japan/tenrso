@@ -184,12 +184,7 @@ pub struct PutChunkRequest {
 
 impl PutChunkRequest {
     /// Create a new put-chunk request.
-    pub fn new(
-        chunk_id: String,
-        metadata: ChunkMetadata,
-        data: Vec<u8>,
-        sender: NodeId,
-    ) -> Self {
+    pub fn new(chunk_id: String, metadata: ChunkMetadata, data: Vec<u8>, sender: NodeId) -> Self {
         Self {
             chunk_id,
             metadata,

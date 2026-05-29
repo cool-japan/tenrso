@@ -507,29 +507,24 @@ impl RemoteCache {
                         })?;
 
                     let location = placement.locations.first().ok_or_else(|| {
-                        anyhow!(
-                            "write-back: no locations for chunk {}",
-                            request.chunk_id
-                        )
+                        anyhow!("write-back: no locations for chunk {}", request.chunk_id)
                     })?;
 
-                    let node_info = self
-                        .registry
-                        .get_node_info(location.node_id)
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "write-back: source node {} not in registry",
-                                location.node_id
-                            )
-                        })?;
+                    let node_info =
+                        self.registry
+                            .get_node_info(location.node_id)
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "write-back: source node {} not in registry",
+                                    location.node_id
+                                )
+                            })?;
 
                     // Perform the network write (may fail if node is unreachable).
                     self.network_client
                         .put_chunk(node_info.address, request)
                         .await
-                        .map_err(|e| {
-                            anyhow!("write-back failed for chunk {}: {}", chunk_id, e)
-                        })?;
+                        .map_err(|e| anyhow!("write-back failed for chunk {}: {}", chunk_id, e))?;
                 }
                 None => {
                     self.stats.current_size.fetch_sub(size, Ordering::Relaxed);

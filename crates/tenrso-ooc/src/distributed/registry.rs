@@ -305,9 +305,7 @@ impl DistributedRegistry {
         let chunks = self.chunks.read();
         chunks
             .iter()
-            .filter(|(_, placement)| {
-                placement.locations.iter().any(|loc| loc.node_id == node_id)
-            })
+            .filter(|(_, placement)| placement.locations.iter().any(|loc| loc.node_id == node_id))
             .map(|(id, _)| id.clone())
             .collect()
     }

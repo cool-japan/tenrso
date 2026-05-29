@@ -622,7 +622,10 @@ where
     let mttkrp_result = mttkrp(&tensor.view(), &factor_views, 0)
         .map_err(|e| CpError::ShapeMismatch(e.to_string()))?;
 
-    Ok(compute_inner_product_from_mttkrp(&mttkrp_result, &factors[0]))
+    Ok(compute_inner_product_from_mttkrp(
+        &mttkrp_result,
+        &factors[0],
+    ))
 }
 
 /// Compute inner product <X, X_recon> from a pre-computed MTTKRP result.

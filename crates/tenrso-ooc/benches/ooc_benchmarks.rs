@@ -52,8 +52,7 @@ fn bench_arrow_ipc(c: &mut Criterion) {
     group.bench_function("write_256x256x16", |b| {
         b.iter(|| {
             let path = temp_path("arrow_write.arrow");
-            let mut writer =
-                ArrowWriter::new(&path).expect("arrow writer creation failed");
+            let mut writer = ArrowWriter::new(&path).expect("arrow writer creation failed");
             writer.write(&tensor).expect("arrow write failed");
             writer.finish().expect("arrow finish failed");
             std::fs::remove_file(&path).ok();
@@ -63,16 +62,14 @@ fn bench_arrow_ipc(c: &mut Criterion) {
     // --- Read (pre-write the file once, bench reads) ---
     let read_path = temp_path("arrow_read.arrow");
     {
-        let mut w =
-            ArrowWriter::new(&read_path).expect("arrow writer creation failed");
+        let mut w = ArrowWriter::new(&read_path).expect("arrow writer creation failed");
         w.write(&tensor).expect("arrow write failed");
         w.finish().expect("arrow finish failed");
     }
 
     group.bench_function("read_256x256x16", |b| {
         b.iter(|| {
-            let mut reader =
-                ArrowReader::open(&read_path).expect("arrow reader open failed");
+            let mut reader = ArrowReader::open(&read_path).expect("arrow reader open failed");
             let loaded = reader.read().expect("arrow read failed");
             black_box(loaded);
         });
@@ -82,13 +79,11 @@ fn bench_arrow_ipc(c: &mut Criterion) {
     group.bench_function("roundtrip_256x256x16", |b| {
         b.iter(|| {
             let path = temp_path("arrow_rt.arrow");
-            let mut writer =
-                ArrowWriter::new(&path).expect("arrow writer creation failed");
+            let mut writer = ArrowWriter::new(&path).expect("arrow writer creation failed");
             writer.write(&tensor).expect("arrow write failed");
             writer.finish().expect("arrow finish failed");
 
-            let mut reader =
-                ArrowReader::open(&path).expect("arrow reader open failed");
+            let mut reader = ArrowReader::open(&path).expect("arrow reader open failed");
             let loaded = reader.read().expect("arrow read failed");
             std::fs::remove_file(&path).ok();
             black_box(loaded);
@@ -123,8 +118,7 @@ fn bench_parquet(c: &mut Criterion) {
     group.bench_function("write_32x32", |b| {
         b.iter(|| {
             let path = temp_path("pq_write.parquet");
-            let mut writer =
-                ParquetWriter::new(&path).expect("parquet writer creation failed");
+            let mut writer = ParquetWriter::new(&path).expect("parquet writer creation failed");
             writer.write(&tensor).expect("parquet write failed");
             // finish() consumes self
             writer.finish().expect("parquet finish failed");
@@ -135,16 +129,14 @@ fn bench_parquet(c: &mut Criterion) {
     // --- Read (pre-write once) ---
     let read_path = temp_path("pq_read.parquet");
     {
-        let mut w =
-            ParquetWriter::new(&read_path).expect("parquet writer creation failed");
+        let mut w = ParquetWriter::new(&read_path).expect("parquet writer creation failed");
         w.write(&tensor).expect("parquet write failed");
         w.finish().expect("parquet finish failed");
     }
 
     group.bench_function("read_32x32", |b| {
         b.iter(|| {
-            let reader =
-                ParquetReader::open(&read_path).expect("parquet reader open failed");
+            let reader = ParquetReader::open(&read_path).expect("parquet reader open failed");
             let loaded = reader.read().expect("parquet read failed");
             black_box(loaded);
         });
@@ -154,13 +146,11 @@ fn bench_parquet(c: &mut Criterion) {
     group.bench_function("roundtrip_32x32", |b| {
         b.iter(|| {
             let path = temp_path("pq_rt.parquet");
-            let mut writer =
-                ParquetWriter::new(&path).expect("parquet writer creation failed");
+            let mut writer = ParquetWriter::new(&path).expect("parquet writer creation failed");
             writer.write(&tensor).expect("parquet write failed");
             writer.finish().expect("parquet finish failed");
 
-            let reader =
-                ParquetReader::open(&path).expect("parquet reader open failed");
+            let reader = ParquetReader::open(&path).expect("parquet reader open failed");
             let loaded = reader.read().expect("parquet read failed");
             std::fs::remove_file(&path).ok();
             black_box(loaded);
@@ -225,8 +215,8 @@ fn bench_mmap_io(c: &mut Criterion) {
 
     group.bench_function("read_binary_256x256x16", |b| {
         b.iter(|| {
-            let loaded = tenrso_ooc::mmap_io::read_tensor_binary(&read_path)
-                .expect("binary read failed");
+            let loaded =
+                tenrso_ooc::mmap_io::read_tensor_binary(&read_path).expect("binary read failed");
             black_box(loaded);
         });
     });
@@ -265,8 +255,7 @@ fn bench_mmap_io(c: &mut Criterion) {
             &side,
             |b, _| {
                 b.iter(|| {
-                    let mmap =
-                        MmapTensor::<f64>::open(&p).expect("mmap open failed");
+                    let mmap = MmapTensor::<f64>::open(&p).expect("mmap open failed");
                     black_box(mmap.as_slice().len());
                 });
             },
@@ -310,9 +299,7 @@ fn bench_batch_io(c: &mut Criterion) {
         .batch_size(num_chunks)
         .parallel(false);
 
-    let config_par = BatchConfig::default()
-        .batch_size(num_chunks)
-        .parallel(true);
+    let config_par = BatchConfig::default().batch_size(num_chunks).parallel(true);
 
     // --- Sequential batch write ---
     group.bench_function("write_8chunks_seq", |b| {
@@ -424,21 +411,19 @@ fn bench_compression(c: &mut Criterion) {
         group.bench_function("lz4_compress_128x128", |b| {
             b.iter(|| {
                 let compressed =
-                    compress_bytes(&raw_bytes, CompressionCodec::Lz4)
-                        .expect("lz4 compress failed");
+                    compress_bytes(&raw_bytes, CompressionCodec::Lz4).expect("lz4 compress failed");
                 black_box(compressed.len());
             });
         });
 
         // pre-compress for decompression bench
         let compressed_lz4 =
-            compress_bytes(&raw_bytes, CompressionCodec::Lz4)
-                .expect("lz4 compress setup failed");
+            compress_bytes(&raw_bytes, CompressionCodec::Lz4).expect("lz4 compress setup failed");
 
         group.bench_function("lz4_decompress_128x128", |b| {
             b.iter(|| {
-                let decompressed = decompress_bytes(&compressed_lz4)
-                    .expect("lz4 decompress failed");
+                let decompressed =
+                    decompress_bytes(&compressed_lz4).expect("lz4 decompress failed");
                 black_box(decompressed.len());
             });
         });
@@ -461,28 +446,23 @@ fn bench_compression(c: &mut Criterion) {
         for &level in &[1, 3, 9] {
             let codec = CompressionCodec::Zstd { level };
 
-            group.bench_function(
-                format!("zstd_lvl{level}_compress_128x128"),
-                |b| {
-                    b.iter(|| {
-                        let compressed =
-                            compress_bytes(&raw_bytes, codec)
-                                .expect("zstd compress failed");
-                        black_box(compressed.len());
-                    });
-                },
-            );
+            group.bench_function(format!("zstd_lvl{level}_compress_128x128"), |b| {
+                b.iter(|| {
+                    let compressed =
+                        compress_bytes(&raw_bytes, codec).expect("zstd compress failed");
+                    black_box(compressed.len());
+                });
+            });
         }
 
         // Decompress at default level 3
-        let compressed_zstd =
-            compress_bytes(&raw_bytes, CompressionCodec::Zstd { level: 3 })
-                .expect("zstd compress setup failed");
+        let compressed_zstd = compress_bytes(&raw_bytes, CompressionCodec::Zstd { level: 3 })
+            .expect("zstd compress setup failed");
 
         group.bench_function("zstd_decompress_128x128", |b| {
             b.iter(|| {
-                let decompressed = decompress_bytes(&compressed_zstd)
-                    .expect("zstd decompress failed");
+                let decompressed =
+                    decompress_bytes(&compressed_zstd).expect("zstd decompress failed");
                 black_box(decompressed.len());
             });
         });
@@ -505,11 +485,7 @@ fn bench_compression(c: &mut Criterion) {
         let s = [side, side];
         let elems = s.iter().product::<usize>() as u64;
         let t = make_random_tensor(&s, 42);
-        let bytes: Vec<u8> = t
-            .as_slice()
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = t.as_slice().iter().flat_map(|v| v.to_le_bytes()).collect();
 
         group.throughput(Throughput::Elements(elems));
 
@@ -519,9 +495,8 @@ fn bench_compression(c: &mut Criterion) {
             &side,
             |b, _| {
                 b.iter(|| {
-                    let compressed =
-                        compress_bytes(&bytes, CompressionCodec::Lz4)
-                            .expect("lz4 scale compress failed");
+                    let compressed = compress_bytes(&bytes, CompressionCodec::Lz4)
+                        .expect("lz4 scale compress failed");
                     black_box(compressed.len());
                 });
             },
@@ -533,9 +508,8 @@ fn bench_compression(c: &mut Criterion) {
             &side,
             |b, _| {
                 b.iter(|| {
-                    let compressed =
-                        compress_bytes(&bytes, CompressionCodec::Zstd { level: 3 })
-                            .expect("zstd scale compress failed");
+                    let compressed = compress_bytes(&bytes, CompressionCodec::Zstd { level: 3 })
+                        .expect("zstd scale compress failed");
                     black_box(compressed.len());
                 });
             },
@@ -577,9 +551,7 @@ fn bench_streaming_add(c: &mut Criterion) {
             |bencher, _| {
                 let mut executor = StreamingExecutor::new(config.clone());
                 bencher.iter(|| {
-                    let result = executor
-                        .add_chunked(&a, &b)
-                        .expect("streaming add failed");
+                    let result = executor.add_chunked(&a, &b).expect("streaming add failed");
                     black_box(result);
                 });
             },

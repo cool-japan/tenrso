@@ -384,8 +384,11 @@ where
         let out_idx = decode_flat(out_flat, &out_sizes);
 
         // Build a mapping from char -> position value for output indices.
-        let mut char_val: std::collections::HashMap<char, usize> =
-            out_chars.iter().copied().zip(out_idx.iter().copied()).collect();
+        let mut char_val: std::collections::HashMap<char, usize> = out_chars
+            .iter()
+            .copied()
+            .zip(out_idx.iter().copied())
+            .collect();
 
         let mut acc = T::default();
 
@@ -482,11 +485,8 @@ mod tests {
     #[test]
     fn test_general_einsum_3d_times_2d() {
         // a[2,2,2]: row-major values 1..8
-        let a = DenseND::from_vec(
-            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-            &[2, 2, 2],
-        )
-        .unwrap();
+        let a =
+            DenseND::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 2, 2]).unwrap();
         // b[2,2]: [[1,0],[0,1]] (identity — result should equal a's k-slices unchanged)
         let b = DenseND::from_vec(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
 
@@ -521,14 +521,10 @@ mod tests {
     #[test]
     fn test_general_einsum_middle_contraction() {
         // a[2,2,2] row-major: [[[ 1, 2],[ 3, 4]], [[ 5, 6],[ 7, 8]]]
-        let a = DenseND::from_vec(
-            vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-            &[2, 2, 2],
-        )
-        .unwrap();
+        let a = DenseND::from_vec(vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 2, 2])
+            .unwrap();
         // b[2,3]: [[1,2,3],[4,5,6]]
-        let b =
-            DenseND::from_vec(vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let b = DenseND::from_vec(vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
 
         let spec = EinsumSpec::parse("ijk,jl->ikl").unwrap();
         let c = execute_dense_contraction(&spec, &a, &b).unwrap();

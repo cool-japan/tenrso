@@ -421,14 +421,11 @@ where
     let l = (k + oversampling).min(m).min(n);
 
     let mut rng = thread_rng();
-    let normal = Normal::new(0.0, 1.0).map_err(|e| {
-        anyhow::anyhow!("failed to construct Normal(0.0, 1.0): {e}")
-    })?;
+    let normal = Normal::new(0.0, 1.0)
+        .map_err(|e| anyhow::anyhow!("failed to construct Normal(0.0, 1.0): {e}"))?;
 
     // Step 1: Generate random Gaussian matrix Omega (n x l)
-    let omega = Array2::<T>::from_shape_fn((n, l), |_| {
-        cast_lit(normal.sample(&mut rng))
-    });
+    let omega = Array2::<T>::from_shape_fn((n, l), |_| cast_lit(normal.sample(&mut rng)));
 
     // Step 2: Form the sample matrix Y = A * Omega (m x l)
     let mut y = matrix.dot(&omega);
@@ -464,9 +461,7 @@ where
         .slice(scirs2_core::ndarray_ext::s![.., ..k])
         .to_owned();
     let s_trunc = s.slice(scirs2_core::ndarray_ext::s![..k]).to_owned();
-    let vt_trunc = vt
-        .slice(scirs2_core::ndarray_ext::s![..k, ..])
-        .to_owned();
+    let vt_trunc = vt.slice(scirs2_core::ndarray_ext::s![..k, ..]).to_owned();
 
     Ok((u_trunc, s_trunc, vt_trunc))
 }

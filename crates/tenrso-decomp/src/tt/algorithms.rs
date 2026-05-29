@@ -118,14 +118,9 @@ where
         let use_randomized = crate::utils::should_use_randomized_svd(rows, cols, target_rank);
 
         let (u, s, vt) = if use_randomized {
-            crate::utils::randomized_svd_truncated(
-                &c_matrix.view(),
-                target_rank,
-                10,
-                2,
-            ).map_err(|e| TTError::SvdError(format!(
-                "Randomized SVD failed at mode {}: {}", k, e
-            )))?
+            crate::utils::randomized_svd_truncated(&c_matrix.view(), target_rank, 10, 2).map_err(
+                |e| TTError::SvdError(format!("Randomized SVD failed at mode {}: {}", k, e)),
+            )?
         } else {
             svd(&c_matrix.view(), false, None)
                 .map_err(|e| TTError::SvdError(format!("SVD failed at mode {}: {}", k, e)))?

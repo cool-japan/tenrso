@@ -292,7 +292,9 @@ pub fn dijkstra<T: Float + std::cmp::PartialOrd>(
             }
 
             let new_dist = d + weight;
-            if dist[v].is_none() || new_dist < dist[v].expect("dist[v] is Some because is_none() returned false") {
+            if dist[v].is_none()
+                || new_dist < dist[v].expect("dist[v] is Some because is_none() returned false")
+            {
                 dist[v] = Some(new_dist);
                 pq.push((new_dist, v));
             }
@@ -485,7 +487,8 @@ pub fn strongly_connected_components<T: Float>(graph: &CsrMatrix<T>) -> Vec<Vec<
                 lowlinks[v] = lowlinks[v].min(lowlinks[w]);
             } else if on_stack[w] {
                 // Successor w is in stack and hence in current SCC
-                lowlinks[v] = lowlinks[v].min(indices[w].expect("indices[w] is Some: is_none() was checked above"));
+                lowlinks[v] = lowlinks[v]
+                    .min(indices[w].expect("indices[w] is Some: is_none() was checked above"));
             }
         }
 
@@ -494,7 +497,9 @@ pub fn strongly_connected_components<T: Float>(graph: &CsrMatrix<T>) -> Vec<Vec<
             let mut scc = Vec::new();
 
             loop {
-                let w = stack.pop().expect("stack is non-empty: v was pushed before this loop");
+                let w = stack
+                    .pop()
+                    .expect("stack is non-empty: v was pushed before this loop");
                 on_stack[w] = false;
                 scc.push(w);
 
@@ -638,7 +643,8 @@ pub fn is_bipartite<T: Float>(graph: &CsrMatrix<T>) -> bool {
         color[start] = Some(0);
 
         while let Some(u) = queue.pop_front() {
-            let u_color = color[u].expect("color[u] is Some: only colored nodes are added to queue");
+            let u_color =
+                color[u].expect("color[u] is Some: only colored nodes are added to queue");
 
             let row_start = graph.row_ptr()[u];
             let row_end = graph.row_ptr()[u + 1];

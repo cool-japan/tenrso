@@ -193,34 +193,31 @@ fn bench_comparison(c: &mut Criterion) {
         let param_label = format!("{}x{}_sp{:.0}", size, size, sparsity * 100.0);
 
         // Dense baseline
-        group.bench_with_input(
-            BenchmarkId::new("dense", &param_label),
-            &(),
-            |bench, _| {
-                bench.iter(|| {
-                    black_box(dense_matmul(black_box(&a), black_box(&b)));
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("dense", &param_label), &(), |bench, _| {
+            bench.iter(|| {
+                black_box(dense_matmul(black_box(&a), black_box(&b)));
+            });
+        });
 
         // Masked einsum
-        group.bench_with_input(
-            BenchmarkId::new("masked", &param_label),
-            &(),
-            |bench, _| {
-                bench.iter(|| {
-                    let _ = black_box(masked_einsum(
-                        black_box("ij,jk->ik"),
-                        black_box(&[&a, &b]),
-                        black_box(&mask),
-                    ));
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("masked", &param_label), &(), |bench, _| {
+            bench.iter(|| {
+                let _ = black_box(masked_einsum(
+                    black_box("ij,jk->ik"),
+                    black_box(&[&a, &b]),
+                    black_box(&mask),
+                ));
+            });
+        });
     }
 
     group.finish();
 }
 
-criterion_group!(benches, bench_dense_naive, bench_masked_einsum, bench_comparison);
+criterion_group!(
+    benches,
+    bench_dense_naive,
+    bench_masked_einsum,
+    bench_comparison
+);
 criterion_main!(benches);

@@ -394,17 +394,20 @@ where
         // Use randomized SVD when the matrix is large relative to target rank
         let factor = if crate::utils::should_use_randomized_svd(rows, cols, rank) {
             let (u, _s, _vt) = crate::utils::randomized_svd_truncated(
-                &unfolded.view(), rank, 10, 2,
-            ).map_err(|e| TuckerError::SvdError(format!(
-                "Randomized SVD failed for mode {}: {}", mode, e
-            )))?;
+                &unfolded.view(),
+                rank,
+                10,
+                2,
+            )
+            .map_err(|e| {
+                TuckerError::SvdError(format!("Randomized SVD failed for mode {}: {}", mode, e))
+            })?;
             u
         } else {
             // Full SVD for small matrices
-            let (u, _s, _vt) = svd(&unfolded.view(), false, None)
-                .map_err(|e| TuckerError::SvdError(format!(
-                    "SVD failed for mode {}: {}", mode, e
-                )))?;
+            let (u, _s, _vt) = svd(&unfolded.view(), false, None).map_err(|e| {
+                TuckerError::SvdError(format!("SVD failed for mode {}: {}", mode, e))
+            })?;
             extract_columns(&u, rank)
         };
 
@@ -487,11 +490,11 @@ where
 
             // Use randomized SVD for large matrices
             let factor = if crate::utils::should_use_randomized_svd(rows, cols, rank) {
-                let (u, _s, _vt) = crate::utils::randomized_svd_truncated(
-                    &y_unfolded.view(), rank, 10, 1,
-                ).map_err(|e| TuckerError::SvdError(format!(
-                    "Randomized SVD failed: {}", e
-                )))?;
+                let (u, _s, _vt) =
+                    crate::utils::randomized_svd_truncated(&y_unfolded.view(), rank, 10, 1)
+                        .map_err(|e| {
+                            TuckerError::SvdError(format!("Randomized SVD failed: {}", e))
+                        })?;
                 u
             } else {
                 let (u, _s, _vt) = svd(&y_unfolded.view(), false, None)
@@ -507,8 +510,7 @@ where
 
         // Check convergence via core norm change (cheap proxy for fit improvement)
         let core_norm = core_frob_norm(&decomp.core);
-        let norm_change = (core_norm - prev_core_norm).abs()
-            / (prev_core_norm + T::epsilon());
+        let norm_change = (core_norm - prev_core_norm).abs() / (prev_core_norm + T::epsilon());
 
         if iter > 0 && norm_change < tol_t {
             break;
@@ -609,9 +611,7 @@ where
 
     // Sort modes by ascending output rank (factor.nrows() is I_k, ncols() is R_k).
     // Contracting the mode with smallest R_k first shrinks the tensor fastest.
-    let mut mode_order: Vec<usize> = (0..factors.len())
-        .filter(|&m| m != skip_mode)
-        .collect();
+    let mut mode_order: Vec<usize> = (0..factors.len()).filter(|&m| m != skip_mode).collect();
     mode_order.sort_by_key(|&m| factors[m].ncols());
 
     for mode in mode_order {

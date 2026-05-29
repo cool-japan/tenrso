@@ -114,8 +114,7 @@ pub fn power_iteration<T: Float>(
         // to avoid accidentally starting with an eigenvector
         (0..n)
             .map(|i| {
-                T::from(i + 1)
-                    .ok_or_else(|| SparseError::validation("cannot represent index as T"))
+                T::from(i + 1).ok_or_else(|| SparseError::validation("cannot represent index as T"))
             })
             .collect::<Result<Vec<_>, _>>()?
     };
@@ -240,8 +239,7 @@ pub fn inverse_power_iteration<T: Float>(
         // Use non-constant initialization
         (0..n)
             .map(|i| {
-                T::from(i + 1)
-                    .ok_or_else(|| SparseError::validation("cannot represent index as T"))
+                T::from(i + 1).ok_or_else(|| SparseError::validation("cannot represent index as T"))
             })
             .collect::<Result<Vec<_>, _>>()?
     };

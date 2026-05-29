@@ -1,8 +1,8 @@
+use std::time::Instant;
 use tenrso_core::DenseND;
 use tenrso_decomp::cp::{cp_als, InitStrategy};
-use tenrso_decomp::tucker::{tucker_hooi, tucker_hosvd};
 use tenrso_decomp::tt::tt_svd;
-use std::time::Instant;
+use tenrso_decomp::tucker::{tucker_hooi, tucker_hosvd};
 
 fn main() {
     // CP-ALS benchmark: 256^3, rank 64, 10 iters
@@ -12,7 +12,12 @@ fn main() {
     let cp = cp_als(&tensor_cp, 64, 10, 1e-8, InitStrategy::Random, None);
     let cp_time = t0.elapsed();
     match cp {
-        Ok(r) => println!("  Time: {:.2}s  fit={:.4}  iters={}", cp_time.as_secs_f64(), r.fit, r.iters),
+        Ok(r) => println!(
+            "  Time: {:.2}s  fit={:.4}  iters={}",
+            cp_time.as_secs_f64(),
+            r.fit,
+            r.iters
+        ),
         Err(e) => println!("  FAILED: {}", e),
     }
 
@@ -23,7 +28,11 @@ fn main() {
     let tucker = tucker_hooi(&tensor_tucker, &[32, 32, 16], 10, 1e-4);
     let tucker_time = t1.elapsed();
     match tucker {
-        Ok(r) => println!("  Time: {:.2}s  iters={}", tucker_time.as_secs_f64(), r.iters),
+        Ok(r) => println!(
+            "  Time: {:.2}s  iters={}",
+            tucker_time.as_secs_f64(),
+            r.iters
+        ),
         Err(e) => println!("  FAILED: {}", e),
     }
 
@@ -34,7 +43,11 @@ fn main() {
     let hosvd = tucker_hosvd(&tensor_hosvd, &[64, 64, 32]);
     let hosvd_time = t2.elapsed();
     match hosvd {
-        Ok(r) => println!("  Time: {:.2}s  iters={}", hosvd_time.as_secs_f64(), r.iters),
+        Ok(r) => println!(
+            "  Time: {:.2}s  iters={}",
+            hosvd_time.as_secs_f64(),
+            r.iters
+        ),
         Err(e) => println!("  FAILED: {}", e),
     }
 

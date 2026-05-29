@@ -787,10 +787,7 @@ where
 
         // SVD: mat = U * diag(S) * Vt
         let (u, s, vt) = svd(&mat.view(), false, None).map_err(|e| {
-            KernelError::operation_error(
-                "tt_truncate",
-                format!("SVD of core {} failed: {}", k, e),
-            )
+            KernelError::operation_error("tt_truncate", format!("SVD of core {} failed: {}", k, e))
         })?;
 
         // Per-bond rank cap: max_ranks[k-1] is the cap for bond k (between core k-1 and k).
@@ -2131,12 +2128,9 @@ mod tests {
         let core1 = Array3::<f64>::from_shape_fn((1, 4, 5), |(_, i, j)| {
             ((i + 1) as f64) * ((j + 1) as f64) * 0.1
         });
-        let core2 = Array3::<f64>::from_shape_fn((5, 4, 5), |(i, j, k)| {
-            ((i + j + k + 1) as f64) * 0.05
-        });
-        let core3 = Array3::<f64>::from_shape_fn((5, 4, 1), |(i, j, _)| {
-            ((i + j + 1) as f64) * 0.1
-        });
+        let core2 =
+            Array3::<f64>::from_shape_fn((5, 4, 5), |(i, j, k)| ((i + j + k + 1) as f64) * 0.05);
+        let core3 = Array3::<f64>::from_shape_fn((5, 4, 1), |(i, j, _)| ((i + j + 1) as f64) * 0.1);
 
         let mut cores = vec![core1, core2, core3];
 

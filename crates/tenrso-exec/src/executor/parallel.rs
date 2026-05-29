@@ -71,8 +71,13 @@ where
     // apply the operation in parallel over the resulting equal-shaped tensors.
     let x_shape = x.shape().to_vec();
     let y_shape = y.shape().to_vec();
-    let broadcast_shape = compute_broadcast_shape(&x_shape, &y_shape)
-        .ok_or_else(|| anyhow::anyhow!("parallel_binary: shapes {:?} and {:?} are not broadcast-compatible", x_shape, y_shape))?;
+    let broadcast_shape = compute_broadcast_shape(&x_shape, &y_shape).ok_or_else(|| {
+        anyhow::anyhow!(
+            "parallel_binary: shapes {:?} and {:?} are not broadcast-compatible",
+            x_shape,
+            y_shape
+        )
+    })?;
 
     let x_expanded = x.broadcast_to(&broadcast_shape)?;
     let y_expanded = y.broadcast_to(&broadcast_shape)?;
@@ -425,14 +430,8 @@ mod tests {
 
     #[test]
     fn test_compute_broadcast_shape() {
-        assert_eq!(
-            compute_broadcast_shape(&[3, 1], &[1, 4]),
-            Some(vec![3, 4])
-        );
-        assert_eq!(
-            compute_broadcast_shape(&[5], &[2, 5]),
-            Some(vec![2, 5])
-        );
+        assert_eq!(compute_broadcast_shape(&[3, 1], &[1, 4]), Some(vec![3, 4]));
+        assert_eq!(compute_broadcast_shape(&[5], &[2, 5]), Some(vec![2, 5]));
         assert_eq!(compute_broadcast_shape(&[3, 2], &[3, 4]), None);
     }
 }
