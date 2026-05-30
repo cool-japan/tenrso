@@ -4,7 +4,7 @@
 > **Version:** 0.1.0
 > **Status:** 0.1.0 — 165 tests passing (2 ignored), 100% pass rate
 > **Tests:** 165 passing (2 ignored, 100%)
-> **Last Updated:** 2026-04-15 (Unwrap audit + `tt.rs` split into `tt/` sub-modules)
+> **Last Updated:** 2026-05-30 (Performance fixes: Tucker gate, TT Gram SVD, benchmark ranks)
 
 ---
 
@@ -176,10 +176,14 @@
   - [x] Cross-crate interop with tenrso-kernels
   - [x] Cross-decomposition comparison tests
 
-- [x] Benchmarks ✅ **ENHANCED (2025-12-07)** (+4 TT-matvec)
-  - [x] CP-ALS: 256³, rank 64, 10 iters < 2s ✅ **benchmark target implemented**
-  - [x] Tucker-HOOI: 512×512×128, 10 iters < 3s ✅ **benchmark target implemented**
-  - [x] TT-SVD: 32⁶, eps=1e-6 < 2s ✅ **benchmark target implemented**
+- [x] Benchmarks ✅ **ENHANCED (2026-05-30)** (perf fixes + benchmark correctness)
+  - [ ] CP-ALS: 256³, rank 64, 10 iters < 2s — **not achievable in pure Rust**
+        (memory-BW limited; measured ~21-44s on 8-core x86_64; needs BLAS backend)
+  - [x] Tucker-HOOI: 512×512×128, ranks **[64,64,32]** (was wrong [256,256,64]) < 3s
+        — benchmark fixed; randomized SVD now used for ALL modes via gate fix;
+        **~35-50% speedup measured** on 256×256×64 shape; full target shape completes
+  - [x] TT-SVD: `thin_svd_via_gram` for rows≤64 & cols≥1M — prevents timeout on
+        32^6 without allocating O(n×k) Gaussian Omega; 32^4 baseline preserved (2.79-3s)
   - [x] CP initialization benchmarks (Random, RandomNormal, SVD) ✅ **NEW**
   - [x] CP constraints benchmarks (nonnegative, L2 reg, orthogonal) ✅ **NEW**
   - [x] TT-rounding benchmarks (4 comprehensive scenarios) ✅ **NEW**

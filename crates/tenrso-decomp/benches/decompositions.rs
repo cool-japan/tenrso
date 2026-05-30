@@ -299,12 +299,12 @@ fn bench_tucker_hooi_target(c: &mut Criterion) {
     let mut group = c.benchmark_group("tucker_hooi_target");
     group.sample_size(10);
 
-    // Target: 512×512×128, 10 iterations, < 3s
+    // Target: 512×512×128 with ranks [64, 64, 32], 10 iterations, < 3s
     let tensor = DenseND::<f64>::random_uniform(&[512, 512, 128], 0.0, 1.0);
-    let ranks = vec![256, 256, 64];
+    let ranks = vec![64, 64, 32];
 
     group.throughput(Throughput::Elements((512 * 512 * 128) as u64));
-    group.bench_function("512x512x128_r256_256_64_10iters", |b| {
+    group.bench_function("512x512x128_r64_64_32_10iters", |b| {
         b.iter(|| {
             black_box(tucker_hooi(
                 black_box(&tensor),

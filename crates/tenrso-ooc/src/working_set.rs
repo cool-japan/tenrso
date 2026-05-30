@@ -541,10 +541,13 @@ mod tests {
     fn test_regular_pattern_detection() {
         let mut predictor = WorkingSetPredictor::new();
 
-        // Create regular access pattern with fixed interval
-        for _ in 0..5 {
+        // Create a regular access pattern.  Use 50 ms sleeps so OS scheduling
+        // jitter (typically ±5 ms) represents <10% relative variance, keeping
+        // the coefficient of variation well below the 0.5 threshold even on
+        // a loaded CI machine.
+        for _ in 0..8 {
             predictor.record_access("chunk_0", 1024);
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(50));
         }
 
         let stats = predictor.chunk_stats.get("chunk_0").unwrap();

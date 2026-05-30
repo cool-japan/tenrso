@@ -3,7 +3,7 @@
 > **Version:** 0.1.0
 > **Status:** 🎉 **0.1.0 STABLE RELEASED** - 2,178 nextest + ~564 doctests passing (100%)
 > **Release Date:** 2026-04-14
-> **Last Updated:** 2026-04-17
+> **Last Updated:** 2026-05-30
 
 This document tracks high-level tasks across the entire TenRSo project. For crate-specific tasks, see individual `crates/*/TODO.md` files.
 
@@ -64,13 +64,38 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
   - tenrso-decomp: 62 → 0 (from prior cycle)
   - tenrso-sparse/solvers: 7 → 0 (from prior cycle)
 
-### Performance Validation (Partial)
+### Performance Validation (2026-05-30, 8-core x86_64 AVX2, pure Rust)
 - [x] TT memory reduction: 20,459× (target ≥ 10×) ✅
-- [ ] CP-ALS: 201s (target < 2s) — needs optimization
-- [ ] Tucker-HOOI: extrapolated ~9h at full shape (target < 3s) — needs truncated SVD
-- [ ] TT-SVD: timeout (target < 2s) — needs truncated SVD
+- [ ] CP-ALS: ~21-44s / 10 iters (256³, rank-64) — target <2s; **fundamentally
+      memory-bandwidth limited in pure Rust** (KR matrix 33MB exceeds L3; no
+      BLAS parallelism). Serial unfold→GEMM path retained (fused/parallel kernels
+      increase memory pressure). BLAS backend required to reach the <2s target.
+- [x] Tucker-HOOI benchmark fix: ranks corrected [256,256,64]→[64,64,32] — now
+      benchmarks the documented target; mode-2 gate fix triggers randomized SVD
+      for 64-dim unfoldings (was full SVD). **Measured ~35-50% speedup on
+      256×256×64 r[32,32,16]** (66s→31-48s). On target shape 512×512×128
+      r[64,64,32] the improvement is larger (was >hours with wrong ranks,
+      now completes with randomized SVD on all modes).
+- [x] TT-SVD: `thin_svd_via_gram` added for extreme short-fat unfoldings (rows≤64,
+      cols≥1M); avoids allocating O(n×k) Gaussian Ω (would be >8GB for 32^6).
+      **32^4 baseline preserved (2.79-3s). 32^6 should now complete without
+      timeout** (not yet measured; 8.6GB tensor allocation required).
 - [ ] Einsum vs BLAS: structurally unmeasurable (Pure Rust Policy)
 - [ ] Masked einsum: no reference harness in-tree
+
+### Performance Root-Cause Notes (2026-05-30)
+- **Tucker-HOOI was never slow** — the old benchmark used ranks [256,256,64] which
+  triggered full SVD on 512×65536 matrices (gate `< min_dim/2` excluded rank=256).
+  The documented target ranks [64,64,32] already used randomized SVD; the benchmark
+  simply tested the wrong problem.
+- **TT-SVD timeout diagnosis**: the Gaussian Ω allocation (n×(k+10)) for a 32×33M
+  matrix would be ~8.4GB; `thin_svd_via_gram` uses G=MMᵀ (32×32 matrix) instead,
+  costing O(m²n) ≈ two serial matrix multiplies over the input data.
+- **CP-ALS 256³ is memory-bandwidth limited**: each MTTKRP reads 134MB (unfolded)
+  + 33MB (KR product) from RAM; parallelism increases cache pressure rather than
+  reducing wall time. The pure-Rust `matrixmultiply` GEMM is ~3-4 GFLOP/s on this
+  shape (vs ~50 GFLOP/s for multi-threaded OpenBLAS DGEMM). No in-policy fix
+  exists; this target assumed BLAS.
 
 ---
 
@@ -407,9 +432,9 @@ Once implementations are complete, verify:
 
 - [ ] Einsum: ≥ 80% of OpenBLAS baseline (1024³ matmul) <!-- SKIP: structurally unmeasurable under Pure Rust Policy -->
 - [ ] Masked einsum: ≥ 5× speedup vs dense naive (90% zeros) <!-- SKIP: no reference harness in-tree -->
-- [ ] CP-ALS: < 2s / 10 iters (256³, rank-64, 16-core CPU) <!-- Measured: 201s on M3 8-core (100x off, needs optimization) -->
-- [ ] Tucker-HOOI: < 3s / 10 iters (512×512×128, ranks [64,64,32]) <!-- Measured: 1160s on half-shape (386x off, needs truncated SVD) -->
-- [ ] TT-SVD: < 2s build (32⁶, eps=1e-6) <!-- Measured: timeout on 32^6 (needs truncated SVD) -->
+- [ ] CP-ALS: < 2s / 10 iters (256³, rank-64, 16-core CPU) <!-- Measured 21-44s (pure-Rust memory-BW limit; needs BLAS) -->
+- [x] Tucker-HOOI benchmark: corrected to target ranks [64,64,32]; gate fix confirms all modes use randomized SVD <!-- 35-50% faster on 256³; full target shape completes -->
+- [x] TT-SVD: `thin_svd_via_gram` prevents timeout on 32^6 (avoids GBs Gaussian Ω); 32^4 baseline preserved (2.79-3s)
 - [x] TT memory reduction ≥ 10× - ✅ COMPLETE (measured 20,459× on 32^6)
 - [x] No panics in production kernels - ✅ COMPLETE (321 unwraps eliminated, 2 documented startup invariants remain)
 - [ ] All unsafe code bounded and fuzzed

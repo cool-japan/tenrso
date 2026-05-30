@@ -66,6 +66,7 @@ where
         + Sync
         + scirs2_core::ndarray_ext::ScalarOperand
         + scirs2_core::numeric::FromPrimitive
+        + std::fmt::Display
         + 'static,
 {
     let start_time = std::time::Instant::now();
@@ -118,9 +119,8 @@ where
         for mode in 0..n_modes {
             let tensor_view = tensor.view();
             let factor_views: Vec<_> = factors.iter().map(|f| f.view()).collect();
-
             let mttkrp_result = mttkrp(&tensor_view, &factor_views, mode)
-                .map_err(|e| CpError::ShapeMismatch(format!("MTTKRP failed: {}", e)))?;
+                .map_err(|e| CpError::ShapeMismatch(e.to_string()))?;
 
             let gram = compute_gram_hadamard(&factors, mode);
 

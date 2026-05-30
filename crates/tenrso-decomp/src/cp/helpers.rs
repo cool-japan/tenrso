@@ -10,7 +10,6 @@ use scirs2_core::random::{thread_rng, Distribution, RandNormal as Normal};
 // lstsq replaced by inv for batch solve — see solve_least_squares
 use std::iter::Sum;
 use tenrso_core::DenseND;
-use tenrso_kernels::mttkrp;
 
 /// Infallibly cast a literal / well-bounded numeric value to `T`.
 ///
@@ -193,6 +192,7 @@ where
         + Sync
         + scirs2_core::ndarray_ext::ScalarOperand
         + scirs2_core::numeric::FromPrimitive
+        + std::fmt::Display
         + 'static,
 {
     let tensor_norm = tensor.frobenius_norm();
@@ -616,8 +616,9 @@ pub(crate) fn compute_inner_product<T>(
     factors: &[Array2<T>],
 ) -> Result<T, CpError>
 where
-    T: Float + 'static,
+    T: Float + NumCast + 'static,
 {
+    use tenrso_kernels::mttkrp;
     let factor_views: Vec<_> = factors.iter().map(|f| f.view()).collect();
     let mttkrp_result = mttkrp(&tensor.view(), &factor_views, 0)
         .map_err(|e| CpError::ShapeMismatch(e.to_string()))?;

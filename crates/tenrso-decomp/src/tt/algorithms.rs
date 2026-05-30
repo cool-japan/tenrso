@@ -111,13 +111,21 @@ where
         let c_matrix = Array2::from_shape_vec((rows, cols), c_data)
             .map_err(|e| TTError::ShapeMismatch(format!("Matrix reshape failed: {}", e)))?;
 
-        // Compute SVD — use randomized when the matrix is large relative to target rank.
-        // For TT-SVD the first matrices are often extremely wide (e.g. 32 x 33M for 32^6),
-        // making full SVD infeasible.
         let target_rank = max_ranks[k];
-        let use_randomized = crate::utils::should_use_randomized_svd(rows, cols, target_rank);
 
-        let (u, s, vt) = if use_randomized {
+        // Choose SVD strategy based on matrix shape:
+        //  ① Short-fat extreme (rows ≤ 64, cols ≥ 1M): Gram SVD avoids allocating a
+        //    cols×(k+oversampling) Gaussian Omega that would be GBs for very wide
+        //    TT unfoldings (e.g. first step of 32^6 has cols ≈ 33M).
+        //    Gram SVD costs O(m²n) — two matrix multiplies — which is heavier than
+        //    full SVD for moderate sizes; hence the 1M lower bound on cols.
+        //  ② Otherwise large: randomized SVD (Halko-Martinsson-Tropp).
+        //  ③ Small/balanced: full thin SVD.
+        let (u, s, vt) = if rows <= 64 && cols >= 1_000_000 {
+            crate::utils::thin_svd_via_gram(&c_matrix.view(), target_rank).map_err(
+                |e| TTError::SvdError(format!("Gram SVD failed at mode {}: {}", k, e)),
+            )?
+        } else if crate::utils::should_use_randomized_svd(rows, cols, target_rank) {
             crate::utils::randomized_svd_truncated(&c_matrix.view(), target_rank, 10, 2).map_err(
                 |e| TTError::SvdError(format!("Randomized SVD failed at mode {}: {}", k, e)),
             )?

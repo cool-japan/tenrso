@@ -7,24 +7,22 @@
 //! - Computing factor statistics
 
 use anyhow::Result;
-use scirs2_core::ndarray_ext::Array2;
-use scirs2_core::numeric::{Float, NumCast, ToPrimitive};
+use scirs2_core::ndarray_ext::{Array1, Array2, ScalarOperand};
+use scirs2_core::numeric::{Float, NumAssign, NumCast, ToPrimitive};
 use std::iter::Sum;
 use tenrso_core::DenseND;
 
-/// Infallibly cast a literal / well-bounded numeric value to `T`.
+/// Cast a primitive literal to type T.
 ///
-/// SAFETY: all call sites use numeric literals or non-negative `usize`
-/// values that are representable in any supported `T: Float` (f32, f64).
-/// Returning `T::zero()` in the unreachable failure path preserves
-/// numerical safety without a panic and respects the no-unwrap policy.
+/// Panics if the cast is impossible (e.g., a usize that doesn't fit in f32).
+/// Only intended for small compile-time constants — not for user data.
 #[inline]
-fn cast_lit<T: NumCast, V: ToPrimitive>(v: V) -> T {
-    T::from(v).unwrap_or_else(|| {
-        T::from(0u8).unwrap_or_else(|| {
-            unreachable!("NumCast::from(0u8) must succeed for primitive numeric T")
-        })
-    })
+pub(crate) fn cast_lit<T, L>(val: L) -> T
+where
+    T: NumCast,
+    L: ToPrimitive,
+{
+    NumCast::from(val).expect("cast_lit: numeric cast failed for constant")
 }
 
 /// Statistics for a decomposition method
@@ -378,6 +376,92 @@ where
     Ok(ranks)
 }
 
+/// Compute a truncated SVD of a short-fat matrix (rows << cols) via the Gram matrix.
+///
+/// For an `m × n` matrix A where m << n, full SVD costs O(m² n) — the same as forming
+/// G = A Aᵀ (m×m) and eigendecomposing it. The advantage over randomized SVD is that
+/// Gram SVD avoids allocating an n×(k+oversampling) Gaussian Omega matrix, which would
+/// be O(nk) ≈ O(nm) bytes — potentially gigabytes for very wide TT unfoldings.
+///
+/// # Numerical note
+/// Forming G squares the condition number. For TT-SVD truncation at moderate tolerances
+/// (1e-6 to 1e-10) this is acceptable. Do not use for high-precision singular-vector needs.
+///
+/// # Arguments
+/// * `matrix` — m × n view, must have m ≤ n
+/// * `target_rank` — number of singular triplets to return (clamped to m)
+///
+/// # Returns
+/// (U, S, Vt) where U is m×k, S is k, Vt is k×n
+pub(crate) fn thin_svd_via_gram<T>(
+    matrix: &scirs2_core::ndarray_ext::ArrayView2<T>,
+    target_rank: usize,
+) -> anyhow::Result<(Array2<T>, Array1<T>, Array2<T>)>
+where
+    T: Float
+        + NumCast
+        + NumAssign
+        + Sum
+        + ScalarOperand
+        + Send
+        + Sync
+        + std::fmt::Debug
+        + 'static,
+{
+    use scirs2_core::ndarray_ext::s;
+    use scirs2_linalg::svd;
+
+    let (m, _n) = (matrix.shape()[0], matrix.shape()[1]);
+    let k = target_rank.min(m);
+
+    // Step 1: Gram matrix G = A Aᵀ  (m×m),  cost O(m² n)
+    // For short-fat A, m is tiny so G is cheap to eigendecompose.
+    let g = matrix.dot(&matrix.t());
+
+    // Step 2: SVD of G.  G is symmetric PSD, so its SVD = eigendecomposition:
+    //   G = U diag(λ) Uᵀ,  λᵢ = σᵢ²(A)
+    let (u_full, lambda, _vt_g) = svd(&g.view(), false, None)?;
+
+    // Step 3: Truncate U and derive singular values σ = sqrt(λ)
+    let u_k = u_full.slice(s![.., ..k]).to_owned();
+    let sigma_k: Array1<T> = lambda
+        .slice(s![..k])
+        .mapv(|lam| lam.max(T::zero()).sqrt());
+
+    // Step 4: Recover Vᵀ = diag(1/σ) · Uᵀ · A   (k×n),  cost O(k m n)
+    // Build the scaled Uᵀ first (k×m, cheap), then multiply by A.
+    let eps = T::epsilon() * cast_lit::<T, _>(1000_u64);
+    let mut ut_scaled = u_k.t().to_owned(); // k×m
+    for i in 0..k {
+        let inv_sigma = if sigma_k[i] > eps {
+            T::one() / sigma_k[i]
+        } else {
+            T::zero()
+        };
+        for j in 0..m {
+            ut_scaled[[i, j]] *= inv_sigma;
+        }
+    }
+    let vt_k = ut_scaled.dot(matrix); // (k×m) · (m×n) = k×n
+
+    Ok((u_k, sigma_k, vt_k))
+}
+
+/// Decide whether to use randomized SVD for an m×n matrix with target rank k.
+///
+/// Randomized SVD is profitable when the target rank is at most half the smaller
+/// dimension (so the sketch is genuinely low-rank) and the matrix is large enough
+/// that the constant-factor overhead is worthwhile.
+///
+/// # Arguments
+/// * `rows` — number of matrix rows
+/// * `cols` — number of matrix columns
+/// * `target_rank` — desired number of singular triplets
+pub(crate) fn should_use_randomized_svd(rows: usize, cols: usize, target_rank: usize) -> bool {
+    let min_dim = rows.min(cols);
+    target_rank <= min_dim / 2 && min_dim > 32
+}
+
 /// Compute truncated SVD using randomized algorithm (Halko-Martinsson-Tropp 2011).
 ///
 /// For an m x n matrix, computes an approximate rank-k SVD:
@@ -464,18 +548,6 @@ where
     let vt_trunc = vt.slice(scirs2_core::ndarray_ext::s![..k, ..]).to_owned();
 
     Ok((u_trunc, s_trunc, vt_trunc))
-}
-
-/// Determine whether to use randomized SVD based on matrix dimensions and target rank.
-///
-/// Use randomized SVD when the matrix is "wide" or "tall" relative to the
-/// target rank, making full SVD wasteful.
-#[inline]
-pub fn should_use_randomized_svd(rows: usize, cols: usize, target_rank: usize) -> bool {
-    let min_dim = rows.min(cols);
-    // Use randomized when target rank is much smaller than the matrix
-    // and the matrix is large enough to benefit
-    target_rank < min_dim / 2 && min_dim > 64
 }
 
 #[cfg(test)]

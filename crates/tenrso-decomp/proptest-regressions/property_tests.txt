@@ -10,3 +10,4 @@ cc 6ceddce907a3569166017fb181de0416bebb1eafaef20c4b598af183117b68ca # shrinks to
 cc e1676ade15c959ea9126a59457eb336565ce3a0f2cbe3c3135fc88af7c5a3603 # shrinks to size = 11, rank = 3
 cc 144b1723c8660f0feb385f77373ec52b6eea1d9d904a29702c6904d82fbd71cb # shrinks to size = 11, rank = 3
 cc 3a9bb83321301692dd8b3f994dd6d1a0ff9cb4678620879ce14b5d095ddcbcb2 # shrinks to size = 11, rank = 3
+cc 6c9a19519f825cc1b79ea37e1318bb1d0c8cfcef0a988bb7a708851ca6a8faea # shrinks to size = 6, rank = 2
