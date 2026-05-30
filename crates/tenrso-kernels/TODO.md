@@ -377,10 +377,10 @@
 
 ### Advanced Kernels
 
-- [ ] Tucker-TTM (multiple mode products)
-- [ ] TT-matrix-vector product
-- [ ] TT-rounding operation
-- [ ] Tensor contraction primitives
+- [x] Tucker-TTM (multiple mode products) — implemented as `tucker_operator()` / `tucker_operator_ordered()` in `nmode.rs`
+- [x] TT-matrix-vector product — implemented as `tt_matvec()` in `tt_ops.rs`
+- [x] TT-rounding operation — implemented as `tt_round()` in `tt_ops.rs`
+- [x] Tensor contraction primitives — implemented in `contractions.rs` (`contract_tensors`, `sum_over_modes`, `tensor_inner_product`, `tensor_trace`)
 
 ### Sparse Support (M3)
 

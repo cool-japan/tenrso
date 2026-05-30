@@ -585,29 +585,101 @@ where
         match &self.repr {
             TensorRepr::Dense(d) => Ok(d.clone()),
             TensorRepr::Sparse(_) => {
-                // Note: TensorRepr::Sparse holds a SparseND<T>, which is a placeholder
-                // type in tenrso-core with no storage fields. Real sparse tensors are
-                // implemented in the tenrso-sparse crate (CooTensor, CsrTensor, etc.)
-                // and are not yet wired into TensorHandle. There is no constructor
-                // that produces TensorRepr::Sparse, so this arm is currently unreachable.
+                anyhow::bail!("Sparse to dense conversion not yet implemented")
+            }
+            TensorRepr::LowRank(_) => {
+                anyhow::bail!("Low-rank to dense conversion not yet implemented")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "binary")]
+impl<T> TensorHandle<T>
+where
+    T: serde::Serialize
+        + serde::de::DeserializeOwned
+        + Clone
+        + Num
+        + 'static,
+{
+    /// Save this tensor handle to a binary file.
+    ///
+    /// The serialized representation includes the axis metadata **and** the
+    /// full tensor data (shape + elements).  Only `Dense` handles are
+    /// currently supported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The underlying tensor is not in `Dense` representation
+    /// - The file cannot be created or written to
+    /// - bincode serialization fails
+    ///
+    /// # Complexity
+    ///
+    /// O(n) in the number of elements.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "binary")]
+    /// # {
+    /// use tenrso_core::{DenseND, TensorHandle};
+    ///
+    /// let tensor = DenseND::<f64>::ones(&[4, 4]);
+    /// let handle = TensorHandle::from_dense_auto(tensor);
+    /// handle.save_binary(std::path::Path::new("/tmp/handle.bin")).unwrap();
+    /// # }
+    /// ```
+    pub fn save_binary(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        // Delegate to the DenseND implementation after verifying representation.
+        match &self.repr {
+            TensorRepr::Dense(dense) => dense.save_binary(path),
+            TensorRepr::Sparse(_) => {
                 anyhow::bail!(
-                    "TensorRepr::Sparse is a placeholder variant in tenrso-core; \
-                     real sparse tensors live in tenrso-sparse (CooTensor, CsrTensor, etc.) \
-                     and are not yet wired into TensorHandle"
+                    "Binary serialization of sparse TensorHandle is not yet supported"
                 )
             }
             TensorRepr::LowRank(_) => {
-                // Note: TensorRepr::LowRank holds a LowRank<T>, which is a placeholder
-                // type in tenrso-core with no storage fields. Real low-rank decompositions
-                // are implemented in the tenrso-decomp crate (CpTensor, TuckerTensor, etc.)
-                // and are not yet wired into TensorHandle. There is no constructor
-                // that produces TensorRepr::LowRank, so this arm is currently unreachable.
                 anyhow::bail!(
-                    "TensorRepr::LowRank is a placeholder variant in tenrso-core; \
-                     real low-rank decompositions live in tenrso-decomp (CpTensor, TuckerTensor, etc.) \
-                     and are not yet wired into TensorHandle"
+                    "Binary serialization of low-rank TensorHandle is not yet supported"
                 )
             }
         }
+    }
+
+    /// Load a tensor handle from a binary file written by
+    /// [`TensorHandle::save_binary`].
+    ///
+    /// Axis metadata is reconstructed automatically with names `"axis_0"`,
+    /// `"axis_1"`, … matching the shape of the loaded tensor.  If you need
+    /// to preserve custom axis names, use [`DenseND::save_binary`] /
+    /// [`DenseND::load_binary`] directly and wrap the result yourself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The file cannot be read
+    /// - The bytes are not a valid bincode-encoded `DenseND<T>`
+    ///
+    /// # Complexity
+    ///
+    /// O(n) in the number of elements.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "binary")]
+    /// # {
+    /// use tenrso_core::TensorHandle;
+    ///
+    /// let handle = TensorHandle::<f64>::load_binary(std::path::Path::new("/tmp/handle.bin")).unwrap();
+    /// println!("loaded shape: {:?}", handle.shape());
+    /// # }
+    /// ```
+    pub fn load_binary(path: &std::path::Path) -> anyhow::Result<Self> {
+        let dense = DenseND::<T>::load_binary(path)?;
+        Ok(Self::from_dense_auto(dense))
     }
 }

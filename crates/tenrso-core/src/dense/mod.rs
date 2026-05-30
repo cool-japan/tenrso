@@ -24,6 +24,10 @@ mod statistics;
 pub mod densend_traits;
 pub(crate) mod functions;
 
+// Binary serialization (feature-gated)
+#[cfg(feature = "binary")]
+mod binary;
+
 // Re-export the main type
 pub use types::DenseND;
 

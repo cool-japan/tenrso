@@ -118,6 +118,8 @@ pub mod outer;
 pub mod randomized;
 pub mod reductions;
 pub mod tt_ops;
+pub mod tt_orthog;
+pub mod tt_round;
 pub mod utils;
 
 #[cfg(test)]
@@ -137,4 +139,6 @@ pub use outer::*;
 pub use randomized::*;
 pub use reductions::*;
 pub use tt_ops::*;
+pub use tt_orthog::*;
+pub use tt_round::*;
 pub use utils::*;

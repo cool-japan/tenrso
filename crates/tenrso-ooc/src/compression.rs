@@ -167,7 +167,7 @@ pub fn compress_bytes(data: &[u8], codec: CompressionCodec) -> Result<Vec<u8>> {
         }
         #[cfg(feature = "lz4-compression")]
         CompressionCodec::Lz4 => {
-            let compressed = oxiarc_lz4::compress_block(data)
+            let compressed = lz4::block::compress(data, None, false)
                 .map_err(|e| anyhow!("LZ4 compression failed: {e}"))?;
             let mut output = Vec::with_capacity(compressed.len() + 9);
             output.push(1u8); // Magic byte for "Lz4"
@@ -177,7 +177,7 @@ pub fn compress_bytes(data: &[u8], codec: CompressionCodec) -> Result<Vec<u8>> {
         }
         #[cfg(feature = "zstd-compression")]
         CompressionCodec::Zstd { level } => {
-            let compressed = oxiarc_zstd::compress_with_level(data, level)
+            let compressed = zstd::encode_all(data, level)
                 .map_err(|e| anyhow!("Zstd compression failed: {e}"))?;
             let mut output = Vec::with_capacity(compressed.len() + 9);
             output.push(2u8); // Magic byte for "Zstd"
@@ -224,7 +224,7 @@ pub fn decompress_bytes(data: &[u8]) -> Result<Vec<u8>> {
                 }
                 let original_size = u64::from_le_bytes(data[1..9].try_into()?) as usize;
                 let compressed = &data[9..];
-                oxiarc_lz4::decompress_block(compressed, original_size)
+                lz4::block::decompress(compressed, Some(original_size as i32))
                     .map_err(|e| anyhow!("LZ4 decompression failed: {e}"))?
             }
             #[cfg(not(feature = "lz4-compression"))]
@@ -241,7 +241,7 @@ pub fn decompress_bytes(data: &[u8]) -> Result<Vec<u8>> {
                 }
                 let _original_size = u64::from_le_bytes(data[1..9].try_into()?);
                 let compressed = &data[9..];
-                oxiarc_zstd::decompress(compressed)
+                zstd::decode_all(compressed)
                     .map_err(|e| anyhow!("Zstd decompression failed: {e}"))?
             }
             #[cfg(not(feature = "zstd-compression"))]

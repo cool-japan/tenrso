@@ -18,6 +18,7 @@ scirs2-core.workspace = true
 scirs2-linalg = { workspace = true, optional = true }
 scirs2-fft = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
+bincode = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -25,6 +26,11 @@ parallel = ["scirs2-core/parallel"]
 serde = ["dep:serde", "smallvec/serde", "scirs2-core/serialization"]
 linalg = ["dep:scirs2-linalg"]
 fft = ["dep:scirs2-fft"]
+binary = ["dep:bincode", "serde"]
+
+[[example]]
+name = "binary_io"
+required-features = ["binary"]
 
 [dev-dependencies]
 proptest.workspace = true
