@@ -317,7 +317,11 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
 - [ ] Robust OoC policies (prefetch, caching)
 - [ ] GPU backend (CUDA/ROCm)
 - [ ] Distributed execution (cluster)
-- [ ] Advanced sparse formats (BSR, DIA, ELL)
+- [x] Sparse n-mode product (`nmode_product_sparse_coo`, 2026-06-03, tenrso-kernels `sparse` feature)
+- [x] Mixed sparse/dense operations (satisfied by sparse n-mode product, 2026-06-03)
+- [x] Sparse MTTKRP (CSF input, 2026-06-03, tenrso-kernels `csf` feature) — DFS fiber-tree walk
+- [ ] Sparse MTTKRP (HiCOO input) — deferred, similar design to CSF
+- [ ] Advanced sparse formats (BSR, DIA, ELL) — DIA/ELL already exist in tenrso-sparse
 
 ### Performance Optimization
 

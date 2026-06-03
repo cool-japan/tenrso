@@ -113,6 +113,10 @@ pub mod kronecker;
 pub mod mttkrp;
 #[cfg(feature = "sparse")]
 pub mod mttkrp_sparse;
+#[cfg(feature = "sparse")]
+pub mod nmode_sparse;
+#[cfg(feature = "csf")]
+pub mod mttkrp_sparse_csf;
 pub mod nmode;
 pub mod outer;
 pub mod randomized;
@@ -134,6 +138,10 @@ pub use kronecker::*;
 pub use mttkrp::*;
 #[cfg(feature = "sparse")]
 pub use mttkrp_sparse::*;
+#[cfg(feature = "sparse")]
+pub use nmode_sparse::*;
+#[cfg(feature = "csf")]
+pub use mttkrp_sparse_csf::*;
 pub use nmode::*;
 pub use outer::*;
 pub use randomized::*;

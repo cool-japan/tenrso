@@ -448,44 +448,47 @@ impl<'a, T: Float> Iterator for CsfIterator<'a, T> {
         // We need to find which fiber path leads to val_idx
         let mut current_val_pos = self.val_idx;
 
-        // Work backwards from leaf level to root
+        // Work backwards from leaf level to root.
+        // At the leaf level, current_val_pos is the value index (also fids[leaf] index).
+        // At upper levels, current_val_pos is the fiber index at that level.
         for level in (0..ndim).rev() {
             if level == ndim - 1 {
-                // Leaf level: find which fiber contains this value
-                let mut fiber_idx = 0;
-                for i in 0..self.csf.fptr[level].len() - 1 {
-                    let start = self.csf.fptr[level][i];
-                    let end = self.csf.fptr[level][i + 1];
-                    if current_val_pos >= start && current_val_pos < end {
-                        fiber_idx = i;
-                        break;
-                    }
-                }
-
-                // Get the index at this level
+                // Leaf level: current_val_pos is the direct value/fids index.
                 let mode = self.csf.mode_order[level];
                 indices[mode] = self.csf.fids[level][current_val_pos];
 
-                // Update position for next level up
+                // Find which parent fiber (at level ndim-2) contains this value.
+                // fptr[level] maps parent fiber indices to val ranges.
+                let fiber_idx = self
+                    .csf
+                    .fptr[level]
+                    .partition_point(|&p| p <= current_val_pos)
+                    .saturating_sub(1);
+
                 current_val_pos = fiber_idx;
             } else {
-                // Non-leaf level: find which fiber contains current_val_pos
-                let mut fiber_idx = 0;
-                for i in 0..self.csf.fptr[level].len() - 1 {
-                    let start = self.csf.fptr[level][i];
-                    let end = self.csf.fptr[level][i + 1];
-                    if current_val_pos >= start && current_val_pos < end {
-                        fiber_idx = i;
-                        break;
-                    }
-                }
-
-                // Get the index at this level
+                // Non-leaf level: current_val_pos is the fiber index at this level.
                 let mode = self.csf.mode_order[level];
                 indices[mode] = self.csf.fids[level][current_val_pos];
 
-                // Update position for next level up
-                current_val_pos = fiber_idx;
+                if level > 0 {
+                    // Find which parent fiber (at level-1) contains this fiber.
+                    // fptr[level] maps parent fiber indices to VALUE ranges,
+                    // but we need the parent of current_val_pos in fids[level].
+                    // The fibers at level are stored in DFS order: to find the parent,
+                    // we binary-search fptr[level] for the value range start of
+                    // the fiber at current_val_pos, then find which parent covers it.
+                    let vs = self.csf.fptr[level][current_val_pos];
+                    // fptr[level-1] maps level-1 fibers to value ranges.
+                    // Find the level-1 fiber whose value range contains vs.
+                    let parent_fiber = self
+                        .csf
+                        .fptr[level - 1]
+                        .partition_point(|&p| p <= vs)
+                        .saturating_sub(1);
+                    current_val_pos = parent_fiber;
+                }
+                // If level == 0, no parent; current_val_pos is the root fiber index.
             }
         }
 

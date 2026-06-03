@@ -21,6 +21,7 @@ scirs2-linalg.workspace = true
 default = ["parallel", "sparse"]
 parallel = []
 sparse = ["dep:tenrso-sparse"]
+csf = ["sparse", "tenrso-sparse/csf"]
 
 [dev-dependencies]
 criterion.workspace = true

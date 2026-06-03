@@ -64,7 +64,7 @@ use tenrso_sparse::coo::CooTensor;
 /// sparse tensor shape and mode.
 ///
 /// Returns the CP rank `R` on success.
-fn validate_sparse_mttkrp_inputs<T>(
+pub(crate) fn validate_sparse_mttkrp_inputs<T>(
     shape: &[usize],
     factors: &[ArrayView2<T>],
     mode: usize,

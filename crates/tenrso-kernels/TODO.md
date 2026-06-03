@@ -2,8 +2,8 @@
 
 > **Milestone:** M1 (Complete) + early M3 (sparse MTTKRP)
 > **Version:** 0.1.0
-> **Status:** 0.1.0 — 292 unit tests passing + 31 integration + 78 doc tests, 7 ignored (100%)
-> **Last Updated:** 2026-04-15
+> **Status:** 0.1.0 — 324 unit tests passing + 31 integration + 80 doc tests, 7 ignored (100%)
+> **Last Updated:** 2026-06-03
 
 ---
 
@@ -385,11 +385,14 @@
 ### Sparse Support (M3)
 
 - [x] Sparse MTTKRP (COO input) - Complete (2026-04-15, serial + parallel)
-- [ ] Sparse MTTKRP (CSF / HiCOO input) — requires N-D sparse format;
-      `CsrMatrix` in `tenrso-sparse` is 2D-only so a direct "CSR tensor"
-      MTTKRP path is not possible without first generalizing to CSF/HiCOO
-- [ ] Sparse n-mode product
-- [ ] Mixed sparse/dense operations
+- [x] Sparse MTTKRP (CSF input) — Complete (2026-06-03, `feature = "csf"`)
+      DFS fiber-tree walk amortizes partial KR products: O(nnz·R + Σ|fibers_L|·R)
+      vs O(nnz·(N-1)·R) for COO; serial + parallel variants; 18 tests.
+      HiCOO: not yet — deferred (similar complexity, lower priority).
+- [x] Sparse n-mode product (`nmode_product_sparse_coo`) — Complete (2026-06-03)
+      COO × dense matrix → dense output; scatter algorithm, no unfold/GEMM;
+      serial + parallel variants; 14 tests. `feature = "sparse"` (default).
+- [x] Mixed sparse/dense operations — satisfied by `nmode_product_sparse_coo` above
 
 ### GPU Acceleration (Future)
 
