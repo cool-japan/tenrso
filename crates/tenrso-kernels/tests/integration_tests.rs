@@ -830,3 +830,231 @@ fn test_large_tensor_pipeline() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Sparse kernel integration tests
+// ---------------------------------------------------------------------------
+
+/// Build a deterministic sparse COO tensor using a simple LCG.
+#[cfg(feature = "sparse")]
+fn build_sparse_coo(shape: &[usize], fill_frac: f64, seed: u64) -> tenrso_sparse::coo::CooTensor<f64> {
+    let total: usize = shape.iter().product();
+    let nnz = ((total as f64) * fill_frac).max(1.0) as usize;
+    let ndim = shape.len();
+
+    let mut tensor = tenrso_sparse::coo::CooTensor::zeros(shape.to_vec()).unwrap();
+    let mut rng = seed;
+    for _ in 0..nnz {
+        rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        let flat = rng as usize % total;
+        let mut idx = vec![0usize; ndim];
+        let mut rem = flat;
+        for d in (0..ndim).rev() {
+            idx[d] = rem % shape[d];
+            rem /= shape[d];
+        }
+        let val = (rng >> 32) as f64 / (u32::MAX as f64) + 0.5;
+        tensor.push(idx, val).ok();
+    }
+    tensor.deduplicate();
+    tensor
+}
+
+#[cfg(feature = "sparse")]
+fn sparse_test_factors(shape: &[usize], rank: usize, seed: u64) -> Vec<Array2<f64>> {
+    let mut rng = seed;
+    shape
+        .iter()
+        .map(|&rows| {
+            let vals: Vec<f64> = (0..rows * rank)
+                .map(|_| {
+                    rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                    (rng >> 32) as f64 / (u32::MAX as f64) + 0.5
+                })
+                .collect();
+            Array2::from_shape_vec((rows, rank), vals).unwrap()
+        })
+        .collect()
+}
+
+/// COO sparse MTTKRP must produce the same result as dense MTTKRP for all modes.
+#[cfg(feature = "sparse")]
+#[test]
+fn test_sparse_coo_mttkrp_matches_dense() {
+    let shape = [8, 6, 10];
+    let rank = 4;
+    let coo = build_sparse_coo(&shape, 0.15, 17);
+    let dense = coo.to_dense().unwrap();
+    let factors = sparse_test_factors(&shape, rank, 31);
+    let fv: Vec<_> = factors.iter().map(|f| f.view()).collect();
+
+    use tenrso_kernels::mttkrp_sparse::mttkrp_sparse_coo;
+
+    for mode in 0..3 {
+        let sparse_result = mttkrp_sparse_coo(&coo, &fv, mode).unwrap();
+        let dense_result = mttkrp(&dense.view(), &fv, mode).unwrap();
+
+        assert_eq!(sparse_result.shape(), dense_result.shape());
+        let max_diff = sparse_result
+            .iter()
+            .zip(dense_result.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        assert!(max_diff < 1e-10, "mode {}: max_diff = {}", mode, max_diff);
+    }
+}
+
+/// Sparse n-mode product must match dense n-mode product for all modes.
+#[cfg(feature = "sparse")]
+#[test]
+fn test_sparse_nmode_product_matches_dense() {
+    let shape = [6, 8, 5];
+    let out_rows = [3, 4, 7];
+    let coo = build_sparse_coo(&shape, 0.20, 101);
+    let dense = coo.to_dense().unwrap();
+
+    use tenrso_kernels::nmode_sparse::nmode_product_sparse_coo;
+
+    let mut rng = 999u64;
+    for mode in 0..3 {
+        let rows = out_rows[mode];
+        let cols = shape[mode];
+        let mat_vals: Vec<f64> = (0..rows * cols)
+            .map(|_| {
+                rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                (rng >> 32) as f64 / (u32::MAX as f64) + 0.5
+            })
+            .collect();
+        let matrix = Array2::from_shape_vec((rows, cols), mat_vals).unwrap();
+
+        let sparse_result = nmode_product_sparse_coo(&coo, &matrix.view(), mode).unwrap();
+        let dense_result = nmode_product(&dense.view(), &matrix.view(), mode).unwrap();
+
+        let max_diff = sparse_result
+            .iter()
+            .zip(dense_result.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        assert!(max_diff < 1e-10, "mode {}: max_diff = {}", mode, max_diff);
+    }
+}
+
+/// CSF and HiCOO MTTKRP must produce results agreeing with COO MTTKRP.
+#[cfg(feature = "csf")]
+#[test]
+fn test_csf_hicoo_mttkrp_pipeline_agreement() {
+    let shape = [12, 10, 8];
+    let rank = 6;
+    let coo = build_sparse_coo(&shape, 0.10, 42);
+    let factors = sparse_test_factors(&shape, rank, 7);
+    let fv: Vec<_> = factors.iter().map(|f| f.view()).collect();
+
+    use tenrso_kernels::mttkrp_hicoo::mttkrp_hicoo;
+    use tenrso_kernels::mttkrp_sparse::mttkrp_sparse_coo;
+    use tenrso_kernels::mttkrp_sparse_csf::mttkrp_sparse_csf;
+    use tenrso_sparse::{csf::CsfTensor, hicoo::HiCooTensor};
+
+    let csf = CsfTensor::from_coo(&coo, &[0, 1, 2]).unwrap();
+    let hicoo = HiCooTensor::from_coo(&coo, &[4, 4, 4]).unwrap();
+
+    for mode in 0..3 {
+        let coo_result = mttkrp_sparse_coo(&coo, &fv, mode).unwrap();
+        let csf_result = mttkrp_sparse_csf(&csf, &fv, mode).unwrap();
+        let hicoo_result = mttkrp_hicoo(&hicoo, &fv, mode).unwrap();
+
+        let coo_csf_diff = coo_result
+            .iter()
+            .zip(csf_result.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        let coo_hicoo_diff = coo_result
+            .iter()
+            .zip(hicoo_result.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+
+        assert!(coo_csf_diff < 1e-12, "mode {}: CSF diff = {}", mode, coo_csf_diff);
+        assert!(coo_hicoo_diff < 1e-12, "mode {}: HiCOO diff = {}", mode, coo_hicoo_diff);
+    }
+}
+
+/// Sparse Tucker n-mode step: dense core × sparse factor gives same result as dense × dense.
+#[cfg(feature = "sparse")]
+#[test]
+fn test_sparse_tucker_nmode_step() {
+    // Simulate one Tucker mode-0 update using sparse n-mode product
+    let shape = [10, 8, 6];
+    let rank_0 = 4;
+    let coo = build_sparse_coo(&shape, 0.25, 77);
+    let dense = coo.to_dense().unwrap();
+
+    use tenrso_kernels::nmode_sparse::nmode_product_sparse_coo;
+
+    let mut rng = 2025u64;
+    let mat_vals: Vec<f64> = (0..rank_0 * shape[0])
+        .map(|_| {
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (rng >> 32) as f64 / (u32::MAX as f64) + 0.5
+        })
+        .collect();
+    let matrix = Array2::from_shape_vec((rank_0, shape[0]), mat_vals).unwrap();
+
+    let sparse_result = nmode_product_sparse_coo(&coo, &matrix.view(), 0).unwrap();
+    let dense_result = nmode_product(&dense.view(), &matrix.view(), 0).unwrap();
+
+    // Results should match: shape becomes [rank_0, shape[1], shape[2]]
+    assert_eq!(sparse_result.shape(), dense_result.shape());
+    assert_eq!(sparse_result.shape(), &[rank_0, shape[1], shape[2]]);
+
+    let max_diff = sparse_result
+        .iter()
+        .zip(dense_result.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(max_diff < 1e-10, "Tucker mode-0 step: max_diff = {}", max_diff);
+}
+
+/// Parallel sparse MTTKRP variants must agree with their serial counterparts.
+#[cfg(all(feature = "sparse", feature = "parallel"))]
+#[test]
+fn test_sparse_parallel_variants_agree() {
+    let shape = [20, 15, 12];
+    let rank = 8;
+    let coo = build_sparse_coo(&shape, 0.08, 13);
+    let factors = sparse_test_factors(&shape, rank, 17);
+    let fv: Vec<_> = factors.iter().map(|f| f.view()).collect();
+
+    use tenrso_kernels::mttkrp_sparse::{mttkrp_sparse_coo, mttkrp_sparse_coo_parallel};
+    use tenrso_kernels::nmode_sparse::{nmode_product_sparse_coo, nmode_product_sparse_coo_parallel};
+
+    // MTTKRP parallel parity
+    for mode in 0..3 {
+        let serial = mttkrp_sparse_coo(&coo, &fv, mode).unwrap();
+        let parallel = mttkrp_sparse_coo_parallel(&coo, &fv, mode).unwrap();
+        let max_diff = serial
+            .iter()
+            .zip(parallel.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        assert!(max_diff < 1e-12, "MTTKRP mode {}: parallel diff = {}", mode, max_diff);
+    }
+
+    // nmode_product parallel parity
+    let mut rng = 55u64;
+    let mat_vals: Vec<f64> = (0..5 * shape[1])
+        .map(|_| {
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (rng >> 32) as f64 / (u32::MAX as f64) + 0.5
+        })
+        .collect();
+    let matrix = Array2::from_shape_vec((5, shape[1]), mat_vals).unwrap();
+
+    let serial_n = nmode_product_sparse_coo(&coo, &matrix.view(), 1).unwrap();
+    let parallel_n = nmode_product_sparse_coo_parallel(&coo, &matrix.view(), 1).unwrap();
+    let max_diff = serial_n
+        .iter()
+        .zip(parallel_n.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(max_diff < 1e-12, "nmode parallel diff = {}", max_diff);
+}
