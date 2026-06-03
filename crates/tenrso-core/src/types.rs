@@ -597,11 +597,7 @@ where
 #[cfg(feature = "binary")]
 impl<T> TensorHandle<T>
 where
-    T: serde::Serialize
-        + serde::de::DeserializeOwned
-        + Clone
-        + Num
-        + 'static,
+    T: serde::Serialize + serde::de::DeserializeOwned + Clone + Num + 'static,
 {
     /// Save this tensor handle to a binary file.
     ///
@@ -637,14 +633,10 @@ where
         match &self.repr {
             TensorRepr::Dense(dense) => dense.save_binary(path),
             TensorRepr::Sparse(_) => {
-                anyhow::bail!(
-                    "Binary serialization of sparse TensorHandle is not yet supported"
-                )
+                anyhow::bail!("Binary serialization of sparse TensorHandle is not yet supported")
             }
             TensorRepr::LowRank(_) => {
-                anyhow::bail!(
-                    "Binary serialization of low-rank TensorHandle is not yet supported"
-                )
+                anyhow::bail!("Binary serialization of low-rank TensorHandle is not yet supported")
             }
         }
     }

@@ -122,9 +122,8 @@ where
         //  ② Otherwise large: randomized SVD (Halko-Martinsson-Tropp).
         //  ③ Small/balanced: full thin SVD.
         let (u, s, vt) = if rows <= 64 && cols >= 1_000_000 {
-            crate::utils::thin_svd_via_gram(&c_matrix.view(), target_rank).map_err(
-                |e| TTError::SvdError(format!("Gram SVD failed at mode {}: {}", k, e)),
-            )?
+            crate::utils::thin_svd_via_gram(&c_matrix.view(), target_rank)
+                .map_err(|e| TTError::SvdError(format!("Gram SVD failed at mode {}: {}", k, e)))?
         } else if crate::utils::should_use_randomized_svd(rows, cols, target_rank) {
             crate::utils::randomized_svd_truncated(&c_matrix.view(), target_rank, 10, 2).map_err(
                 |e| TTError::SvdError(format!("Randomized SVD failed at mode {}: {}", k, e)),

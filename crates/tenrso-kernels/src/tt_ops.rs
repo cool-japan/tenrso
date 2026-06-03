@@ -138,7 +138,10 @@ where
 /// For a core G of shape (r_left, n, r_right) and matrix V of shape (r_left, r_left),
 /// computes W of shape (r_right, r_right) where:
 /// W[i,j] = sum_{alpha,beta,k} V[alpha,beta] * G[alpha,k,i] * G[beta,k,j]
-fn contract_core_with_v<T>(v: &scirs2_core::ndarray_ext::ArrayView2<T>, core: &ArrayView3<T>) -> KernelResult<Array2<T>>
+fn contract_core_with_v<T>(
+    v: &scirs2_core::ndarray_ext::ArrayView2<T>,
+    core: &ArrayView3<T>,
+) -> KernelResult<Array2<T>>
 where
     T: Float,
 {

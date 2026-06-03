@@ -108,13 +108,13 @@ fn example_tensor_handle() -> anyhow::Result<()> {
     let tmp = std::env::temp_dir().join("tenrso_binary_io_handle.bin");
 
     let dense = DenseND::<f64>::random_uniform(&[6, 7], 0.0, 1.0);
-    let axes = vec![
-        AxisMeta::new("rows", 6),
-        AxisMeta::new("cols", 7),
-    ];
+    let axes = vec![AxisMeta::new("rows", 6), AxisMeta::new("cols", 7)];
     let handle = TensorHandle::from_dense(dense, axes);
 
-    println!("  original axes   : {:?}", handle.axes.iter().map(|a| &a.name).collect::<Vec<_>>());
+    println!(
+        "  original axes   : {:?}",
+        handle.axes.iter().map(|a| &a.name).collect::<Vec<_>>()
+    );
     println!("  original shape  : {:?}", handle.shape());
 
     handle.save_binary(&tmp)?;
@@ -138,7 +138,11 @@ fn example_large_tensor() -> anyhow::Result<()> {
 
     let tensor = DenseND::<f64>::random_uniform(&[256, 256], -1.0, 1.0);
     let byte_size = tensor.size_bytes();
-    println!("  tensor size     : {} bytes ({} KiB)", byte_size, byte_size / 1024);
+    println!(
+        "  tensor size     : {} bytes ({} KiB)",
+        byte_size,
+        byte_size / 1024
+    );
 
     let t0 = std::time::Instant::now();
     tensor.save_binary(&tmp)?;

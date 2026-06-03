@@ -114,8 +114,10 @@ fn bench_chunk_graph_construction(c: &mut Criterion) {
                 })
                 .collect();
             // 1 sink
-            let _ =
-                graph.add_node(ChunkNode::operation(ChunkOp::Accumulate, vec![level4[0], level4[1]]));
+            let _ = graph.add_node(ChunkNode::operation(
+                ChunkOp::Accumulate,
+                vec![level4[0], level4[1]],
+            ));
             black_box(graph.len())
         });
     });
@@ -139,15 +141,9 @@ fn bench_chunk_graph_topo_sort(c: &mut Criterion) {
             prev = graph.add_node(ChunkNode::operation(ChunkOp::Accumulate, vec![prev, inp]));
         }
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(graph.len()),
-            &graph,
-            |b, g| {
-                b.iter(|| {
-                    black_box(g.topological_order().expect("topological_order failed"))
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(graph.len()), &graph, |b, g| {
+            b.iter(|| black_box(g.topological_order().expect("topological_order failed")));
+        });
     }
 
     group.finish();
@@ -175,16 +171,16 @@ fn bench_memory_manager_alloc_free(c: &mut Criterion) {
                 || {
                     // Fresh manager per iteration so we don't saturate it.
                     // 16 MB should be ample for all shapes.
-                    MemoryManager::new()
-                        .max_memory_mb(16)
-                        .auto_spill(false)
+                    MemoryManager::new().max_memory_mb(16).auto_spill(false)
                 },
                 |mut mgr| {
                     let tensor = make_tensor(shape);
                     mgr.register_chunk("bench_chunk", tensor, AccessPattern::ReadOnce)
                         .expect("register_chunk failed");
                     // Access it once
-                    let _ = mgr.access_chunk("bench_chunk").expect("access_chunk failed");
+                    let _ = mgr
+                        .access_chunk("bench_chunk")
+                        .expect("access_chunk failed");
                     // Decref → reference count to 0
                     mgr.decref("bench_chunk").expect("decref failed");
                     black_box(mgr.current_memory())
@@ -227,27 +223,23 @@ fn bench_prefetch_queue_throughput(c: &mut Criterion) {
         );
 
         // Separately benchmark `add_prefetched` + `get` (the pop side).
-        group.bench_with_input(
-            BenchmarkId::new("add_and_get", n),
-            &n,
-            |b, &count| {
-                let tensor = make_tensor(&[10, 10]);
+        group.bench_with_input(BenchmarkId::new("add_and_get", n), &n, |b, &count| {
+            let tensor = make_tensor(&[10, 10]);
 
-                b.iter(|| {
-                    let mut pf = Prefetcher::new().queue_size(count + 1);
-                    for i in 0..count {
-                        pf.add_prefetched(&format!("c_{}", i), tensor.clone());
+            b.iter(|| {
+                let mut pf = Prefetcher::new().queue_size(count + 1);
+                for i in 0..count {
+                    pf.add_prefetched(&format!("c_{}", i), tensor.clone());
+                }
+                let mut found = 0usize;
+                for i in 0..count {
+                    if pf.get(&format!("c_{}", i)).is_some() {
+                        found += 1;
                     }
-                    let mut found = 0usize;
-                    for i in 0..count {
-                        if pf.get(&format!("c_{}", i)).is_some() {
-                            found += 1;
-                        }
-                    }
-                    black_box(found)
-                });
-            },
-        );
+                }
+                black_box(found)
+            });
+        });
     }
 
     group.finish();
@@ -261,44 +253,46 @@ fn bench_working_set_record_access(c: &mut Criterion) {
     for &n in &[50usize, 200, 1000] {
         group.throughput(Throughput::Elements(n as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("adaptive", n),
-            &n,
-            |b, &count| {
-                // Pre-build chunk IDs to avoid timing string formatting.
-                let ids: Vec<String> = (0..count).map(|i| format!("chunk_{}", i % 20)).collect();
+        group.bench_with_input(BenchmarkId::new("adaptive", n), &n, |b, &count| {
+            // Pre-build chunk IDs to avoid timing string formatting.
+            let ids: Vec<String> = (0..count).map(|i| format!("chunk_{}", i % 20)).collect();
 
-                b.iter(|| {
-                    let mut predictor = WorkingSetPredictor::new()
-                        .window_size(count)
-                        .prediction_mode(PredictionMode::Adaptive);
+            b.iter(|| {
+                let mut predictor = WorkingSetPredictor::new()
+                    .window_size(count)
+                    .prediction_mode(PredictionMode::Adaptive);
 
-                    for id in &ids {
-                        predictor.record_access(id, 8192);
-                    }
-                    black_box(predictor.predict_working_set(5).expect("predict failed").len())
-                });
-            },
-        );
+                for id in &ids {
+                    predictor.record_access(id, 8192);
+                }
+                black_box(
+                    predictor
+                        .predict_working_set(5)
+                        .expect("predict failed")
+                        .len(),
+                )
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("frequency", n),
-            &n,
-            |b, &count| {
-                let ids: Vec<String> = (0..count).map(|i| format!("chunk_{}", i % 20)).collect();
+        group.bench_with_input(BenchmarkId::new("frequency", n), &n, |b, &count| {
+            let ids: Vec<String> = (0..count).map(|i| format!("chunk_{}", i % 20)).collect();
 
-                b.iter(|| {
-                    let mut predictor = WorkingSetPredictor::new()
-                        .window_size(count)
-                        .prediction_mode(PredictionMode::Frequency);
+            b.iter(|| {
+                let mut predictor = WorkingSetPredictor::new()
+                    .window_size(count)
+                    .prediction_mode(PredictionMode::Frequency);
 
-                    for id in &ids {
-                        predictor.record_access(id, 8192);
-                    }
-                    black_box(predictor.predict_working_set(5).expect("predict failed").len())
-                });
-            },
-        );
+                for id in &ids {
+                    predictor.record_access(id, 8192);
+                }
+                black_box(
+                    predictor
+                        .predict_working_set(5)
+                        .expect("predict failed")
+                        .len(),
+                )
+            });
+        });
     }
 
     group.finish();
@@ -316,35 +310,22 @@ fn bench_chunk_hash(c: &mut Criterion) {
         let payload = make_payload_bytes(size);
         group.throughput(Throughput::Bytes(size as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("crc32", size),
-            &payload,
-            |b, data| {
-                b.iter(|| {
-                    black_box(compute_checksum(ChecksumAlgorithm::Crc32, black_box(data)))
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("crc32", size), &payload, |b, data| {
+            b.iter(|| black_box(compute_checksum(ChecksumAlgorithm::Crc32, black_box(data))));
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("xxhash64", size),
-            &payload,
-            |b, data| {
-                b.iter(|| {
-                    black_box(compute_checksum(ChecksumAlgorithm::XxHash64, black_box(data)))
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("xxhash64", size), &payload, |b, data| {
+            b.iter(|| {
+                black_box(compute_checksum(
+                    ChecksumAlgorithm::XxHash64,
+                    black_box(data),
+                ))
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("blake3", size),
-            &payload,
-            |b, data| {
-                b.iter(|| {
-                    black_box(compute_checksum(ChecksumAlgorithm::Blake3, black_box(data)))
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("blake3", size), &payload, |b, data| {
+            b.iter(|| black_box(compute_checksum(ChecksumAlgorithm::Blake3, black_box(data))));
+        });
     }
 
     group.finish();
@@ -363,9 +344,7 @@ fn bench_memory_tier_lookup(c: &mut Criterion) {
 
     group.bench_function("register_get_ram_hot", |b| {
         b.iter_with_setup(
-            || {
-                TieredMemoryManager::new().auto_migration(false)
-            },
+            || TieredMemoryManager::new().auto_migration(false),
             |mut mgr| {
                 let tensor = make_tensor(shape);
                 mgr.register_chunk("hot", tensor, TierAccessPattern::Temporal)

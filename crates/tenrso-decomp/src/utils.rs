@@ -398,15 +398,7 @@ pub(crate) fn thin_svd_via_gram<T>(
     target_rank: usize,
 ) -> anyhow::Result<(Array2<T>, Array1<T>, Array2<T>)>
 where
-    T: Float
-        + NumCast
-        + NumAssign
-        + Sum
-        + ScalarOperand
-        + Send
-        + Sync
-        + std::fmt::Debug
-        + 'static,
+    T: Float + NumCast + NumAssign + Sum + ScalarOperand + Send + Sync + std::fmt::Debug + 'static,
 {
     use scirs2_core::ndarray_ext::s;
     use scirs2_linalg::svd;
@@ -424,9 +416,7 @@ where
 
     // Step 3: Truncate U and derive singular values σ = sqrt(λ)
     let u_k = u_full.slice(s![.., ..k]).to_owned();
-    let sigma_k: Array1<T> = lambda
-        .slice(s![..k])
-        .mapv(|lam| lam.max(T::zero()).sqrt());
+    let sigma_k: Array1<T> = lambda.slice(s![..k]).mapv(|lam| lam.max(T::zero()).sqrt());
 
     // Step 4: Recover Vᵀ = diag(1/σ) · Uᵀ · A   (k×n),  cost O(k m n)
     // Build the scaled Uᵀ first (k×m, cheap), then multiply by A.

@@ -72,16 +72,12 @@ where
     /// # }
     /// ```
     pub fn save_binary(&self, path: &Path) -> anyhow::Result<()> {
-        let encoded =
-            bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(|e| {
-                anyhow::anyhow!("bincode encode failed for path {:?}: {}", path, e)
-            })?;
-        let mut f = std::fs::File::create(path).map_err(|e| {
-            anyhow::anyhow!("cannot create binary file {:?}: {}", path, e)
-        })?;
-        f.write_all(&encoded).map_err(|e| {
-            anyhow::anyhow!("write failed to {:?}: {}", path, e)
-        })?;
+        let encoded = bincode::serde::encode_to_vec(self, bincode::config::standard())
+            .map_err(|e| anyhow::anyhow!("bincode encode failed for path {:?}: {}", path, e))?;
+        let mut f = std::fs::File::create(path)
+            .map_err(|e| anyhow::anyhow!("cannot create binary file {:?}: {}", path, e))?;
+        f.write_all(&encoded)
+            .map_err(|e| anyhow::anyhow!("write failed to {:?}: {}", path, e))?;
         Ok(())
     }
 
@@ -113,14 +109,11 @@ where
     /// # }
     /// ```
     pub fn load_binary(path: &Path) -> anyhow::Result<Self> {
-        let bytes = std::fs::read(path).map_err(|e| {
-            anyhow::anyhow!("cannot read binary file {:?}: {}", path, e)
-        })?;
+        let bytes = std::fs::read(path)
+            .map_err(|e| anyhow::anyhow!("cannot read binary file {:?}: {}", path, e))?;
         let (tensor, _consumed) =
             bincode::serde::decode_from_slice::<Self, _>(&bytes, bincode::config::standard())
-                .map_err(|e| {
-                    anyhow::anyhow!("bincode decode failed for path {:?}: {}", path, e)
-                })?;
+                .map_err(|e| anyhow::anyhow!("bincode decode failed for path {:?}: {}", path, e))?;
         Ok(tensor)
     }
 }

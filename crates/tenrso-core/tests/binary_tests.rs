@@ -128,10 +128,7 @@ mod binary_io_tests {
     #[test]
     fn test_tensor_handle_round_trip() {
         let dense = DenseND::<f64>::random_uniform(&[8, 12], -5.0, 5.0);
-        let axes = vec![
-            AxisMeta::new("rows", 8),
-            AxisMeta::new("cols", 12),
-        ];
+        let axes = vec![AxisMeta::new("rows", 8), AxisMeta::new("cols", 12)];
         let handle = TensorHandle::from_dense(dense, axes);
 
         let path = std::env::temp_dir().join("tenrso_test_binary_handle.bin");
@@ -223,19 +220,11 @@ mod binary_io_tests {
 
     #[test]
     fn test_shape_preserved_exactly() {
-        let shapes: &[&[usize]] = &[
-            &[1],
-            &[1, 1],
-            &[7],
-            &[3, 3],
-            &[2, 4, 8],
-            &[5, 1, 3, 2],
-        ];
+        let shapes: &[&[usize]] = &[&[1], &[1, 1], &[7], &[3, 3], &[2, 4, 8], &[5, 1, 3, 2]];
 
         for (idx, shape) in shapes.iter().enumerate() {
             let tensor = DenseND::<f64>::zeros(shape);
-            let path = std::env::temp_dir()
-                .join(format!("tenrso_test_binary_shape_{}.bin", idx));
+            let path = std::env::temp_dir().join(format!("tenrso_test_binary_shape_{}.bin", idx));
 
             tensor.save_binary(&path).unwrap();
             let loaded = DenseND::<f64>::load_binary(&path).unwrap();
