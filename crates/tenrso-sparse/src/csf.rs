@@ -459,9 +459,7 @@ impl<'a, T: Float> Iterator for CsfIterator<'a, T> {
 
                 // Find which parent fiber (at level ndim-2) contains this value.
                 // fptr[level] maps parent fiber indices to val ranges.
-                let fiber_idx = self
-                    .csf
-                    .fptr[level]
+                let fiber_idx = self.csf.fptr[level]
                     .partition_point(|&p| p <= current_val_pos)
                     .saturating_sub(1);
 
@@ -481,9 +479,7 @@ impl<'a, T: Float> Iterator for CsfIterator<'a, T> {
                     let vs = self.csf.fptr[level][current_val_pos];
                     // fptr[level-1] maps level-1 fibers to value ranges.
                     // Find the level-1 fiber whose value range contains vs.
-                    let parent_fiber = self
-                        .csf
-                        .fptr[level - 1]
+                    let parent_fiber = self.csf.fptr[level - 1]
                         .partition_point(|&p| p <= vs)
                         .saturating_sub(1);
                     current_val_pos = parent_fiber;

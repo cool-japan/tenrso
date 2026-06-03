@@ -10,9 +10,9 @@
 //! All array operations use `scirs2_core::ndarray_ext`.
 //! Direct use of `ndarray` is forbidden per SCIRS2_INTEGRATION_POLICY.md
 
-use scirs2_core::ndarray_ext::{Array2, ArrayView2};
 #[cfg(feature = "parallel")]
 use scirs2_core::ndarray_ext::Axis;
+use scirs2_core::ndarray_ext::{Array2, ArrayView2};
 use scirs2_core::numeric::Num;
 
 /// Compute the Khatri-Rao product (column-wise Kronecker product) of two matrices

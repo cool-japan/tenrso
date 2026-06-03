@@ -61,11 +61,7 @@ fn validate_nmode_sparse_inputs<T>(
     let rank = tensor_shape.len();
 
     if mode >= rank {
-        anyhow::bail!(
-            "Mode {} out of bounds for tensor with rank {}",
-            mode,
-            rank
-        );
+        anyhow::bail!("Mode {} out of bounds for tensor with rank {}", mode, rank);
     }
 
     let matrix_cols = matrix.shape()[1];
@@ -366,8 +362,7 @@ mod tests {
             .into_iter()
             .map(|v| v * 2.0 - 1.0)
             .collect();
-        Array2::<f64>::from_shape_vec((rows, cols), data)
-            .expect("shape product == data len")
+        Array2::<f64>::from_shape_vec((rows, cols), data).expect("shape product == data len")
     }
 
     // -------------------------------------------------------------------------
@@ -442,8 +437,7 @@ mod tests {
 
         let sparse_res =
             nmode_product_sparse_coo(&coo, &matrix.view(), 0).expect("sparse nmode mode0");
-        let dense_res =
-            nmode_product(&dense.view(), &matrix.view(), 0).expect("dense nmode mode0");
+        let dense_res = nmode_product(&dense.view(), &matrix.view(), 0).expect("dense nmode mode0");
 
         assert_eq!(sparse_res.shape(), &[3, 5, 6]);
         assert_eq!(sparse_res.shape(), dense_res.shape());
@@ -463,8 +457,7 @@ mod tests {
 
         let sparse_res =
             nmode_product_sparse_coo(&coo, &matrix.view(), 1).expect("sparse nmode mode1");
-        let dense_res =
-            nmode_product(&dense.view(), &matrix.view(), 1).expect("dense nmode mode1");
+        let dense_res = nmode_product(&dense.view(), &matrix.view(), 1).expect("dense nmode mode1");
 
         assert_eq!(sparse_res.shape(), &[4, 7, 6]);
         assert_eq!(sparse_res.shape(), dense_res.shape());
@@ -484,8 +477,7 @@ mod tests {
 
         let sparse_res =
             nmode_product_sparse_coo(&coo, &matrix.view(), 2).expect("sparse nmode mode2");
-        let dense_res =
-            nmode_product(&dense.view(), &matrix.view(), 2).expect("dense nmode mode2");
+        let dense_res = nmode_product(&dense.view(), &matrix.view(), 2).expect("dense nmode mode2");
 
         assert_eq!(sparse_res.shape(), &[4, 5, 3]);
         assert_eq!(sparse_res.shape(), dense_res.shape());
@@ -528,8 +520,7 @@ mod tests {
         let (_, coo) = build_sparse_nd(&shape, 10, 100);
         // 6x8 matrix: mode-1 dim 8 -> 6
         let matrix = random_matrix(6, 8, 10);
-        let result = nmode_product_sparse_coo(&coo, &matrix.view(), 1)
-            .expect("dim change");
+        let result = nmode_product_sparse_coo(&coo, &matrix.view(), 1).expect("dim change");
         assert_eq!(result.shape(), &[2, 6, 4]);
     }
 
@@ -540,10 +531,8 @@ mod tests {
         let (dense, coo) = build_sparse_nd(&shape, 20, 101);
         // 5x5 identity -- result must equal the original tensor (in dense form).
         let eye = Array2::<f64>::eye(5);
-        let sparse_res = nmode_product_sparse_coo(&coo, &eye.view(), 1)
-            .expect("dim preserving");
-        let dense_res = nmode_product(&dense.view(), &eye.view(), 1)
-            .expect("dense preserving");
+        let sparse_res = nmode_product_sparse_coo(&coo, &eye.view(), 1).expect("dim preserving");
+        let dense_res = nmode_product(&dense.view(), &eye.view(), 1).expect("dense preserving");
 
         assert_eq!(sparse_res.shape(), &[3, 5, 4]);
         assert!(
@@ -562,8 +551,7 @@ mod tests {
         // Empty COO (nnz = 0) -> output is all zeros.
         let coo = CooTensor::<f64>::zeros(vec![3, 4, 5]).expect("zeros COO");
         let matrix = random_matrix(2, 4, 7);
-        let result =
-            nmode_product_sparse_coo(&coo, &matrix.view(), 1).expect("empty tensor");
+        let result = nmode_product_sparse_coo(&coo, &matrix.view(), 1).expect("empty tensor");
         assert_eq!(result.shape(), &[3, 2, 5]);
         for &v in result.iter() {
             assert_eq!(v, 0.0, "expected zero output for empty tensor");
@@ -625,10 +613,9 @@ mod tests {
 
         let matrix = random_matrix(5, 3, 200);
 
-        let sparse_res = nmode_product_sparse_coo(&coo, &matrix.view(), 1)
-            .expect("dup indices nmode");
-        let dense_res =
-            nmode_product(&dense.view(), &matrix.view(), 1).expect("dense dup");
+        let sparse_res =
+            nmode_product_sparse_coo(&coo, &matrix.view(), 1).expect("dup indices nmode");
+        let dense_res = nmode_product(&dense.view(), &matrix.view(), 1).expect("dense dup");
 
         assert_eq!(sparse_res.shape(), &[2, 5, 4]);
         assert!(
@@ -681,10 +668,9 @@ mod tests {
         let (_, coo) = build_sparse_nd(&shape, 50, 2020);
         let matrix = random_matrix(4, 7, 300);
 
-        let serial = nmode_product_sparse_coo(&coo, &matrix.view(), 1)
-            .expect("serial nmode");
-        let parallel = nmode_product_sparse_coo_parallel(&coo, &matrix.view(), 1)
-            .expect("parallel nmode");
+        let serial = nmode_product_sparse_coo(&coo, &matrix.view(), 1).expect("serial nmode");
+        let parallel =
+            nmode_product_sparse_coo_parallel(&coo, &matrix.view(), 1).expect("parallel nmode");
 
         assert_eq!(serial.shape(), parallel.shape());
         assert!(
@@ -701,10 +687,9 @@ mod tests {
         let (dense, coo) = build_sparse_nd(&shape, 40, 3131);
         let matrix = random_matrix(8, 6, 400);
 
-        let parallel_res = nmode_product_sparse_coo_parallel(&coo, &matrix.view(), 2)
-            .expect("parallel nmode");
-        let dense_res =
-            nmode_product(&dense.view(), &matrix.view(), 2).expect("dense nmode");
+        let parallel_res =
+            nmode_product_sparse_coo_parallel(&coo, &matrix.view(), 2).expect("parallel nmode");
+        let dense_res = nmode_product(&dense.view(), &matrix.view(), 2).expect("dense nmode");
 
         assert_eq!(parallel_res.shape(), &[4, 5, 8]);
         assert!(
@@ -720,8 +705,8 @@ mod tests {
         // Empty tensor: parallel path must produce all-zero output.
         let coo = CooTensor::<f64>::zeros(vec![3, 4, 5]).expect("zeros COO");
         let matrix = Array2::<f64>::from_elem((2, 4), 1.0);
-        let result = nmode_product_sparse_coo_parallel(&coo, &matrix.view(), 1)
-            .expect("parallel empty");
+        let result =
+            nmode_product_sparse_coo_parallel(&coo, &matrix.view(), 1).expect("parallel empty");
         assert_eq!(result.shape(), &[3, 2, 5]);
         for &v in result.iter() {
             assert_eq!(v, 0.0, "expected zero from parallel empty tensor");

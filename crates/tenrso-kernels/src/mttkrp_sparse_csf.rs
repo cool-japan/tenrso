@@ -153,9 +153,8 @@ fn csf_walk_internal<T: Float>(
         let fid = tensor.fids(level)[f];
 
         // Compute updated partial product / output row for this fiber
-        let (new_partial, new_out_row) = update_partial(
-            factors, mode, mode_at_level, fid, partial, out_row, cp_rank,
-        );
+        let (new_partial, new_out_row) =
+            update_partial(factors, mode, mode_at_level, fid, partial, out_row, cp_rank);
 
         // Determine the value range for this fiber's subtree
         let vs = tensor.fptr(level)[f];
@@ -370,7 +369,13 @@ where
         }
 
         let (partial, out_row) = update_partial(
-            factors, mode, root_mode, fid, &initial_partial, None, cp_rank,
+            factors,
+            mode,
+            root_mode,
+            fid,
+            &initial_partial,
+            None,
+            cp_rank,
         );
 
         if ndim == 2 {
@@ -410,7 +415,13 @@ where
                     let gve = tensor.fptr(1)[g + 1];
 
                     let (partial2, out_row2) = update_partial(
-                        factors, mode, tensor.mode_order()[1], gid, &partial, out_row, cp_rank,
+                        factors,
+                        mode,
+                        tensor.mode_order()[1],
+                        gid,
+                        &partial,
+                        out_row,
+                        cp_rank,
                     );
 
                     if next_is_leaf {
@@ -529,7 +540,13 @@ where
             }
 
             let (partial, out_row) = update_partial(
-                factors, mode, root_mode, fid, &initial_partial, None, cp_rank,
+                factors,
+                mode,
+                root_mode,
+                fid,
+                &initial_partial,
+                None,
+                cp_rank,
             );
 
             if ndim == 1 {
@@ -562,7 +579,13 @@ where
                     let gve = tensor.fptr(1)[g + 1];
 
                     let (partial2, out_row2) = update_partial(
-                        factors, mode, tensor.mode_order()[1], gid, &partial, out_row, cp_rank,
+                        factors,
+                        mode,
+                        tensor.mode_order()[1],
+                        gid,
+                        &partial,
+                        out_row,
+                        cp_rank,
                     );
 
                     csf_process_leaf(
@@ -646,8 +669,7 @@ mod tests {
         }
 
         // Build DenseND
-        let dense =
-            DenseND::from_vec(sparse_data.clone(), shape).expect("DenseND creation failed");
+        let dense = DenseND::from_vec(sparse_data.clone(), shape).expect("DenseND creation failed");
 
         // Compute strides for flat → multi-index conversion
         let mut strides = vec![1usize; ndim];
@@ -656,8 +678,7 @@ mod tests {
         }
 
         // Build COO from the sparse data
-        let mut coo =
-            CooTensor::<f64>::zeros(shape.to_vec()).expect("CooTensor creation failed");
+        let mut coo = CooTensor::<f64>::zeros(shape.to_vec()).expect("CooTensor creation failed");
         for (flat_idx, &val) in sparse_data.iter().enumerate() {
             if val != 0.0 {
                 let mut idx = vec![0usize; ndim];
@@ -672,8 +693,7 @@ mod tests {
 
         // Build CSF from COO with natural mode order
         let mode_order: Vec<usize> = (0..ndim).collect();
-        let csf =
-            CsfTensor::from_coo(&coo, &mode_order).expect("CsfTensor creation failed");
+        let csf = CsfTensor::from_coo(&coo, &mode_order).expect("CsfTensor creation failed");
 
         (dense, coo, csf)
     }
@@ -687,8 +707,7 @@ mod tests {
                 let data: Vec<f64> = (0..dim * cp_rank)
                     .map(|_| rng.gen_range(-2.0_f64..2.0_f64))
                     .collect();
-                Array2::from_shape_vec((dim, cp_rank), data)
-                    .expect("factor matrix creation failed")
+                Array2::from_shape_vec((dim, cp_rank), data).expect("factor matrix creation failed")
             })
             .collect()
     }

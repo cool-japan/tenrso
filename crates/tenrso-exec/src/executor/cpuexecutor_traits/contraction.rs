@@ -63,13 +63,7 @@ fn einsum_masked_path<T>(
     mask_pack: &MaskPack,
 ) -> Result<TensorHandle<T>>
 where
-    T: Clone
-        + Num
-        + std::ops::AddAssign
-        + std::default::Default
-        + Float
-        + FromPrimitive
-        + 'static,
+    T: Clone + Num + std::ops::AddAssign + std::default::Default + Float + FromPrimitive + 'static,
 {
     // 1. Extract dense inputs — fail gracefully if any handle is not dense.
     let dense_inputs: Vec<&DenseND<T>> = inputs
@@ -178,7 +172,6 @@ mod tests {
         }
     }
 
-
     // ------------------------------------------------------------------
     // Test 1: diagonal mask on 3×3 matmul output
     // ------------------------------------------------------------------
@@ -198,9 +191,7 @@ mod tests {
         // Dense reference
         let dense_hints = ExecHints::default();
         let mut ex2 = CpuExecutor::new();
-        let ref_result = ex2
-            .einsum("ij,jk->ik", &[a, b], &dense_hints)
-            .unwrap();
+        let ref_result = ex2.einsum("ij,jk->ik", &[a, b], &dense_hints).unwrap();
         let ref_dense = ref_result.as_dense().unwrap();
 
         let rv = result_dense.view();
@@ -209,13 +200,25 @@ mod tests {
         // Diagonal elements must match
         for i in 0..3 {
             let diff = (rv[[i, i]] - dv[[i, i]]).abs();
-            assert!(diff < 1e-10, "diagonal[{}] mismatch: {} vs {}", i, rv[[i, i]], dv[[i, i]]);
+            assert!(
+                diff < 1e-10,
+                "diagonal[{}] mismatch: {} vs {}",
+                i,
+                rv[[i, i]],
+                dv[[i, i]]
+            );
         }
         // Off-diagonal must be 0 (mask excluded them)
         for i in 0..3 {
             for j in 0..3 {
                 if i != j {
-                    assert!(rv[[i, j]].abs() < 1e-14, "off-diag [{},{}] should be 0, got {}", i, j, rv[[i, j]]);
+                    assert!(
+                        rv[[i, j]].abs() < 1e-14,
+                        "off-diag [{},{}] should be 0, got {}",
+                        i,
+                        j,
+                        rv[[i, j]]
+                    );
                 }
             }
         }
@@ -259,7 +262,14 @@ mod tests {
         for r in 0..2 {
             for c in 0..2 {
                 let diff = (rv[[r, c]] - dv[[r, c]]).abs();
-                assert!(diff < 1e-10, "[{},{}] masked={} dense={}", r, c, rv[[r, c]], dv[[r, c]]);
+                assert!(
+                    diff < 1e-10,
+                    "[{},{}] masked={} dense={}",
+                    r,
+                    c,
+                    rv[[r, c]],
+                    dv[[r, c]]
+                );
             }
         }
         // Remaining positions must be 0
@@ -269,7 +279,9 @@ mod tests {
                     assert!(
                         rv[[r, c]].abs() < 1e-14,
                         "unmasked [{},{}] should be 0, got {}",
-                        r, c, rv[[r, c]]
+                        r,
+                        c,
+                        rv[[r, c]]
                     );
                 }
             }
@@ -311,9 +323,21 @@ mod tests {
                 if masked {
                     let expected = av[[r, c]] * bv[[r, c]];
                     let diff = (rv[[r, c]] - expected).abs();
-                    assert!(diff < 1e-10, "elt [{},{}]: got {} expected {}", r, c, rv[[r, c]], expected);
+                    assert!(
+                        diff < 1e-10,
+                        "elt [{},{}]: got {} expected {}",
+                        r,
+                        c,
+                        rv[[r, c]],
+                        expected
+                    );
                 } else {
-                    assert!(rv[[r, c]].abs() < 1e-14, "unmasked [{},{}] should be 0", r, c);
+                    assert!(
+                        rv[[r, c]].abs() < 1e-14,
+                        "unmasked [{},{}] should be 0",
+                        r,
+                        c
+                    );
                 }
             }
         }
@@ -356,9 +380,21 @@ mod tests {
                 if masked {
                     let expected = av[[r]] * bv[[c]];
                     let diff = (rv[[r, c]] - expected).abs();
-                    assert!(diff < 1e-10, "outer [{},{}]: got {} expected {}", r, c, rv[[r, c]], expected);
+                    assert!(
+                        diff < 1e-10,
+                        "outer [{},{}]: got {} expected {}",
+                        r,
+                        c,
+                        rv[[r, c]],
+                        expected
+                    );
                 } else {
-                    assert!(rv[[r, c]].abs() < 1e-14, "unmasked [{},{}] should be 0", r, c);
+                    assert!(
+                        rv[[r, c]].abs() < 1e-14,
+                        "unmasked [{},{}] should be 0",
+                        r,
+                        c
+                    );
                 }
             }
         }
@@ -397,7 +433,10 @@ mod tests {
                 assert!(
                     diff < 1e-10,
                     "full-mask [{},{}]: masked={} dense={}",
-                    i, j, mr[[i, j]], dr[[i, j]]
+                    i,
+                    j,
+                    mr[[i, j]],
+                    dr[[i, j]]
                 );
             }
         }
@@ -416,16 +455,20 @@ mod tests {
         let mask_pack = MaskPack::new(bits, vec![3, 3]);
         let hints = hints_sparse_mask(mask_pack);
 
-        let result = ex
-            .einsum("ij,jk->ik", &[a, b], &hints)
-            .unwrap();
+        let result = ex.einsum("ij,jk->ik", &[a, b], &hints).unwrap();
         let result_dense = result.as_dense().unwrap();
         assert_eq!(result_dense.shape(), &[3, 3]);
 
         let rv = result_dense.view();
         for i in 0..3 {
             for j in 0..3 {
-                assert!(rv[[i, j]].abs() < 1e-14, "empty mask [{},{}] should be 0, got {}", i, j, rv[[i, j]]);
+                assert!(
+                    rv[[i, j]].abs() < 1e-14,
+                    "empty mask [{},{}] should be 0, got {}",
+                    i,
+                    j,
+                    rv[[i, j]]
+                );
             }
         }
     }
@@ -450,7 +493,10 @@ mod tests {
         assert_eq!(result_dense.shape(), &[2, 2]);
         // Just verify it produced a non-zero result (dense path ran)
         let rv = result_dense.view();
-        assert!(rv[[0, 0]].abs() > 0.0, "expected non-zero result from dense path");
+        assert!(
+            rv[[0, 0]].abs() > 0.0,
+            "expected non-zero result from dense path"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -476,6 +522,10 @@ mod tests {
         let rv = result_dense.view();
         // [0,1] = row0 of A · col1 of B = 1*2 + 2*4 = 10
         let diff = (rv[[0, 1]] - 10.0).abs();
-        assert!(diff < 1e-10, "dense path [0,1] should be 10, got {}", rv[[0, 1]]);
+        assert!(
+            diff < 1e-10,
+            "dense path [0,1] should be 10, got {}",
+            rv[[0, 1]]
+        );
     }
 }

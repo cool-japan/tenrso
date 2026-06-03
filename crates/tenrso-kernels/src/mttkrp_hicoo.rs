@@ -863,11 +863,7 @@ mod tests {
         for mode in 0..3 {
             let got = mttkrp_hicoo_parallel(&hicoo, &factors, mode).unwrap();
             for &v in got.iter() {
-                assert_eq!(
-                    v, 0.0,
-                    "parallel empty: expected zero at mode {}",
-                    mode
-                );
+                assert_eq!(v, 0.0, "parallel empty: expected zero at mode {}", mode);
             }
         }
     }

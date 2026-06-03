@@ -59,7 +59,9 @@ fn build_coo(shape: &[usize], fill_frac: f64, seed: u64) -> CooTensor<f64> {
 
     // Insert `nnz` unique positions (skip duplicates via deduplicate at end).
     while inserted < nnz {
-        rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        rng = rng
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         let flat = rng as usize % total;
         let mut idx = vec![0usize; ndim];
         let mut rem = flat;
@@ -83,7 +85,9 @@ fn build_factors(shape: &[usize], cp_rank: usize, seed: u64) -> Vec<Array2<f64>>
         .map(|&rows| {
             let vals: Vec<f64> = (0..rows * cp_rank)
                 .map(|_| {
-                    rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                    rng = rng
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
                     (rng >> 32) as f64 / (u32::MAX as f64) + 0.1
                 })
                 .collect();
@@ -247,7 +251,9 @@ fn bench_nmode_sparse_vs_dense(c: &mut Criterion) {
         let mut rng = 123u64;
         let mat_vals: Vec<f64> = (0..out_rows * shape[MODE])
             .map(|_| {
-                rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                rng = rng
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
                 (rng >> 32) as f64 / (u32::MAX as f64) + 0.1
             })
             .collect();
@@ -261,7 +267,8 @@ fn bench_nmode_sparse_vs_dense(c: &mut Criterion) {
 
         group.bench_function("dense_baseline", |b| {
             b.iter(|| {
-                let r = tenrso_kernels::nmode::nmode_product(&dense.view(), &matrix.view(), MODE).unwrap();
+                let r = tenrso_kernels::nmode::nmode_product(&dense.view(), &matrix.view(), MODE)
+                    .unwrap();
                 black_box(r);
             })
         });

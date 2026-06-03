@@ -180,8 +180,7 @@ where
     /// # }
     /// ```
     pub fn from_json_str(s: &str) -> anyhow::Result<Self> {
-        serde_json::from_str(s)
-            .map_err(|e| anyhow::anyhow!("serde_json parse failed: {}", e))
+        serde_json::from_str(s).map_err(|e| anyhow::anyhow!("serde_json parse failed: {}", e))
     }
 }
 
@@ -242,12 +241,7 @@ mod tests {
 
     #[test]
     fn multi_shape() {
-        let shapes: &[&[usize]] = &[
-            &[10],
-            &[3, 4],
-            &[2, 3, 5],
-            &[2, 2, 2, 2],
-        ];
+        let shapes: &[&[usize]] = &[&[10], &[3, 4], &[2, 3, 5], &[2, 2, 2, 2]];
         for shape in shapes {
             let tensor = seq_f64(shape);
             let json_str = tensor.to_json_string().unwrap();
@@ -299,10 +293,7 @@ mod tests {
     #[test]
     fn invalid_json_str() {
         let result = DenseND::<f64>::from_json_str("not valid json {{{");
-        assert!(
-            result.is_err(),
-            "expected error from invalid JSON, got Ok"
-        );
+        assert!(result.is_err(), "expected error from invalid JSON, got Ok");
     }
 
     #[test]
