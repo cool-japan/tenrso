@@ -19,6 +19,7 @@ scirs2-linalg = { workspace = true, optional = true }
 scirs2-fft = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 bincode = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -27,6 +28,7 @@ serde = ["dep:serde", "smallvec/serde", "scirs2-core/serialization"]
 linalg = ["dep:scirs2-linalg"]
 fft = ["dep:scirs2-fft"]
 binary = ["dep:bincode", "serde"]
+json = ["dep:serde_json", "serde"]
 
 [[example]]
 name = "binary_io"

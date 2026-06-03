@@ -1301,10 +1301,10 @@
 
 **Implementation:** `src/mask.rs` (350 lines, 11 tests passing)
 
-- [ ] Masked einsum - PENDING (Future M4/planner integration)
-  - [ ] Integration with tenrso-exec
-  - [ ] Sparse output computation
-  - [ ] Mixed sparse/dense inputs
+- [x] Masked einsum - executor integration COMPLETE (2026-06-03)
+  - [x] Integration with tenrso-exec (routes via hints.prefer_sparse + hints.mask)
+  - [x] Sparse output computation (CooTensor result densified via to_dense())
+  - [x] Mixed sparse/dense inputs (inputs must be dense; mask drives output sparsity)
 
 ### Format Conversion ✅ COMPLETE
 

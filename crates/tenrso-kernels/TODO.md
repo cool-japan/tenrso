@@ -184,11 +184,7 @@
         - [x] Duplicate-index entries accumulate additively (matches
               `CooTensor::deduplicate` semantics, verified vs dense oracle)
         - [x] N-D general: 3rd, 4th-order tensors exercised in tests
-        - [ ] Sparse CSR-tensor input (CSF/HiCOO) — follow-up: the
-              `CsrMatrix` in `tenrso-sparse` is 2D-only, so a true N-D
-              sparse-tensor CSR path needs a generalized N-D format
-              (HiCOO or CSF). Deferred to M3 proper; see "Sparse Support (M3)"
-              section below.
+        - [x] Sparse HiCOO MTTKRP — `mttkrp_hicoo` + `mttkrp_hicoo_parallel` (2026-06-03)
   - [ ] Out-of-core MTTKRP (future M5)
 
 - [x] Testing

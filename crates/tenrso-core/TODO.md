@@ -210,7 +210,7 @@
 - [x] Serde support for `TensorRepr<T>` (feature-gated)
 - [x] Serde support for `AxisMeta` (feature-gated)
 - [ ] Binary format (efficient) - Future (use serde_bincode)
-- [ ] JSON format (human-readable) - Future (use serde_json)
+- [x] JSON format (human-readable) - COMPLETE (save_json, load_json, to_json_string, from_json_str, 2026-06-03)
 - [ ] Arrow IPC format - Deferred to tenrso-ooc
 
 ### Broadcasting - COMPLETE

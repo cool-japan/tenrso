@@ -116,6 +116,8 @@ pub mod mttkrp_sparse;
 #[cfg(feature = "sparse")]
 pub mod nmode_sparse;
 #[cfg(feature = "csf")]
+pub mod mttkrp_hicoo;
+#[cfg(feature = "csf")]
 pub mod mttkrp_sparse_csf;
 pub mod nmode;
 pub mod outer;
@@ -140,6 +142,8 @@ pub use mttkrp::*;
 pub use mttkrp_sparse::*;
 #[cfg(feature = "sparse")]
 pub use nmode_sparse::*;
+#[cfg(feature = "csf")]
+pub use mttkrp_hicoo::*;
 #[cfg(feature = "csf")]
 pub use mttkrp_sparse_csf::*;
 pub use nmode::*;

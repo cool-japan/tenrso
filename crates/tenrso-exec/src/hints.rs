@@ -94,4 +94,14 @@ impl ExecHints {
         self.tile_kb = Some(kb);
         self
     }
+
+    /// Set a boolean mask (flat row-major) for masked einsum routing.
+    ///
+    /// When combined with `prefer_sparse = true`, the executor routes through
+    /// the sparse masked einsum path, computing only the output positions
+    /// indicated by the mask.
+    pub fn with_mask(mut self, mask: Vec<bool>, shape: Vec<usize>) -> Self {
+        self.mask = Some(MaskPack::new(mask, shape));
+        self
+    }
 }

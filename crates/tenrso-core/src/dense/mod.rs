@@ -28,6 +28,10 @@ pub(crate) mod functions;
 #[cfg(feature = "binary")]
 mod binary;
 
+// JSON serialization (feature-gated)
+#[cfg(feature = "json")]
+mod json;
+
 // Re-export the main type
 pub use types::DenseND;
 

@@ -320,7 +320,9 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
 - [x] Sparse n-mode product (`nmode_product_sparse_coo`, 2026-06-03, tenrso-kernels `sparse` feature)
 - [x] Mixed sparse/dense operations (satisfied by sparse n-mode product, 2026-06-03)
 - [x] Sparse MTTKRP (CSF input, 2026-06-03, tenrso-kernels `csf` feature) — DFS fiber-tree walk
-- [ ] Sparse MTTKRP (HiCOO input) — deferred, similar design to CSF
+- [x] Sparse MTTKRP (HiCOO input, 2026-06-03, tenrso-kernels `csf` feature) — block-group parallel
+- [x] Masked einsum executor integration (2026-06-03) — routes via `ExecHints::prefer_sparse + mask`
+- [x] JSON serialization for DenseND (2026-06-03, tenrso-core `json` feature) — save/load/string
 - [ ] Advanced sparse formats (BSR, DIA, ELL) — DIA/ELL already exist in tenrso-sparse
 
 ### Performance Optimization
