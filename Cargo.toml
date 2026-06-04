@@ -56,7 +56,7 @@ dashmap = "6.2.1"
 tonic = { version = "0.14.6", features = ["transport"] }
 tonic-build = "0.14.6"
 prost = "0.14.3"
-oxicode = { version = "0.2.3", features = ["serde"] }
+oxicode = { version = "0.2.4", features = ["serde"] }
 bytes = "1.11.1"
 futures = "0.3.32"
 crc32fast = "1.5.0"
