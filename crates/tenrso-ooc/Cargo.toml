@@ -20,8 +20,8 @@ tracing-subscriber = { workspace = true, optional = true }
 arrow = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
 memmap2 = { workspace = true, optional = true }
-lz4 = { workspace = true, optional = true }
-zstd = { workspace = true, optional = true }
+oxiarc-lz4 = { workspace = true, optional = true }
+oxiarc-zstd = { workspace = true, optional = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
@@ -51,9 +51,9 @@ arrow = ["dep:arrow"]
 parquet = ["dep:parquet"]
 mmap = ["dep:memmap2"]
 parallel = ["scirs2-core/parallel"]
-compression = ["dep:lz4", "dep:zstd"]
-lz4-compression = ["compression", "dep:lz4"]
-zstd-compression = ["compression", "dep:zstd"]
+compression = ["dep:oxiarc-lz4", "dep:oxiarc-zstd"]
+lz4-compression = ["compression", "dep:oxiarc-lz4"]
+zstd-compression = ["compression", "dep:oxiarc-zstd"]
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
 opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-semantic-conventions", "dep:tokio", "dep:parking_lot"]
 prometheus-metrics = ["dep:prometheus", "dep:parking_lot", "dep:lazy_static"]

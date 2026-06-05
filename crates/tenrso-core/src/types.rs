@@ -610,7 +610,7 @@ where
     /// Returns an error if:
     /// - The underlying tensor is not in `Dense` representation
     /// - The file cannot be created or written to
-    /// - bincode serialization fails
+    /// - oxicode serialization fails
     ///
     /// # Complexity
     ///
@@ -653,7 +653,7 @@ where
     ///
     /// Returns an error if:
     /// - The file cannot be read
-    /// - The bytes are not a valid bincode-encoded `DenseND<T>`
+    /// - The bytes are not a valid oxicode-encoded `DenseND<T>`
     ///
     /// # Complexity
     ///

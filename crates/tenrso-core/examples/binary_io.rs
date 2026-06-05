@@ -1,6 +1,6 @@
 //! Binary I/O round-trip example for `DenseND<T>` and `TensorHandle<T>`.
 //!
-//! Demonstrates `save_binary` / `load_binary` using bincode v2 encoding.
+//! Demonstrates `save_binary` / `load_binary` using oxicode encoding.
 //! Requires the `binary` feature:
 //!
 //! ```bash

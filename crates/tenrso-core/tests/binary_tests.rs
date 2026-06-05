@@ -205,7 +205,7 @@ mod binary_io_tests {
     fn test_corrupted_bytes_return_error() {
         let path = std::env::temp_dir().join("tenrso_test_binary_corrupt.bin");
         // Write garbage bytes
-        std::fs::write(&path, b"this is not a valid bincode tensor payload").unwrap();
+        std::fs::write(&path, b"this is not a valid oxicode tensor payload").unwrap();
 
         let result = DenseND::<f64>::load_binary(&path);
         assert!(
