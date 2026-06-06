@@ -33,8 +33,8 @@ smallvec = "1.15.1"
 arrow = { version = "58.3.0", default-features = false, features = ["ipc"] }
 parquet = "58.3.0"
 memmap2 = "0.9.10"
-oxiarc-lz4 = "0.3.2"
-oxiarc-zstd = "0.3.2"
+oxiarc-lz4 = "0.3.3"
+oxiarc-zstd = "0.3.3"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.11"
 rayon = "1.12"

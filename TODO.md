@@ -99,6 +99,40 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
 
 ---
 
+## Pure Rust Migration (COOLJAPAN Policy)
+
+Replace C-backed and non-COOLJAPAN serialization/compression dependencies with
+the Pure-Rust `oxicode` / `oxiarc-*` equivalents. Feature **names** are kept so
+existing `#[cfg(feature = "...")]` gates remain valid.
+
+- [x] (2026-06-05) **tenrso-core: `bincode` 2.x → `oxicode`.** Workspace dep and
+      `tenrso-core` `binary` feature now use `oxicode`; call sites in
+      `crates/tenrso-core/src/dense/binary.rs` use
+      `oxicode::serde::encode_to_vec(&x, oxicode::config::standard())` /
+      `oxicode::serde::decode_from_slice(&bytes, oxicode::config::standard())`.
+      `bincode` removed from the workspace tree entirely.
+- [x] (2026-06-05) **tenrso-ooc: `lz4` (C, `lz4-sys`) → `oxiarc-lz4`.**
+      `crates/tenrso-ooc/src/compression.rs` now calls
+      `oxiarc_lz4::block::compress_block(data)` and
+      `oxiarc_lz4::block::decompress_block(compressed, original_size)`
+      (the stored original size is passed as the `max_output` safety bound).
+- [x] (2026-06-05) **tenrso-ooc: `zstd` (C, `zstd-sys`) → `oxiarc-zstd`.**
+      `compression.rs` now calls `oxiarc_zstd::encode_all(data, level)` /
+      `oxiarc_zstd::decode_all(compressed)` (exact drop-ins).
+- [x] (2026-06-05) Verified: `tenrso-core` + `tenrso-ooc` build (default and
+      `--all-features`), nextest green (217 + 542 tests), clippy clean with
+      `-D warnings`. `bincode` and `lz4-sys` are absent from the workspace tree;
+      the only LZ4 in the tree besides `oxiarc-lz4` is the Pure-Rust `lz4_flex`.
+
+- [ ] **Residual C dependency (out of scope for tenrso's own code): `zstd-sys`
+      via `parquet`.** Apache `parquet` v58 bundles `zstd`/`zstd-sys` for the
+      Parquet file format's internal column compression; it exposes no feature to
+      swap its backend. tenrso's direct dependencies and source are now fully
+      Pure-Rust. Revisit if `parquet` gains a Pure-Rust compression backend or if
+      the `parquet` feature is dropped.
+
+---
+
 ## Legend
 
 - ✅ **Complete** - Implemented and tested
