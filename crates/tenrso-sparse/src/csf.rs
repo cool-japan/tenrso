@@ -206,7 +206,7 @@ impl<T: Float> CsfTensor<T> {
             while j < sorted_indices.len() && sorted_indices[j].0[first_mode] == idx_val {
                 j += 1;
             }
-            current_ptrs.push(j - i + current_ptrs.last().unwrap());
+            current_ptrs.push(j - i + current_ptrs.last().expect("current_ptrs initialized with vec![0]"));
             i = j;
         }
 
@@ -243,7 +243,7 @@ impl<T: Float> CsfTensor<T> {
                         while local_end < end && sorted_indices[local_end].0[mode] == idx_val {
                             local_end += 1;
                         }
-                        next_ptrs.push(next_ptrs.last().unwrap() + (local_end - local_start));
+                        next_ptrs.push(next_ptrs.last().expect("next_ptrs initialized with vec![0]") + (local_end - local_start));
                         local_start = local_end;
                     }
                 }
