@@ -6,7 +6,7 @@ use crate::api::{ContractionSpec, Plan, PlanHints, PlanNode, ReprHint};
 use crate::cost::{estimate_flops, TensorStats};
 use crate::parser::EinsumSpec;
 use anyhow::{anyhow, Result};
-use scirs2_core::random::{RngExt, SeedableRng, StdRng};
+use scirs2_core::random::{SeedableRng, StdRng};
 use std::collections::HashMap;
 
 use super::types::IntermediateTensor;
@@ -569,7 +569,7 @@ pub fn simulated_annealing_planner(
             true
         } else {
             let prob = E.powf(-delta / temperature);
-            rng.random::<f64>() < prob
+            rng.random_f64() < prob
         };
         if accept {
             current_plan = neighbor_plan;
@@ -734,8 +734,8 @@ pub fn genetic_algorithm_planner(
             }
 
             // Mutation: swap random adjacent nodes
-            if rng.random::<f64>() < mutation_rate && child.nodes.len() > 1 {
-                let swap_idx = rng.random_range(0..child.nodes.len() - 1);
+            if rng.random_f64() < mutation_rate && child.nodes.len() > 1 {
+                let swap_idx = rng.gen_range(0..child.nodes.len() - 1);
                 child.nodes.swap(swap_idx, swap_idx + 1);
             }
 

@@ -160,18 +160,7 @@
     - [x] `mttkrp_fused_simd_parallel_f32` / `_f64` (Rayon over mode rows)
     - [x] Supported lane widths: AVX-512 (16x f32 / 8x f64), AVX2 (8x f32 /
           4x f64), NEON (4x f32 / 2x f64); scalar fallback on other ISAs.
-          All via LLVM auto-vectorization over `iter::zip` / `copy_from_slice`
-          on contiguous row slices — **no raw intrinsics, no `unsafe`**.
-    - [x] Transparent scalar fallback when R < 4 (`SIMD_MIN_RANK`) or
-          R == 0, or when row slices happen to be non-contiguous
-    - [x] Numerical tolerance vs scalar fused: **1e-6 for f32, 1e-12 for f64**
-          (may differ from scalar by up to this amount when hardware FMA
-          reorders accumulation; FMA-free targets yield bit-identical output)
-    - [x] 11 new tests covering 4 shape regimes + tail (R = lane+1) +
-          R=1/R=0 edge cases + parallel variants
-    - [x] Measured speedup on aarch64 NEON at rank=32: **~4.5x** over
-          scalar fused serial, ~12x combined with Rayon parallelism
-          (50^3 f64: 10.3ms → 855us)
+    - [x] 11 new tests covering 4 shape regimes + tail + edge cases
 
 - [x] Variants
   - [x] Dense MTTKRP - Complete
@@ -337,7 +326,7 @@
   - [x] Validation and convergence tracking patterns
   - [x] Cross-crate compatibility (tenrso-core integration)
   - [x] Large tensor scenarios (up to 100^3)
-  - [ ] Use with tenrso-decomp - Pending M2
+  - [x] Use with tenrso-decomp — Complete (2026-06-10, `crates/tenrso/tests/kernels_decomp_integration.rs`)
 
 ### Documentation - COMPLETE
 
@@ -405,9 +394,9 @@
 ### Additional Optimizations (Future)
 
 - [x] SIMD inner loops for MTTKRP fused kernel (2026-04-14)
-- [ ] Fully fused + cache-blocking combined variant
+- [x] Fully fused + cache-blocking combined variant — Complete (2026-06-10, `mttkrp_fused_blocked` + `mttkrp_fused_blocked_parallel`)
 - [x] Parallel Tucker mode application — Complete (2026-06-10, `nmode_product_parallel`, `nmode_products_parallel`, `tucker_operator_parallel`, `feature = "parallel"`)
-- [x] Fused multi-mode products — Complete (2026-06-10, `tucker_reconstruct_fused` + `tucker_reconstruct_fused_parallel`; avoids all N-1 intermediate tensor allocations)
+- [x] Fused multi-mode products — Complete (2026-06-10, `tucker_reconstruct_fused` + `tucker_reconstruct_fused_parallel`)
 - [ ] Flamegraph profiling / cache miss analysis
 
 ---
