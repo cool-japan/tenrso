@@ -136,7 +136,7 @@ where
 }
 
 /// Unfold a tensor along a specific mode into a matrix
-fn unfold_tensor<T>(tensor: &ArrayView<T, IxDyn>, mode: usize) -> Result<Array2<T>>
+pub(crate) fn unfold_tensor<T>(tensor: &ArrayView<T, IxDyn>, mode: usize) -> Result<Array2<T>>
 where
     T: Copy + Num,
 {

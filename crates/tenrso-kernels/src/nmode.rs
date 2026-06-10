@@ -118,7 +118,7 @@ where
 ///
 /// For tensor X with shape (I₁, ..., Iₖ, ..., Iₙ), unfolds to matrix
 /// with shape (Iₖ, I₁ · ... · Iₖ₋₁ · Iₖ₊₁ · ... · Iₙ)
-fn unfold_tensor<T>(tensor: &ArrayView<T, IxDyn>, mode: usize) -> Result<Array2<T>>
+pub(crate) fn unfold_tensor<T>(tensor: &ArrayView<T, IxDyn>, mode: usize) -> Result<Array2<T>>
 where
     T: Copy + Num,
 {
@@ -151,7 +151,7 @@ where
 /// Fold a matrix back into a tensor along a specific mode
 ///
 /// Inverse operation of unfold_tensor
-fn fold_matrix<T>(matrix: &ArrayView2<T>, shape: &[usize], mode: usize) -> Result<Array<T, IxDyn>>
+pub(crate) fn fold_matrix<T>(matrix: &ArrayView2<T>, shape: &[usize], mode: usize) -> Result<Array<T, IxDyn>>
 where
     T: Copy + Num,
 {

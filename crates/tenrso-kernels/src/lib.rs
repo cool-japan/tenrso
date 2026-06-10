@@ -111,6 +111,7 @@ pub mod hadamard;
 pub mod khatri_rao;
 pub mod kronecker;
 pub mod mttkrp;
+pub mod mttkrp_fused_blocked;
 #[cfg(feature = "csf")]
 pub mod mttkrp_hicoo;
 #[cfg(feature = "sparse")]
@@ -118,6 +119,7 @@ pub mod mttkrp_sparse;
 #[cfg(feature = "csf")]
 pub mod mttkrp_sparse_csf;
 pub mod nmode;
+pub mod nmode_tucker_ext;
 #[cfg(feature = "sparse")]
 pub mod nmode_sparse;
 pub mod outer;
@@ -138,6 +140,7 @@ pub use hadamard::*;
 pub use khatri_rao::*;
 pub use kronecker::*;
 pub use mttkrp::*;
+pub use mttkrp_fused_blocked::*;
 #[cfg(feature = "csf")]
 pub use mttkrp_hicoo::*;
 #[cfg(feature = "sparse")]
@@ -145,6 +148,7 @@ pub use mttkrp_sparse::*;
 #[cfg(feature = "csf")]
 pub use mttkrp_sparse_csf::*;
 pub use nmode::*;
+pub use nmode_tucker_ext::*;
 #[cfg(feature = "sparse")]
 pub use nmode_sparse::*;
 pub use outer::*;

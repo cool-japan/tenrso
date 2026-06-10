@@ -153,7 +153,7 @@
     - [x] `mttkrp_fused_parallel` - Parallel fused version
     - [x] Significantly reduced memory usage
     - [x] Column-to-multi-index mapping fixed (all previously ignored tests passing)
-  - [ ] Fully fused + cache-blocking - Future optimization
+  - [x] Fully fused + cache-blocking combined variant — Complete (2026-06-10, `mttkrp_fused_blocked` + `mttkrp_fused_blocked_parallel`)
   - [x] **SIMD inner loops (2026-04-14)** — rank-innermost loop reorder
         with compiler auto-vectorization over contiguous slices
     - [x] `mttkrp_fused_simd_f32` / `mttkrp_fused_simd_f64` (serial)
