@@ -58,7 +58,7 @@
 use crate::error::{KernelError, KernelResult};
 use scirs2_core::ndarray_ext::{s, Array1, Array2, ArrayView2, ScalarOperand};
 use scirs2_core::num_traits::{Float, NumAssign};
-use scirs2_core::random::{thread_rng, Rng, SeedableRng};
+use scirs2_core::random::{thread_rng, RngExt, SeedableRng};
 use scirs2_core::StandardNormal;
 use std::iter::Sum;
 

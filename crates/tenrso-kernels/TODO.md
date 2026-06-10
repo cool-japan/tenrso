@@ -151,7 +151,7 @@
     - [x] `mttkrp_fused_parallel` - Parallel fused version
     - [x] Significantly reduced memory usage
     - [x] Column-to-multi-index mapping fixed (all previously ignored tests passing)
-  - [ ] Fully fused + cache-blocking - Future optimization
+  - [x] Fully fused + cache-blocking combined variant — Complete (2026-06-10, `mttkrp_fused_blocked` + `mttkrp_fused_blocked_parallel`)
   - [ ] SIMD inner loops - Future (using scirs2_core where possible)
 
 - [x] Variants
