@@ -364,7 +364,9 @@
 
 - [x] Tucker-TTM (multiple mode products) — implemented as `tucker_operator()` / `tucker_operator_ordered()` in `nmode.rs`
 - [x] TT-matrix-vector product — implemented as `tt_matvec()` in `tt_ops.rs`
-- [x] TT-rounding operation — implemented as `tt_round()` in `tt_ops.rs`
+- [x] TT-rounding operation — full Oseledets 2-phase (QR + right-to-left SVD) in `tt_round.rs`;
+      `tt_truncate()` uses per-bond max_ranks; `tt_qr_decomposition` fixed to SVD-based thin QR
+      for correct wide-matrix handling; 23 tests including rank-reduction and boundary checks
 - [x] Tensor contraction primitives — implemented in `contractions.rs` (`contract_tensors`, `sum_over_modes`, `tensor_inner_product`, `tensor_trace`)
 
 ### Sparse Support (M3)
