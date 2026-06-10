@@ -200,6 +200,7 @@ pub mod cp;
 pub mod rank_selection;
 pub mod tt;
 pub mod tucker;
+pub mod tucker_advanced;
 pub mod utils;
 
 #[cfg(test)]
@@ -210,3 +211,4 @@ pub use cp::*;
 pub use rank_selection::*;
 pub use tt::*;
 pub use tucker::*;
+pub use tucker_advanced::*;
