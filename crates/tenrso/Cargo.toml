@@ -38,5 +38,9 @@ default = ["ooc"]
 ooc = ["tenrso-exec/ooc"]
 # Enable automatic differentiation support
 ad = ["dep:tenrso-ad"]
+# Enable sparse CP-ALS and sparse tensor kernels
+sparse = ["tenrso-decomp/sparse", "tenrso-kernels/sparse"]
+# Enable CSF and HiCOO formats + associated kernels
+csf = ["tenrso-kernels/csf", "tenrso-decomp/sparse"]
 # Enable all features
-full = ["ooc", "ad"]
+full = ["ooc", "ad", "sparse", "csf"]

@@ -29,7 +29,7 @@
 - **Tests:** 165 passing (2 ignored), 100% pass rate
 - **Zero `todo!()` / `unimplemented!()` macros** in the entire crate
 - **Milestone M2: COMPLETE** — all CP/Tucker/TT/rank-selection items implemented
-- **CP family:** cp_als, cp_als_constrained, cp_als_accelerated, cp_completion, cp_randomized, cp_als_incremental
+- **CP family:** cp_als, cp_als_constrained, cp_als_accelerated, cp_completion, cp_randomized, cp_als_incremental, cp_als_sparse (feature `sparse`)
 - **Tucker family:** tucker_hosvd, tucker_hosvd_auto, tucker_hooi, tucker_randomized, tucker_nonnegative, tucker_completion
 - **TT family:** tt_svd, tt_round, tt_add, tt_dot, tt_hadamard, TTMatrix::matvec, tt_matrix_from_diagonal
 - **Rank selection:** compute_information_criterion, select_rank_auto, cp_rank_cross_validation

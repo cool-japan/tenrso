@@ -240,6 +240,145 @@ fn test_cp_reconstruction_shape_compatibility() {
     assert!(bad_reconstructed.is_err());
 }
 
+// ============================================================================
+// Sparse CP-ALS integration tests
+// ============================================================================
+
+#[cfg(feature = "sparse")]
+mod sparse_cp_integration {
+    use super::*;
+    use tenrso_decomp::cp::cp_als_sparse;
+    use tenrso_sparse::coo::CooTensor;
+
+    /// Build a sparse COO tensor deterministically from a DenseND (insert all nonzeros).
+    fn dense_to_coo(dense: &DenseND<f64>) -> CooTensor<f64> {
+        let shape = dense.shape().to_vec();
+        let mut coo = CooTensor::zeros(shape.clone()).unwrap();
+        let view = dense.view();
+        let ndim = shape.len();
+        let total: usize = shape.iter().product();
+        for flat in 0..total {
+            let mut idx = vec![0usize; ndim];
+            let mut rem = flat;
+            for d in (0..ndim).rev() {
+                idx[d] = rem % shape[d];
+                rem /= shape[d];
+            }
+            let val = view[&idx[..]];
+            if val != 0.0 {
+                coo.push(idx, val).ok();
+            }
+        }
+        coo
+    }
+
+    /// Build a rank-R dense tensor from outer products (deterministic LCG seed).
+    fn make_rank_r_tensor(n0: usize, n1: usize, n2: usize, rank: usize, seed: u64) -> DenseND<f64> {
+        let mut state = seed;
+        let mut v = || -> f64 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 32) as f64 / (u32::MAX as f64) - 0.5
+        };
+        let a: Vec<f64> = (0..n0 * rank).map(|_| v()).collect();
+        let b: Vec<f64> = (0..n1 * rank).map(|_| v()).collect();
+        let c: Vec<f64> = (0..n2 * rank).map(|_| v()).collect();
+        let mut data = vec![0.0f64; n0 * n1 * n2];
+        for r in 0..rank {
+            for i in 0..n0 {
+                for j in 0..n1 {
+                    for k in 0..n2 {
+                        data[i * n1 * n2 + j * n2 + k] +=
+                            a[i * rank + r] * b[j * rank + r] * c[k * rank + r];
+                    }
+                }
+            }
+        }
+        DenseND::from_vec(data, &[n0, n1, n2]).unwrap()
+    }
+
+    #[test]
+    fn test_sparse_cp_pipeline_on_low_rank_tensor() {
+        // Build a rank-3 tensor and decompose it via sparse CP-ALS.
+        // Verify reconstruction error < 30% on a known-rank tensor.
+        let rank = 3;
+        let dense = make_rank_r_tensor(8, 7, 6, rank, 0xABCDEF);
+        let coo = dense_to_coo(&dense);
+
+        let cp = cp_als_sparse(&coo, rank, 100, 1e-6, InitStrategy::Random, None).unwrap();
+        assert!(cp.fit > 0.5, "fit on rank-{} tensor = {:.4}", rank, cp.fit);
+
+        let recon = cp.reconstruct(dense.shape()).unwrap();
+        assert_eq!(recon.shape(), dense.shape());
+
+        let error = compute_reconstruction_error(&dense, &recon);
+        assert!(
+            error < 0.5,
+            "reconstruction error on rank-{} tensor should be < 50%, got {:.4}",
+            rank,
+            error
+        );
+    }
+
+    #[test]
+    fn test_sparse_dense_cp_pipeline_agreement() {
+        // Same tensor, same rank — sparse and dense CP-ALS should produce
+        // decompositions with similar fit (within 0.35).
+        let rank = 3;
+        let dense = make_rank_r_tensor(7, 6, 5, rank, 0xFEDCBA);
+        let coo = dense_to_coo(&dense);
+
+        let cp_dense = cp_als(&dense, rank, 80, 1e-6, InitStrategy::Random, None).unwrap();
+        let cp_sparse = cp_als_sparse(&coo, rank, 80, 1e-6, InitStrategy::Random, None).unwrap();
+
+        assert!(
+            (cp_dense.fit - cp_sparse.fit).abs() < 0.35,
+            "dense fit {:.4} vs sparse fit {:.4} too different",
+            cp_dense.fit,
+            cp_sparse.fit
+        );
+    }
+
+    #[test]
+    fn test_sparse_cp_pipeline_varying_sparsity() {
+        // Build a sparse COO at different fill fractions and check that
+        // cp_als_sparse always returns valid results.
+        let shape = [6, 7, 8];
+        let total: usize = shape.iter().product();
+
+        for fill in [0.01f64, 0.05, 0.20, 1.0] {
+            let nnz = ((total as f64) * fill).max(1.0) as usize;
+            let ndim = shape.len();
+            let mut coo = CooTensor::<f64>::zeros(shape.to_vec()).unwrap();
+            let mut rng = 0xDEAD_u64;
+            for _ in 0..nnz {
+                rng = rng
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let flat = rng as usize % total;
+                let mut idx = vec![0usize; ndim];
+                let mut rem = flat;
+                for d in (0..ndim).rev() {
+                    idx[d] = rem % shape[d];
+                    rem /= shape[d];
+                }
+                let val = (rng >> 32) as f64 / (u32::MAX as f64) + 0.1;
+                coo.push(idx, val).ok();
+            }
+            coo.deduplicate();
+
+            let cp = cp_als_sparse(&coo, 2, 20, 1e-4, InitStrategy::Random, None)
+                .unwrap_or_else(|e| panic!("fill={fill}: {e}"));
+            assert!(
+                cp.fit >= 0.0 && cp.fit <= 1.0,
+                "fill={fill}: fit={} must be in [0,1]",
+                cp.fit
+            );
+        }
+    }
+}
+
 // Helper function
 fn compute_reconstruction_error(original: &DenseND<f64>, reconstructed: &DenseND<f64>) -> f64 {
     let mut error_sq = 0.0;

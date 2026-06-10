@@ -30,8 +30,9 @@
 //! - `cp_als`: Alternating least squares with convergence detection
 //! - `cp_als_constrained`: With non-negativity, L2 regularization, orthogonality
 //! - `cp_als_accelerated`: Line search optimization for faster convergence
-//! - `cp_randomized`: Randomized sketching for large-scale tensors (NEW!)
+//! - `cp_randomized`: Randomized sketching for large-scale tensors
 //! - `cp_completion`: Tensor completion with missing data (CP-WOPT)
+//! - `cp_als_sparse` *(feature `sparse`)*: ALS on sparse COO tensors via O(nnz·R) MTTKRP
 //!
 //! ### Tucker Decomposition (Higher-Order SVD)
 //!

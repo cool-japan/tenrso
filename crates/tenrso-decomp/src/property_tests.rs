@@ -1254,7 +1254,13 @@ mod tests {
         }
     }
 
-    // Property: Randomized CP reconstruction has reasonable quality
+    // Property: Randomized CP reconstruction has reasonable quality on low-rank tensors.
+    //
+    // Tests on a CONSTRUCTED rank-R tensor (built from outer products of random
+    // vectors), not on a random full-rank tensor.  A random full-rank tensor has
+    // large minimum rank, so rank-R CP reconstruction can have error > 0.8 by
+    // construction — that is not a bug.  To get a meaningful quality bound we
+    // must test on tensors whose true CP rank equals `rank`.
     proptest! {
         #![proptest_config(proptest_config())]
         #[test]
@@ -1265,31 +1271,62 @@ mod tests {
             prop_assume!(rank < size);
 
             let shape = vec![size, size, size];
-            let tensor = DenseND::<f64>::random_uniform(&shape, 0.0, 1.0);
-            let sketch_size = rank * 5; // 5x oversampling for good quality
 
-            let cp = cp_randomized(&tensor, rank, 8, 1e-4, InitStrategy::Random, sketch_size, 2)
+            // Build a rank-R tensor as X = sum_{r<rank} a_r ⊗ b_r ⊗ c_r using a
+            // deterministic LCG seeded by (size, rank) so every proptest case gets
+            // a distinct but reproducible tensor without needing the `rand` crate.
+            let seed: u64 = (size as u64).wrapping_mul(1_234_567).wrapping_add(rank as u64);
+            let mut rng = seed;
+            let mut next_val = || -> f64 {
+                rng = rng.wrapping_mul(6_364_136_223_846_793_005)
+                         .wrapping_add(1_442_695_040_888_963_407);
+                // Map to (-1, 1) and scale so components are O(1)
+                (rng >> 32) as f64 / (u32::MAX as f64) - 0.5
+            };
+
+            let a: Vec<f64> = (0..size * rank).map(|_| next_val()).collect();
+            let b: Vec<f64> = (0..size * rank).map(|_| next_val()).collect();
+            let c: Vec<f64> = (0..size * rank).map(|_| next_val()).collect();
+
+            let mut data = vec![0.0f64; size * size * size];
+            for r in 0..rank {
+                for i in 0..size {
+                    for j in 0..size {
+                        for k in 0..size {
+                            data[i * size * size + j * size + k] +=
+                                a[i * rank + r] * b[j * rank + r] * c[k * rank + r];
+                        }
+                    }
+                }
+            }
+            let tensor = DenseND::<f64>::from_vec(data, &shape)
+                .expect("Tensor construction should succeed");
+
+            // 10x oversampling + 30 iters gives robust convergence on rank-R tensors
+            let sketch_size = rank * 10;
+            let cp = cp_randomized(&tensor, rank, 30, 1e-6, InitStrategy::Random, sketch_size, 2)
                 .expect("Randomized CP should succeed");
 
             let recon = cp.reconstruct(&shape)
                 .expect("Reconstruction should succeed");
 
-            // Verify reconstruction has correct shape
+            // Structural checks
             prop_assert_eq!(recon.shape(), &shape[..]);
+            prop_assert!(
+                cp.fit >= 0.0 && cp.fit <= 1.0,
+                "Fit must be in [0,1], got {}", cp.fit
+            );
 
-            // Compute relative error
+            // Quality check: rank-R CP on a rank-R tensor should achieve < 50% relative error
             let original_norm = tensor.frobenius_norm();
             let diff = &tensor - &recon;
             let error = diff.frobenius_norm() / original_norm;
-
-            // Randomized CP with 5x oversampling should achieve reasonable error
-            // (may be higher than standard CP-ALS due to approximation)
             prop_assert!(
-                error < 0.8,
-                "Reconstruction error should be reasonable, got {:.6}", error
+                error < 0.5,
+                "Reconstruction error on rank-{} tensor should be < 0.5, got {:.6}", rank, error
             );
 
-            // Verify fit consistency
+            // Fit consistency: reported fit should approximately match computed fit
             let computed_fit = 1.0 - error;
             prop_assert!(
                 (cp.fit - computed_fit).abs() < 0.15,

@@ -21,6 +21,8 @@
 mod advanced;
 mod core;
 pub(crate) mod helpers;
+#[cfg(feature = "sparse")]
+mod sparse;
 mod types;
 
 #[cfg(test)]
@@ -29,4 +31,8 @@ mod tests;
 // Re-export all public types
 pub use advanced::*;
 pub use core::*;
+#[cfg(feature = "sparse")]
+pub use sparse::cp_als_sparse;
+#[cfg(all(feature = "sparse", feature = "parallel"))]
+pub use sparse::cp_als_sparse_parallel;
 pub use types::*;
