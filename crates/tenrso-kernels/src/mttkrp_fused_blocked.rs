@@ -32,10 +32,10 @@
 //! Direct use of `ndarray` is forbidden per SCIRS2_INTEGRATION_POLICY.md
 
 use anyhow::Result;
-use scirs2_core::ndarray_ext::{Array2, ArrayView, ArrayView2, IxDyn};
-use scirs2_core::numeric::{Num, One, Zero};
 #[cfg(feature = "parallel")]
 use scirs2_core::ndarray_ext::Axis;
+use scirs2_core::ndarray_ext::{Array2, ArrayView, ArrayView2, IxDyn};
+use scirs2_core::numeric::{Num, One, Zero};
 
 use crate::mttkrp::unfold_tensor;
 
@@ -311,8 +311,7 @@ where
                 for i_local in 0..block_rows {
                     let x_val = unfolded[[block_start + i_local, j]];
                     for r in 0..cp_rank {
-                        result_chunk[[i_local, r]] =
-                            result_chunk[[i_local, r]] + x_val * kr_row[r];
+                        result_chunk[[i_local, r]] = result_chunk[[i_local, r]] + x_val * kr_row[r];
                     }
                 }
             }
@@ -340,22 +339,20 @@ mod tests {
     fn test_fused_blocked_matches_mttkrp_mode0() {
         let tensor =
             Array::from_shape_vec(vec![4, 5, 6], (0..120).map(|x| x as f64).collect()).unwrap();
-        let u1 = array![[0.1, 0.4, 0.7], [0.2, 0.5, 0.8], [0.3, 0.6, 0.9], [1.0, 0.0, 0.5]];
-        let u2 = Array::from_shape_vec(
-            (5, 3),
-            (0..15).map(|x| (x as f64) * 0.1).collect(),
-        )
-        .unwrap();
-        let u3 = Array::from_shape_vec(
-            (6, 3),
-            (0..18).map(|x| (x as f64) * 0.05).collect(),
-        )
-        .unwrap();
+        let u1 = array![
+            [0.1, 0.4, 0.7],
+            [0.2, 0.5, 0.8],
+            [0.3, 0.6, 0.9],
+            [1.0, 0.0, 0.5]
+        ];
+        let u2 =
+            Array::from_shape_vec((5, 3), (0..15).map(|x| (x as f64) * 0.1).collect()).unwrap();
+        let u3 =
+            Array::from_shape_vec((6, 3), (0..18).map(|x| (x as f64) * 0.05).collect()).unwrap();
 
         let expected = mttkrp(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 0).unwrap();
         let blocked =
-            mttkrp_fused_blocked(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 0, 2)
-                .unwrap();
+            mttkrp_fused_blocked(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 0, 2).unwrap();
 
         assert_eq!(expected.shape(), blocked.shape());
         assert!(
@@ -377,8 +374,7 @@ mod tests {
 
         let expected = mttkrp(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1).unwrap();
         let blocked =
-            mttkrp_fused_blocked(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1, 2)
-                .unwrap();
+            mttkrp_fused_blocked(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1, 2).unwrap();
 
         assert_eq!(expected.shape(), blocked.shape());
         assert!(
@@ -400,8 +396,7 @@ mod tests {
 
         let expected = mttkrp(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 2).unwrap();
         let blocked =
-            mttkrp_fused_blocked(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 2, 2)
-                .unwrap();
+            mttkrp_fused_blocked(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 2, 2).unwrap();
 
         assert_eq!(expected.shape(), blocked.shape());
         assert!(
@@ -430,8 +425,7 @@ mod tests {
 
         let expected = mttkrp(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1).unwrap();
         let blocked =
-            mttkrp_fused_blocked(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1, 1)
-                .unwrap();
+            mttkrp_fused_blocked(&tensor.view(), &[u1.view(), u2.view(), u3.view()], 1, 1).unwrap();
 
         assert_eq!(expected.shape(), blocked.shape());
         assert!(
@@ -470,15 +464,18 @@ mod tests {
     #[test]
     fn test_fused_blocked_4d() {
         let tensor =
-            Array::from_shape_vec(vec![3, 4, 5, 6], (0..360).map(|x| x as f64).collect())
-                .unwrap();
+            Array::from_shape_vec(vec![3, 4, 5, 6], (0..360).map(|x| x as f64).collect()).unwrap();
         let u0 = Array::from_shape_vec((3, 4), (0..12).map(|x| x as f64 * 0.1).collect()).unwrap();
         let u1 = Array::from_shape_vec((4, 4), (0..16).map(|x| x as f64 * 0.15).collect()).unwrap();
         let u2 = Array::from_shape_vec((5, 4), (0..20).map(|x| x as f64 * 0.2).collect()).unwrap();
         let u3 = Array::from_shape_vec((6, 4), (0..24).map(|x| x as f64 * 0.25).collect()).unwrap();
 
-        let expected =
-            mttkrp(&tensor.view(), &[u0.view(), u1.view(), u2.view(), u3.view()], 1).unwrap();
+        let expected = mttkrp(
+            &tensor.view(),
+            &[u0.view(), u1.view(), u2.view(), u3.view()],
+            1,
+        )
+        .unwrap();
         let blocked = mttkrp_fused_blocked(
             &tensor.view(),
             &[u0.view(), u1.view(), u2.view(), u3.view()],
@@ -533,13 +530,9 @@ mod tests {
 
         // Test all three modes
         for mode in 0..3 {
-            let serial = mttkrp_fused_blocked(
-                &tensor.view(),
-                &[u1.view(), u2.view(), u3.view()],
-                mode,
-                2,
-            )
-            .unwrap();
+            let serial =
+                mttkrp_fused_blocked(&tensor.view(), &[u1.view(), u2.view(), u3.view()], mode, 2)
+                    .unwrap();
             let par = mttkrp_fused_blocked_parallel(
                 &tensor.view(),
                 &[u1.view(), u2.view(), u3.view()],

@@ -32,7 +32,6 @@ use tenrso_core::DenseND;
 use tenrso_kernels::nmode_product;
 use thiserror::Error;
 
-
 /// Convert an `f64` tolerance/threshold scalar to `T` with a typed error.
 #[inline]
 fn cast_f64<T: NumCast>(val: f64, ctx: &'static str) -> Result<T, TuckerError> {
@@ -541,7 +540,6 @@ where
 
 /// Compute core tensor: G = X ×₁ U₁ᵀ ×₂ U₂ᵀ ... ×ₙ Uₙᵀ
 pub(crate) fn compute_core_tensor<T>(
-
     tensor: &DenseND<T>,
     factors: &[Array2<T>],
 ) -> Result<DenseND<T>, TuckerError>
@@ -579,7 +577,6 @@ where
 
 /// Compute Y = X ×₁ U₁ᵀ ... ×ₘ₋₁ Uₘ₋₁ᵀ ×ₘ₊₁ Uₘ₊₁ᵀ ... ×ₙ Uₙᵀ (skip mode m)
 pub(crate) fn compute_mode_unfolding_contraction<T>(
-
     tensor: &DenseND<T>,
     factors: &[Array2<T>],
     skip_mode: usize,
@@ -768,5 +765,4 @@ mod tests {
         println!("Auto-selected ranks: {:?}", auto_ranks);
         println!("Fixed ranks: [3, 3, 3]");
     }
-
 }

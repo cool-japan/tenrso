@@ -149,7 +149,11 @@ where
 /// Fold a matrix back into a tensor along a specific mode
 ///
 /// Inverse operation of unfold_tensor
-pub(crate) fn fold_matrix<T>(matrix: &ArrayView2<T>, shape: &[usize], mode: usize) -> Result<Array<T, IxDyn>>
+pub(crate) fn fold_matrix<T>(
+    matrix: &ArrayView2<T>,
+    shape: &[usize],
+    mode: usize,
+) -> Result<Array<T, IxDyn>>
 where
     T: Copy + Num,
 {

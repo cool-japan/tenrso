@@ -119,9 +119,9 @@ pub mod mttkrp_sparse;
 #[cfg(feature = "csf")]
 pub mod mttkrp_sparse_csf;
 pub mod nmode;
-pub mod nmode_tucker_ext;
 #[cfg(feature = "sparse")]
 pub mod nmode_sparse;
+pub mod nmode_tucker_ext;
 pub mod outer;
 pub mod randomized;
 pub mod reductions;
@@ -148,9 +148,9 @@ pub use mttkrp_sparse::*;
 #[cfg(feature = "csf")]
 pub use mttkrp_sparse_csf::*;
 pub use nmode::*;
-pub use nmode_tucker_ext::*;
 #[cfg(feature = "sparse")]
 pub use nmode_sparse::*;
+pub use nmode_tucker_ext::*;
 pub use outer::*;
 pub use randomized::*;
 pub use reductions::*;

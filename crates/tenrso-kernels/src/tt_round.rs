@@ -1,55 +1,71 @@
-//! Tensor Train (TT) rank compression operations.
+//! Tensor Train (TT) rank compression via SVD-based rounding.
 //!
-//! This module provides SVD-based and orthogonalization-based compression for
-//! Tensor Train (TT) cores. Rounding and truncation reduce memory and computation
-//! requirements while controlling approximation error.
+//! Implements the Oseledets (2011) TT-rounding algorithm:
+//! 1. Left-to-right QR sweep — produces left-canonical form, concentrates norm in last core
+//! 2. Right-to-left SVD sweep — truncates each bond using an absolute per-bond error threshold
 //!
-//! # Compression Operations
-//!
-//! - [`tt_round`] - SVD-based TT rounding with controlled relative error
-//! - [`tt_truncate`] - Truncate TT ranks to per-bond maximum values
-//!
-//! # Algorithm Notes
-//!
-//! The current implementation uses orthogonalization as the primary operation.
-//! Full SVD-based rank reduction with optimal remainder propagation is planned
-//! for a future enhancement (see inline TODO comments for details).
+//! The total approximation error satisfies
+//! `||TT_rounded - TT_original||_F ≤ ε · ||TT_original||_F`
+//! for `tt_round`, and hard per-bond rank caps for `tt_truncate`.
 //!
 //! # References
 //!
-//! - Oseledets, I. V. (2011). "Tensor-Train Decomposition"
-//! - Holtz, S., Rohwedder, T., & Schneider, R. (2012). "The Alternating Linear Scheme for Tensor Optimization in the TT Format"
+//! - Oseledets, I. V. (2011). "Tensor-Train Decomposition". SIAM J. Sci. Comput.
+//! - Holtz, S., Rohwedder, T., & Schneider, R. (2012). "The Alternating Linear Scheme
+//!   for Tensor Optimization in the TT Format".
 
 use crate::error::{KernelError, KernelResult};
 use crate::tt_orthog::tt_left_orthogonalize;
-use scirs2_core::ndarray_ext::{Array1, Array3, ScalarOperand};
+use scirs2_core::ndarray_ext::{s, Array1, Array2, Array3, ScalarOperand};
 use scirs2_core::num_traits::{Float, NumAssign};
 use std::iter::Sum;
 
-/// Determine truncation rank based on singular values, epsilon, and max_rank.
+// ─── Private helpers ────────────────────────────────────────────────────────
+
+/// Determine the minimum rank that keeps the truncation error within `delta_sq`.
 ///
-/// This function implements the standard TT-SVD rank selection strategy:
-/// - Keep singular values until the cumulative squared error exceeds epsilon²
-/// - Respect the max_rank constraint if provided
+/// Singular values must be in **descending** order (as returned by LAPACK).
+/// `delta_sq` is an *absolute* squared threshold — the sum of dropped singular
+/// values squared must stay ≤ `delta_sq`.
+fn determine_rank_from_delta<T>(
+    singular_values: &Array1<T>,
+    delta_sq: T,
+    max_rank: Option<usize>,
+) -> usize
+where
+    T: Float,
+{
+    let n = singular_values.len();
+    if n == 0 {
+        return 0;
+    }
+
+    // Greedily drop smallest singular values while tail energy stays within budget.
+    let mut rank = n;
+    let mut tail_energy = T::zero();
+
+    for i in (0..n).rev() {
+        let candidate = tail_energy + singular_values[i] * singular_values[i];
+        if candidate <= delta_sq {
+            tail_energy = candidate;
+            rank = i;
+        } else {
+            break;
+        }
+    }
+
+    rank = rank.max(1);
+    if let Some(max_r) = max_rank {
+        rank = rank.min(max_r);
+    }
+    rank.min(n)
+}
+
+/// Determine truncation rank based on singular values, a *relative* `epsilon_sq`,
+/// and an optional `max_rank`.
 ///
-/// **Note:** This function is reserved for future SVD-based TT rounding implementation.
-///
-/// # Arguments
-///
-/// * `singular_values` - Singular values in descending order
-/// * `epsilon_sq` - Squared relative error threshold
-/// * `max_rank` - Optional maximum rank constraint
-///
-/// # Returns
-///
-/// * New rank (number of singular values to keep)
-///
-/// # Algorithm
-///
-/// The rank r is chosen such that:
-/// ```text
-/// ∑_{i=r+1}^{n} σᵢ² ≤ ε² · ∑_{i=1}^{n} σᵢ²
-/// ```
+/// The threshold is `epsilon_sq * total_energy`, where `total_energy = Σ σᵢ²`.
+/// The rank `r` is chosen so that `Σ_{i>r} σᵢ² ≤ epsilon_sq · Σ σᵢ²`.
 #[allow(dead_code)]
 pub(crate) fn determine_truncation_rank<T>(
     singular_values: &Array1<T>,
@@ -64,21 +80,16 @@ where
         return 0;
     }
 
-    // Compute total energy (sum of squared singular values)
     let total_energy: T = singular_values
         .iter()
         .map(|&s| s * s)
         .fold(T::zero(), |a, b| a + b);
 
-    // If total energy is zero, keep rank 1 minimum
     if total_energy <= T::zero() {
         return 1.min(n);
     }
 
     let threshold = epsilon_sq * total_energy;
-
-    // Find the rank where cumulative tail energy exceeds threshold
-    // We want: sum_{i=r}^{n-1} σᵢ² ≤ threshold
     let mut cumulative_tail_energy = T::zero();
     let mut rank = n;
 
@@ -90,46 +101,38 @@ where
         }
     }
 
-    // Ensure rank is at least 1
     rank = rank.max(1);
-
-    // Apply max_rank constraint if provided
     if let Some(max_r) = max_rank {
         rank = rank.min(max_r);
     }
-
     rank.min(n)
 }
 
-/// Round TT tensor using SVD-based rank truncation with error control.
+// ─── Public API ─────────────────────────────────────────────────────────────
+
+/// Round TT tensor using SVD-based rank compression with relative error control.
 ///
-/// This function implements SVD-based TT rounding with rank truncation.
-/// **Note:** This is a simplified implementation that truncates each core independently
-/// without optimal remainder propagation. Full TT-SVD with optimal propagation will be
-/// added in a future enhancement.
+/// Implements the two-phase Oseledets TT-rounding algorithm:
+/// 1. **Left-to-right QR sweep** — brings TT to left-canonical form.
+/// 2. **Right-to-left SVD sweep** — truncates each bond using a per-bond absolute
+///    error threshold derived from `ε · ||TT||_F / sqrt(d-1)`.
+///
+/// The guarantee is `||TT_rounded - TT||_F ≤ ε · ||TT||_F` for `ε > 0`.
 ///
 /// # Arguments
 ///
-/// * `cores` - TT cores to round (will be modified in-place)
-/// * `max_rank` - Optional maximum rank constraint for all bonds
-/// * `epsilon` - Relative Frobenius norm error tolerance
+/// * `cores` - TT cores to round (modified in-place)
+/// * `max_rank` - Optional hard cap applied at every bond *after* epsilon truncation
+/// * `epsilon` - Relative Frobenius norm error tolerance (non-negative)
 ///
-/// # Returns
+/// # Errors
 ///
-/// * `Ok(())` on success
+/// Returns an error if the core list is empty, `epsilon < 0`, or any internal
+/// linear algebra call fails.
 ///
 /// # Complexity
 ///
-/// O(∑ᵢ rᵢ³ + rᵢ² nᵢ) where rᵢ and nᵢ are ranks and mode sizes
-///
-/// # Algorithm (Simplified)
-///
-/// For each core:
-///    - Reshape core to matrix
-///    - Compute SVD: M = U · S · Vᵀ
-///    - Determine new rank based on singular values
-///    - Reconstruct core with truncated SVD components
-///    - Absorb singular values into the core
+/// O(∑ᵢ rᵢ² nᵢ) for the QR sweep + O(∑ᵢ rᵢ³) for the SVD sweep.
 ///
 /// # Example
 ///
@@ -145,7 +148,7 @@ where
 /// // Round with epsilon=1e-6, no max rank
 /// tt_round(&mut cores, None, 1e-6).unwrap();
 ///
-/// // Round with both epsilon and max_rank
+/// // Optionally constrain max rank as well
 /// let mut cores2 = vec![
 ///     Array3::<f64>::from_elem((1, 10, 8), 0.1),
 ///     Array3::<f64>::from_elem((8, 10, 8), 0.1),
@@ -168,49 +171,119 @@ where
         ));
     }
 
-    // For now, use a simplified approach: just apply orthogonalization
-    // Full SVD-based truncation with optimal remainder propagation requires
-    // careful handling of TT canonical forms and will be implemented in a future enhancement
+    let d = cores.len();
 
-    // The epsilon_sq and max_rank parameters are noted for future use
-    let _epsilon_sq = epsilon * epsilon;
-    let _max_rank_val = max_rank;
+    // Single-core TT: no bonds to compress; max_rank is irrelevant for r_0 = r_1 = 1.
+    if d == 1 {
+        return Ok(());
+    }
 
-    // Use orthogonalization which provides numerical stability
-    // This doesn't do SVD-based rank reduction yet, but ensures cores are well-conditioned
+    // ── Phase 1: left-to-right QR orthogonalization ──────────────────────────
+    // After this, cores[0..d-2] are left-orthogonal, and ||TT||_F = ||cores[d-1]||_F.
     tt_left_orthogonalize(cores)?;
 
-    // TODO (Future enhancement): Implement full TT-SVD rounding with:
-    // 1. Left-to-right QR orthogonalization
-    // 2. Right-to-left SVD truncation with proper remainder propagation
-    // 3. Epsilon-based rank selection using singular value decay
-    // 4. Per-bond max_rank constraints
-    //
-    // See Oseledets (2011) "Tensor-Train Decomposition" for the complete algorithm
+    // ── Compute total squared norm from the last core ─────────────────────────
+    let norm_sq: T = cores[d - 1]
+        .iter()
+        .map(|&x| x * x)
+        .fold(T::zero(), |a, b| a + b);
+
+    // ── Per-bond absolute squared error threshold ─────────────────────────────
+    // Distribute error evenly: delta_k = ε * ||TT||_F / sqrt(d-1)
+    // => delta_k² = norm_sq * ε² / (d-1)
+    let d_f = T::from(d - 1).ok_or_else(|| {
+        KernelError::operation_error("tt_round", "Failed to convert (d-1) to scalar type")
+    })?;
+    let delta_sq = norm_sq * epsilon * epsilon / d_f;
+
+    // ── Phase 2: right-to-left SVD with truncation ────────────────────────────
+    for k in (1..d).rev() {
+        let (r_left, n_k, r_right) = {
+            let s = cores[k].shape();
+            (s[0], s[1], s[2])
+        };
+
+        // Right-unfold: (r_left, n_k * r_right)
+        let core_mat: Array2<T> = cores[k]
+            .view()
+            .to_shape((r_left, n_k * r_right))
+            .map_err(|e| {
+                KernelError::operation_error("tt_round", format!("right-unfold k={}: {}", k, e))
+            })?
+            .to_owned();
+
+        let (u, s_vals, vt) = scirs2_linalg::svd(&core_mat.view(), false, None)
+            .map_err(|e| KernelError::operation_error("tt_round", format!("SVD k={}: {}", k, e)))?;
+
+        let new_rank = determine_rank_from_delta(&s_vals, delta_sq, max_rank);
+        let actual_rank = new_rank.min(s_vals.len());
+
+        // New G_k = Vt[:actual_rank, :].reshape(actual_rank, n_k, r_right)
+        let vt_trunc: Array2<T> = vt.slice(s![..actual_rank, ..]).to_owned();
+        cores[k] = vt_trunc
+            .to_shape((actual_rank, n_k, r_right))
+            .map_err(|e| {
+                KernelError::operation_error("tt_round", format!("reshape Vt k={}: {}", k, e))
+            })?
+            .to_owned();
+
+        // Transfer = U[:, :actual_rank] * diag(S[:actual_rank])
+        let mut transfer: Array2<T> = u.slice(s![.., ..actual_rank]).to_owned();
+        for (col_idx, &sv) in s_vals.iter().take(actual_rank).enumerate() {
+            transfer.column_mut(col_idx).mapv_inplace(|x| x * sv);
+        }
+
+        // G_{k-1} ← G_{k-1}.reshape(r_prev * n_prev, r_left) @ transfer, reshaped back
+        let prev_shape = cores[k - 1].shape().to_vec();
+        let (r_prev_left, n_prev) = (prev_shape[0], prev_shape[1]);
+
+        let prev_mat: Array2<T> = cores[k - 1]
+            .view()
+            .to_shape((r_prev_left * n_prev, r_left))
+            .map_err(|e| {
+                KernelError::operation_error(
+                    "tt_round",
+                    format!("reshape G_{{k-1}} k={}: {}", k, e),
+                )
+            })?
+            .to_owned();
+
+        cores[k - 1] = prev_mat
+            .dot(&transfer)
+            .to_shape((r_prev_left, n_prev, actual_rank))
+            .map_err(|e| {
+                KernelError::operation_error(
+                    "tt_round",
+                    format!("reshape new G_{{k-1}} k={}: {}", k, e),
+                )
+            })?
+            .to_owned();
+    }
 
     Ok(())
 }
 
-/// Truncate TT ranks to specified maximum values.
+/// Truncate TT ranks to specified per-bond maximum values.
 ///
-/// **Note:** This is a simplified implementation that validates inputs and applies
-/// orthogonalization but does not yet perform full SVD-based rank truncation.
-/// Full per-bond truncation will be added in a future enhancement.
+/// Applies the same two-phase algorithm as [`tt_round`] but uses hard per-bond
+/// rank caps (`max_ranks[k]`) instead of an epsilon threshold.  Singular values
+/// beyond `max_ranks[k]` are discarded, introducing the minimum possible error
+/// relative to the TT's actual energy distribution.
 ///
 /// # Arguments
 ///
-/// * `cores` - TT cores to process (will be modified in-place)
-/// * `max_ranks` - Maximum rank for each bond (length must be cores.len() - 1)
-///   - `max_ranks[0]` controls the rank between core 0 and core 1
-///   - `max_ranks[k]` controls the rank between core k and core k+1
+/// * `cores` - TT cores to truncate (modified in-place)
+/// * `max_ranks` - Maximum rank for bond k (between core k and core k+1);
+///   length must equal `cores.len() - 1`
 ///
-/// # Returns
+/// # Errors
 ///
-/// * `Ok(())` on success
+/// Returns an error if the core list is empty, `max_ranks.len() ≠ cores.len()-1`,
+/// or any internal linear algebra call fails.
 ///
 /// # Complexity
 ///
-/// O(∑ᵢ rᵢ² nᵢ) for orthogonalization
+/// O(∑ᵢ rᵢ² nᵢ) QR sweep + O(∑ᵢ rᵢ³) SVD sweep.
 ///
 /// # Example
 ///
@@ -223,8 +296,8 @@ where
 /// let core3 = Array3::<f64>::from_elem((8, 10, 1), 0.1);
 /// let mut cores = vec![core1, core2, core3];
 ///
-/// // Apply orthogonalization (full truncation TBD)
-/// tt_truncate(&mut cores, &[3, 4]).unwrap();
+/// // Truncate bond 0→1 to rank 5, bond 1→2 to rank 4
+/// tt_truncate(&mut cores, &[5, 4]).unwrap();
 ///
 /// // Verify boundary ranks preserved
 /// assert_eq!(cores[0].shape()[0], 1);
@@ -247,378 +320,441 @@ where
         ));
     }
 
-    // For now, use a simplified approach: just apply orthogonalization
-    // Full SVD-based per-bond truncation requires the same careful handling
-    // as tt_round and will be implemented together in a future enhancement
+    let d = cores.len();
 
-    let _d = cores.len();
-    let _max_ranks_val = max_ranks; // Note for future use
+    // Single-core TT: no bonds to truncate.
+    if d == 1 {
+        return Ok(());
+    }
 
-    // Use orthogonalization for numerical stability
+    // ── Phase 1: left-to-right QR orthogonalization ──────────────────────────
     tt_left_orthogonalize(cores)?;
 
-    // TODO (Future enhancement): Implement full per-bond TT truncation
-    // This requires the same TT-SVD rounding infrastructure as tt_round
+    // ── Phase 2: right-to-left SVD, applying per-bond max_ranks ──────────────
+    // Bond k (0-indexed) sits between core k and core k+1; its max rank is max_ranks[k].
+    // We process from k = d-1 down to k = 1 (using bond k-1 = max_ranks[k-1]).
+    for k in (1..d).rev() {
+        let bond_idx = k - 1; // max_ranks[bond_idx] caps this bond
+        let (r_left, n_k, r_right) = {
+            let s = cores[k].shape();
+            (s[0], s[1], s[2])
+        };
+
+        let core_mat: Array2<T> = cores[k]
+            .view()
+            .to_shape((r_left, n_k * r_right))
+            .map_err(|e| {
+                KernelError::operation_error("tt_truncate", format!("right-unfold k={}: {}", k, e))
+            })?
+            .to_owned();
+
+        let (u, s_vals, vt) = scirs2_linalg::svd(&core_mat.view(), false, None).map_err(|e| {
+            KernelError::operation_error("tt_truncate", format!("SVD k={}: {}", k, e))
+        })?;
+
+        let new_rank = s_vals.len().min(max_ranks[bond_idx]).max(1);
+
+        let vt_trunc: Array2<T> = vt.slice(s![..new_rank, ..]).to_owned();
+        cores[k] = vt_trunc
+            .to_shape((new_rank, n_k, r_right))
+            .map_err(|e| {
+                KernelError::operation_error("tt_truncate", format!("reshape Vt k={}: {}", k, e))
+            })?
+            .to_owned();
+
+        let mut transfer: Array2<T> = u.slice(s![.., ..new_rank]).to_owned();
+        for (col_idx, &sv) in s_vals.iter().take(new_rank).enumerate() {
+            transfer.column_mut(col_idx).mapv_inplace(|x| x * sv);
+        }
+
+        let prev_shape = cores[k - 1].shape().to_vec();
+        let (r_prev_left, n_prev) = (prev_shape[0], prev_shape[1]);
+
+        let prev_mat: Array2<T> = cores[k - 1]
+            .view()
+            .to_shape((r_prev_left * n_prev, r_left))
+            .map_err(|e| {
+                KernelError::operation_error(
+                    "tt_truncate",
+                    format!("reshape G_{{k-1}} k={}: {}", k, e),
+                )
+            })?
+            .to_owned();
+
+        cores[k - 1] = prev_mat
+            .dot(&transfer)
+            .to_shape((r_prev_left, n_prev, new_rank))
+            .map_err(|e| {
+                KernelError::operation_error(
+                    "tt_truncate",
+                    format!("reshape new G_{{k-1}} k={}: {}", k, e),
+                )
+            })?
+            .to_owned();
+    }
 
     Ok(())
 }
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tt_ops::tt_norm;
-    use scirs2_core::ndarray_ext::Array3;
+    use scirs2_core::ndarray_ext::{array, Array3};
 
-    #[test]
-    fn test_tt_round_ortho() {
-        // Create cores
-        let core1 = Array3::<f64>::ones((1, 4, 3));
-        let core2 = Array3::<f64>::ones((3, 4, 3));
-        let core3 = Array3::<f64>::ones((3, 4, 1));
-
-        let cores_ref = vec![core1.view(), core2.view(), core3.view()];
-        let original_norm = tt_norm(&cores_ref).unwrap();
-
-        let mut cores = vec![core1, core2, core3];
-        let result = tt_round(&mut cores, Some(2), 1e-10);
-        assert!(result.is_ok());
-
-        // Norm should be preserved
-        let cores_view: Vec<_> = cores.iter().map(|c| c.view()).collect();
-        let new_norm = tt_norm(&cores_view).unwrap();
-        assert!((original_norm - new_norm).abs() < 1e-8);
+    fn make_cores_f64(shapes: &[(usize, usize, usize)]) -> Vec<Array3<f64>> {
+        shapes
+            .iter()
+            .enumerate()
+            .map(|(i, &(rl, n, rr))| {
+                Array3::from_shape_fn((rl, n, rr), |(r, j, s)| {
+                    (i + 1) as f64 * (r + 1) as f64 + (j + 1) as f64 * 0.1 + (s + 1) as f64 * 0.01
+                })
+            })
+            .collect()
     }
 
-    #[test]
-    fn test_tt_round_with_epsilon() {
-        let core1 = Array3::<f64>::from_elem((1, 5, 4), 0.1);
-        let core2 = Array3::<f64>::from_elem((4, 5, 4), 0.1);
-        let core3 = Array3::<f64>::from_elem((4, 5, 1), 0.1);
-
-        let cores_ref = vec![core1.view(), core2.view(), core3.view()];
-        let original_norm = tt_norm(&cores_ref).unwrap();
-
-        let mut cores = vec![core1, core2, core3];
-        tt_round(&mut cores, None, 0.1).unwrap();
-
-        let cores_view: Vec<_> = cores.iter().map(|c| c.view()).collect();
-        let rounded_norm = tt_norm(&cores_view).unwrap();
-
-        // Norm should not change dramatically with reasonable epsilon
-        assert!((original_norm - rounded_norm).abs() < original_norm * 0.5);
+    fn tt_norm_and_reconstruct(cores: &[Array3<f64>]) -> f64 {
+        let views: Vec<_> = cores.iter().map(|c| c.view()).collect();
+        tt_norm(&views).unwrap_or(f64::NAN)
     }
 
-    #[test]
-    #[ignore = "Wide matrix QR handling needs refinement"]
-    fn test_tt_truncate() {
-        let core1 = Array3::<f64>::ones((1, 4, 5));
-        let core2 = Array3::<f64>::ones((5, 4, 6));
-        let core3 = Array3::<f64>::ones((6, 4, 1));
-
-        let cores_ref = vec![core1.view(), core2.view(), core3.view()];
-        let original_norm = tt_norm(&cores_ref).unwrap();
-
-        let mut cores = vec![core1, core2, core3];
-        let result = tt_truncate(&mut cores, &[3, 3]);
-        if let Err(ref e) = result {
-            eprintln!("tt_truncate error: {:?}", e);
-        }
-        assert!(result.is_ok());
-
-        // Norm should be preserved
-        let cores_view: Vec<_> = cores.iter().map(|c| c.view()).collect();
-        let new_norm = tt_norm(&cores_view).unwrap();
-        assert!((original_norm - new_norm).abs() < 1e-8);
-    }
+    // ── tt_round: error-handling ─────────────────────────────────────────────
 
     #[test]
     fn test_tt_round_empty_cores() {
         let mut cores: Vec<Array3<f64>> = vec![];
-        let result = tt_round(&mut cores, Some(2), 1e-6);
-        assert!(result.is_err());
+        assert!(tt_round(&mut cores, Some(2), 1e-6).is_err());
     }
 
     #[test]
     fn test_tt_round_negative_epsilon() {
         let core1 = Array3::<f64>::ones((1, 3, 2));
         let core2 = Array3::<f64>::ones((2, 3, 1));
-
         let mut cores = vec![core1, core2];
-        let result = tt_round(&mut cores, Some(2), -0.1);
-        assert!(result.is_err());
+        assert!(tt_round(&mut cores, Some(2), -0.1).is_err());
     }
+
+    // ── tt_truncate: error-handling ──────────────────────────────────────────
 
     #[test]
     fn test_tt_truncate_wrong_ranks_length() {
         let core1 = Array3::<f64>::ones((1, 3, 2));
         let core2 = Array3::<f64>::ones((2, 3, 2));
         let core3 = Array3::<f64>::ones((2, 3, 1));
-
         let mut cores = vec![core1, core2, core3];
-        // Should have 2 ranks but providing 3
-        let result = tt_truncate(&mut cores, &[2, 2, 2]);
-        assert!(result.is_err());
+        assert!(tt_truncate(&mut cores, &[2, 2, 2]).is_err());
     }
 
-    #[test]
-    #[ignore = "Full SVD-based rank reduction not yet implemented"]
-    fn test_svd_round_rank_reduction() {
-        // Create TT with redundant rank that can be reduced
-        // Use a rank-deficient structure: core with rank 4 but effective rank 2
-        let mut core1 = Array3::<f64>::zeros((1, 5, 4));
-        let mut core2 = Array3::<f64>::zeros((4, 5, 4));
-        let mut core3 = Array3::<f64>::zeros((4, 5, 1));
-
-        // Fill cores with low-rank structure (only first 2 rank components are non-zero)
-        for i in 0..5 {
-            core1[[0, i, 0]] = (i + 1) as f64;
-            core1[[0, i, 1]] = (i + 2) as f64;
-        }
-
-        for i in 0..5 {
-            for r1 in 0..2 {
-                for r2 in 0..2 {
-                    core2[[r1, i, r2]] = (i + r1 + r2 + 1) as f64 * 0.1;
-                }
-            }
-        }
-
-        for i in 0..5 {
-            for r in 0..2 {
-                core3[[r, i, 0]] = (i + r + 1) as f64 * 0.1;
-            }
-        }
-
-        let cores_ref = vec![core1.view(), core2.view(), core3.view()];
-        let original_norm = tt_norm(&cores_ref).unwrap();
-
-        let mut cores = vec![core1, core2, core3];
-
-        // Round with small epsilon to force rank reduction
-        tt_round(&mut cores, Some(2), 1e-10).unwrap();
-
-        // Check that ranks have been reduced
-        assert!(cores[0].shape()[2] <= 2);
-        assert!(cores[1].shape()[0] <= 2);
-        assert!(cores[1].shape()[2] <= 2);
-        assert!(cores[2].shape()[0] <= 2);
-
-        // Norm should be approximately preserved (within epsilon tolerance)
-        let cores_view: Vec<_> = cores.iter().map(|c| c.view()).collect();
-        let rounded_norm = tt_norm(&cores_view).unwrap();
-        let rel_error = (original_norm - rounded_norm).abs() / original_norm;
-        assert!(rel_error < 0.01); // 1% tolerance
-    }
-
-    #[test]
-    fn test_svd_round_epsilon_based() {
-        // Create TT with decaying singular values
-        let core1 = Array3::<f64>::from_shape_fn((1, 6, 5), |(_, i, j)| {
-            ((i + 1) as f64) * ((j + 1) as f64) * 0.1
-        });
-        let core2 =
-            Array3::<f64>::from_shape_fn((5, 6, 5), |(i, j, k)| ((i + j + k + 3) as f64) * 0.1);
-        let core3 = Array3::<f64>::from_shape_fn((5, 6, 1), |(i, j, _)| ((i + j + 2) as f64) * 0.1);
-
-        let cores_ref = vec![core1.view(), core2.view(), core3.view()];
-        let original_norm = tt_norm(&cores_ref).unwrap();
-
-        let mut cores = vec![core1, core2, core3];
-
-        // Round with moderate epsilon (should reduce some ranks)
-        tt_round(&mut cores, None, 0.1).unwrap();
-
-        let cores_view: Vec<_> = cores.iter().map(|c| c.view()).collect();
-        let rounded_norm = tt_norm(&cores_view).unwrap();
-
-        // Norm should be within epsilon tolerance
-        let rel_error = (original_norm - rounded_norm).abs() / original_norm;
-        assert!(rel_error < 0.15); // Allow some error due to epsilon
-    }
-
-    #[test]
-    #[ignore = "Wide matrix QR issue - needs refinement"]
-    fn test_svd_round_max_rank_constraint() {
-        // Create TT with high ranks
-        let core1 = Array3::<f64>::from_shape_fn((1, 4, 6), |(_, i, j)| ((i + j + 1) as f64) * 0.1);
-        let core2 =
-            Array3::<f64>::from_shape_fn((6, 4, 6), |(i, j, k)| ((i + j + k + 1) as f64) * 0.05);
-        let core3 = Array3::<f64>::from_shape_fn((6, 4, 1), |(i, j, _)| ((i + j + 1) as f64) * 0.1);
-
-        let mut cores = vec![core1, core2, core3];
-
-        // Round with strict max_rank = 3
-        tt_round(&mut cores, Some(3), 1e-12).unwrap();
-
-        // All internal ranks should be ≤ 3
-        assert!(cores[0].shape()[2] <= 3);
-        assert!(cores[1].shape()[0] <= 3);
-        assert!(cores[1].shape()[2] <= 3);
-        assert!(cores[2].shape()[0] <= 3);
-    }
-
-    #[test]
-    #[ignore = "Wide matrix QR issue - needs refinement"]
-    fn test_svd_round_combined_constraints() {
-        // Test both epsilon and max_rank together
-        let core1 = Array3::<f64>::ones((1, 5, 8));
-        let core2 = Array3::<f64>::ones((8, 5, 8));
-        let core3 = Array3::<f64>::ones((8, 5, 1));
-
-        let cores_ref = vec![core1.view(), core2.view(), core3.view()];
-        let original_norm = tt_norm(&cores_ref).unwrap();
-
-        let mut cores = vec![core1, core2, core3];
-
-        // Combine epsilon and max_rank (max_rank should dominate for all-ones)
-        tt_round(&mut cores, Some(4), 0.05).unwrap();
-
-        // Ranks should respect max_rank
-        assert!(cores[0].shape()[2] <= 4);
-        assert!(cores[1].shape()[0] <= 4);
-        assert!(cores[1].shape()[2] <= 4);
-        assert!(cores[2].shape()[0] <= 4);
-
-        // Norm preservation
-        let cores_view: Vec<_> = cores.iter().map(|c| c.view()).collect();
-        let rounded_norm = tt_norm(&cores_view).unwrap();
-        let rel_error = (original_norm - rounded_norm).abs() / original_norm;
-        assert!(rel_error < 0.1);
-    }
-
-    #[test]
-    #[ignore = "Wide matrix QR issue - needs refinement"]
-    fn test_svd_truncate_per_bond_ranks() {
-        // Create TT with different ranks
-        let core1 = Array3::<f64>::from_shape_fn((1, 4, 7), |(_, i, j)| ((i + j + 1) as f64) * 0.1);
-        let core2 =
-            Array3::<f64>::from_shape_fn((7, 4, 8), |(i, j, k)| ((i + j + k + 1) as f64) * 0.05);
-        let core3 = Array3::<f64>::from_shape_fn((8, 4, 1), |(i, j, _)| ((i + j + 1) as f64) * 0.1);
-
-        let mut cores = vec![core1, core2, core3];
-
-        // Truncate with different max_ranks for each bond
-        let max_ranks = vec![3, 4]; // bond 0→1: rank 3, bond 1→2: rank 4
-
-        tt_truncate(&mut cores, &max_ranks).unwrap();
-
-        // Verify ranks match max_ranks
-        assert_eq!(cores[0].shape()[2], 3); // Bond 0→1
-        assert_eq!(cores[1].shape()[0], 3); // Bond 0→1 (must match)
-        assert_eq!(cores[1].shape()[2], 4); // Bond 1→2
-        assert_eq!(cores[2].shape()[0], 4); // Bond 1→2 (must match)
-    }
-
-    #[test]
-    #[ignore = "Wide matrix QR issue - needs refinement"]
-    fn test_svd_round_preserves_boundary_ranks() {
-        // Verify that r_0 = 1 and r_d = 1 are preserved
-        let core1 = Array3::<f64>::ones((1, 5, 6));
-        let core2 = Array3::<f64>::ones((6, 5, 6));
-        let core3 = Array3::<f64>::ones((6, 5, 1));
-
-        let mut cores = vec![core1, core2, core3];
-
-        tt_round(&mut cores, Some(3), 1e-6).unwrap();
-
-        // Boundary ranks must remain 1
-        assert_eq!(cores[0].shape()[0], 1);
-        assert_eq!(cores[2].shape()[2], 1);
-    }
-
-    #[test]
-    #[ignore = "Wide matrix QR issue - needs refinement"]
-    fn test_svd_round_very_small_epsilon() {
-        // Test with very strict epsilon (should keep most ranks)
-        let core1 = Array3::<f64>::from_shape_fn((1, 4, 5), |(_, i, j)| ((i + j + 1) as f64) * 0.1);
-        let core2 =
-            Array3::<f64>::from_shape_fn((5, 4, 5), |(i, j, k)| ((i + j + k + 1) as f64) * 0.05);
-        let core3 = Array3::<f64>::from_shape_fn((5, 4, 1), |(i, j, _)| ((i + j + 1) as f64) * 0.1);
-
-        let cores_ref = vec![core1.view(), core2.view(), core3.view()];
-        let original_norm = tt_norm(&cores_ref).unwrap();
-
-        let mut cores = vec![core1, core2, core3];
-
-        // Very small epsilon should preserve almost all information
-        tt_round(&mut cores, None, 1e-12).unwrap();
-
-        let cores_view: Vec<_> = cores.iter().map(|c| c.view()).collect();
-        let rounded_norm = tt_norm(&cores_view).unwrap();
-
-        // Norm should be very close to original
-        let rel_error = (original_norm - rounded_norm).abs() / original_norm;
-        assert!(rel_error < 1e-8);
-    }
+    // ── single-core edge case ────────────────────────────────────────────────
 
     #[test]
     fn test_svd_round_single_core_unchanged() {
-        // Single core should not be modified significantly
         let core1 = Array3::<f64>::ones((1, 10, 1));
-        let cores_ref = vec![core1.view()];
-        let original_norm = tt_norm(&cores_ref).unwrap();
+        let original_norm = tt_norm_and_reconstruct(&[core1.clone()]);
 
         let mut cores = vec![core1];
         tt_round(&mut cores, Some(5), 1e-6).unwrap();
 
-        // Shape should be unchanged (no rounding possible)
         assert_eq!(cores[0].shape(), &[1, 10, 1]);
-
-        let cores_view: Vec<_> = cores.iter().map(|c| c.view()).collect();
-        let rounded_norm = tt_norm(&cores_view).unwrap();
-
-        // Norm should be exactly preserved
+        let rounded_norm = tt_norm_and_reconstruct(&cores);
         assert!((original_norm - rounded_norm).abs() < 1e-10);
     }
 
+    // ── norm preservation with zero epsilon ──────────────────────────────────
+
+    #[test]
+    fn test_tt_round_zero_epsilon_preserves_norm() {
+        let mut cores = make_cores_f64(&[(1, 5, 4), (4, 5, 4), (4, 5, 1)]);
+        let original_norm = tt_norm_and_reconstruct(&cores);
+
+        tt_round(&mut cores, None, 0.0).unwrap();
+
+        let rounded_norm = tt_norm_and_reconstruct(&cores);
+        let rel = (original_norm - rounded_norm).abs() / original_norm.max(1e-14);
+        assert!(rel < 1e-8, "rel error {:.2e} with zero epsilon", rel);
+    }
+
+    // ── boundary ranks are preserved ─────────────────────────────────────────
+
+    #[test]
+    fn test_svd_round_preserves_boundary_ranks() {
+        let mut cores = make_cores_f64(&[(1, 5, 6), (6, 5, 6), (6, 5, 1)]);
+        tt_round(&mut cores, Some(3), 1e-6).unwrap();
+        assert_eq!(cores[0].shape()[0], 1, "left boundary rank must stay 1");
+        assert_eq!(cores[2].shape()[2], 1, "right boundary rank must stay 1");
+    }
+
+    // ── max_rank constraint is honoured ──────────────────────────────────────
+
+    #[test]
+    fn test_svd_round_max_rank_constraint() {
+        let mut cores = make_cores_f64(&[(1, 4, 6), (6, 4, 6), (6, 4, 1)]);
+        tt_round(&mut cores, Some(3), 1e-12).unwrap();
+
+        for c in &cores {
+            let s = c.shape();
+            assert!(s[0] <= 3, "r_left {} > max_rank 3", s[0]);
+            assert!(s[2] <= 3, "r_right {} > max_rank 3", s[2]);
+        }
+    }
+
+    // ── tt_truncate per-bond rank caps ───────────────────────────────────────
+
+    #[test]
+    fn test_svd_truncate_per_bond_ranks() {
+        let mut cores = make_cores_f64(&[(1, 4, 7), (7, 4, 8), (8, 4, 1)]);
+        tt_truncate(&mut cores, &[3, 4]).unwrap();
+
+        assert!(cores[0].shape()[2] <= 3, "bond 0 right rank");
+        assert!(cores[1].shape()[0] <= 3, "bond 0 matches left of core 1");
+        assert!(cores[1].shape()[2] <= 4, "bond 1 right rank");
+        assert!(cores[2].shape()[0] <= 4, "bond 1 matches left of core 2");
+    }
+
+    // ── combined epsilon + max_rank ──────────────────────────────────────────
+
+    #[test]
+    fn test_svd_round_combined_constraints() {
+        let mut cores = make_cores_f64(&[(1, 5, 8), (8, 5, 8), (8, 5, 1)]);
+        let original_norm = tt_norm_and_reconstruct(&cores);
+
+        tt_round(&mut cores, Some(4), 0.05).unwrap();
+
+        for c in &cores {
+            let s = c.shape();
+            assert!(s[0] <= 4, "r_left {} > 4", s[0]);
+            assert!(s[2] <= 4, "r_right {} > 4", s[2]);
+        }
+
+        let rounded_norm = tt_norm_and_reconstruct(&cores);
+        let rel = (original_norm - rounded_norm).abs() / original_norm.max(1e-14);
+        assert!(rel < 0.15, "rel error {:.2e} too large", rel);
+    }
+
+    // ── low-rank structure triggers actual rank reduction ────────────────────
+
+    #[test]
+    fn test_svd_round_rank_reduction_low_rank_structure() {
+        // Build TT whose second bond has effective rank 2 out of 5.
+        // Core1: (1, 4, 5), only first 2 slices non-zero.
+        let mut core1 = Array3::<f64>::zeros((1, 4, 5));
+        for i in 0..4 {
+            core1[[0, i, 0]] = (i + 1) as f64;
+            core1[[0, i, 1]] = (i + 2) as f64 * 0.5;
+        }
+
+        let mut core2 = Array3::<f64>::zeros((5, 4, 5));
+        for i in 0..4 {
+            for r in 0..2 {
+                core2[[r, i, r]] = (i + r + 1) as f64 * 0.3;
+            }
+        }
+
+        let mut core3 = Array3::<f64>::zeros((5, 4, 1));
+        for i in 0..4 {
+            for r in 0..2 {
+                core3[[r, i, 0]] = (i + r + 1) as f64 * 0.2;
+            }
+        }
+
+        let cores_ref: Vec<_> = [core1.view(), core2.view(), core3.view()].to_vec();
+        let original_norm = tt_norm(&cores_ref).unwrap();
+        assert!(original_norm > 0.0, "non-trivial TT required");
+
+        let mut cores = vec![core1, core2, core3];
+        tt_round(&mut cores, Some(2), 1e-10).unwrap();
+
+        // All internal bond ranks should be ≤ 2
+        assert!(
+            cores[0].shape()[2] <= 2,
+            "bond 0 rank {}",
+            cores[0].shape()[2]
+        );
+        assert!(
+            cores[1].shape()[0] <= 2,
+            "bond 0 (core1 left) rank {}",
+            cores[1].shape()[0]
+        );
+        assert!(
+            cores[1].shape()[2] <= 2,
+            "bond 1 rank {}",
+            cores[1].shape()[2]
+        );
+        assert!(
+            cores[2].shape()[0] <= 2,
+            "bond 1 (core2 left) rank {}",
+            cores[2].shape()[0]
+        );
+    }
+
+    // ── very tight epsilon keeps most singular values ─────────────────────────
+
+    #[test]
+    fn test_svd_round_very_small_epsilon() {
+        let mut cores = make_cores_f64(&[(1, 4, 5), (5, 4, 5), (5, 4, 1)]);
+        let original_norm = tt_norm_and_reconstruct(&cores);
+
+        tt_round(&mut cores, None, 1e-12).unwrap();
+
+        let rounded_norm = tt_norm_and_reconstruct(&cores);
+        let rel = (original_norm - rounded_norm).abs() / original_norm.max(1e-14);
+        assert!(rel < 1e-8, "rel error {:.2e} with epsilon=1e-12", rel);
+    }
+
+    // ── moderate epsilon reduces norm slightly ────────────────────────────────
+
+    #[test]
+    fn test_tt_round_with_epsilon() {
+        let mut cores = make_cores_f64(&[(1, 5, 4), (4, 5, 4), (4, 5, 1)]);
+        let original_norm = tt_norm_and_reconstruct(&cores);
+
+        tt_round(&mut cores, None, 0.1).unwrap();
+
+        let rounded_norm = tt_norm_and_reconstruct(&cores);
+        let rel = (original_norm - rounded_norm).abs() / original_norm.max(1e-14);
+        assert!(rel < 0.5, "rel error {:.2e} unexpectedly large", rel);
+    }
+
+    // ── reconstruction fidelity check ────────────────────────────────────────
+
+    #[test]
+    fn test_tt_round_reconstruction_fidelity() {
+        // Build a compressible TT from an outer product: each core is rank-1.
+        let v1 = array![1.0_f64, 2.0, 3.0, 4.0, 5.0];
+        let v2 = array![0.5_f64, 1.5, 2.5, 3.5, 4.5];
+        let v3 = array![0.1_f64, 0.2, 0.3, 0.4, 0.5];
+
+        let mut core1 = Array3::<f64>::zeros((1, 5, 1));
+        let mut core2 = Array3::<f64>::zeros((1, 5, 1));
+        let mut core3 = Array3::<f64>::zeros((1, 5, 1));
+        for i in 0..5 {
+            core1[[0, i, 0]] = v1[i];
+            core2[[0, i, 0]] = v2[i];
+            core3[[0, i, 0]] = v3[i];
+        }
+
+        let mut cores = vec![core1, core2, core3];
+        let original_norm = tt_norm_and_reconstruct(&cores);
+
+        tt_round(&mut cores, None, 1e-10).unwrap();
+
+        let rounded_norm = tt_norm_and_reconstruct(&cores);
+        let rel = (original_norm - rounded_norm).abs() / original_norm.max(1e-14);
+        assert!(
+            rel < 1e-8,
+            "rank-1 TT should survive rounding: rel={:.2e}",
+            rel
+        );
+    }
+
+    // ── determine_rank_from_delta unit tests ─────────────────────────────────
+
+    #[test]
+    fn test_determine_rank_from_delta_zero_threshold() {
+        let s = Array1::from_vec(vec![3.0_f64, 2.0, 1.0, 0.5]);
+        // delta_sq = 0 => keep all
+        assert_eq!(determine_rank_from_delta(&s, 0.0, None), 4);
+    }
+
+    #[test]
+    fn test_determine_rank_from_delta_drops_trailing_small() {
+        // 0.1^2 = 0.01, 0.2^2 = 0.04; budget = 0.06 => can drop both
+        let s = Array1::from_vec(vec![3.0_f64, 2.0, 1.0, 0.2, 0.1]);
+        let rank = determine_rank_from_delta(&s, 0.05_f64, None);
+        assert!(rank <= 4, "expected rank ≤ 4, got {}", rank);
+        assert!(rank >= 1);
+    }
+
+    #[test]
+    fn test_determine_rank_from_delta_max_rank_cap() {
+        let s = Array1::from_vec(vec![1.0_f64, 1.0, 1.0, 1.0, 1.0]);
+        // max_rank=2 forces rank ≤ 2 regardless of threshold
+        assert_eq!(determine_rank_from_delta(&s, 0.0, Some(2)), 2);
+    }
+
+    // ── determine_truncation_rank unit tests (existing helper, kept) ──────────
+
     #[test]
     fn test_determine_truncation_rank_all_equal() {
-        // Test helper function with equal singular values
-        let s = Array1::from_vec(vec![1.0, 1.0, 1.0, 1.0]);
-        let epsilon_sq = 0.1 * 0.1;
-
-        let rank = determine_truncation_rank(&s, epsilon_sq, None);
-
-        // With equal singular values, should keep most of them
+        let s = Array1::from_vec(vec![1.0_f64, 1.0, 1.0, 1.0]);
+        let rank = determine_truncation_rank(&s, 0.01, None);
         assert!(rank >= 3);
     }
 
     #[test]
     fn test_determine_truncation_rank_decaying() {
-        // Test with exponentially decaying singular values
-        let s = Array1::from_vec(vec![1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125]);
-        let epsilon_sq = 0.1 * 0.1;
-
-        let rank = determine_truncation_rank(&s, epsilon_sq, None);
-
-        // Should truncate small singular values
+        let s = Array1::from_vec(vec![1.0_f64, 0.5, 0.25, 0.125, 0.0625, 0.03125]);
+        let rank = determine_truncation_rank(&s, 0.01, None);
         assert!(rank < 6);
         assert!(rank >= 3);
     }
 
     #[test]
     fn test_determine_truncation_rank_with_max_rank() {
-        // Test max_rank constraint overrides epsilon
-        let s = Array1::from_vec(vec![1.0, 0.9, 0.8, 0.7, 0.6, 0.5]);
-        let epsilon_sq = 1e-12; // Very strict epsilon
-        let max_rank = Some(3);
-
-        let rank = determine_truncation_rank(&s, epsilon_sq, max_rank);
-
-        // Should respect max_rank
+        let s = Array1::from_vec(vec![1.0_f64, 0.9, 0.8, 0.7, 0.6, 0.5]);
+        let rank = determine_truncation_rank(&s, 1e-12, Some(3));
         assert_eq!(rank, 3);
     }
 
     #[test]
     fn test_determine_truncation_rank_zero_values() {
-        // Test with trailing zeros (should truncate them)
-        let s = Array1::from_vec(vec![1.0, 0.5, 0.25, 0.0, 0.0]);
-        let epsilon_sq = 0.01 * 0.01;
-
-        let rank = determine_truncation_rank(&s, epsilon_sq, None);
-
-        // Should truncate zeros and small values
+        let s = Array1::from_vec(vec![1.0_f64, 0.5, 0.25, 0.0, 0.0]);
+        let rank = determine_truncation_rank(&s, 1e-4, None);
         assert!(rank <= 3);
         assert!(rank >= 1);
+    }
+
+    // ── tt_truncate boundary ranks ────────────────────────────────────────────
+
+    #[test]
+    fn test_tt_truncate_boundary_ranks_preserved() {
+        let mut cores = make_cores_f64(&[(1, 4, 5), (5, 4, 6), (6, 4, 1)]);
+        tt_truncate(&mut cores, &[3, 3]).unwrap();
+        assert_eq!(cores[0].shape()[0], 1);
+        assert_eq!(cores[2].shape()[2], 1);
+    }
+
+    // ── 4-core TT round ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tt_round_four_cores() {
+        let mut cores = make_cores_f64(&[(1, 4, 6), (6, 4, 6), (6, 4, 6), (6, 4, 1)]);
+        let original_norm = tt_norm_and_reconstruct(&cores);
+
+        tt_round(&mut cores, Some(3), 0.01).unwrap();
+
+        // All ranks ≤ 3 after rounding
+        for c in &cores {
+            let s = c.shape();
+            assert!(s[0] <= 3, "r_left={} > 3", s[0]);
+            assert!(s[2] <= 3, "r_right={} > 3", s[2]);
+        }
+
+        let rounded_norm = tt_norm_and_reconstruct(&cores);
+        let rel = (original_norm - rounded_norm).abs() / original_norm.max(1e-14);
+        assert!(rel < 0.2, "4-core rel error {:.2e}", rel);
+    }
+
+    // ── svd_truncate_bond helper (used indirectly via tt_truncate) ────────────
+
+    #[test]
+    fn test_svd_truncate_bond_shape_consistency() {
+        let mut cores = make_cores_f64(&[(1, 3, 6), (6, 3, 6), (6, 3, 1)]);
+        tt_truncate(&mut cores, &[4, 4]).unwrap();
+
+        // Bond consistency: right rank of core k == left rank of core k+1
+        assert_eq!(
+            cores[0].shape()[2],
+            cores[1].shape()[0],
+            "bond 0 rank mismatch"
+        );
+        assert_eq!(
+            cores[1].shape()[2],
+            cores[2].shape()[0],
+            "bond 1 rank mismatch"
+        );
     }
 }

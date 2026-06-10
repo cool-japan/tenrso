@@ -29,7 +29,6 @@
 use crate::error::{KernelError, KernelResult};
 use scirs2_core::ndarray_ext::{Array2, Array3, ArrayView2, ArrayView3, ScalarOperand};
 use scirs2_core::num_traits::{Float, NumAssign};
-use scirs2_linalg::qr;
 use std::iter::Sum;
 
 /// Left-orthogonalize a single TT core using QR decomposition.
@@ -154,32 +153,28 @@ where
 /// # Returns
 ///
 /// * `(Q, R)` - Orthogonal matrix Q and upper triangular R
+/// Performs thin QR via SVD: `M = U · diag(S) · Vt = Q · R`.
+///
+/// Returns `(Q, R)` where Q has orthonormal columns (Q^T Q = I) and R = diag(S) · Vt.
+/// Works uniformly for both tall (m ≥ n) and wide (m < n) matrices — in the wide case
+/// the rank r = m and the right factor R absorbs the singular values.
 pub(crate) fn tt_qr_decomposition<T>(matrix: &ArrayView2<T>) -> KernelResult<(Array2<T>, Array2<T>)>
 where
     T: Float + NumAssign + Sum + Send + Sync + ScalarOperand + 'static,
 {
-    let (m, n) = (matrix.nrows(), matrix.ncols());
+    // Thin SVD: U (m × r), S (r,), Vt (r × n)  where r = min(m, n)
+    let (u, s_vals, vt) = scirs2_linalg::svd(matrix, false, None).map_err(|e| {
+        KernelError::operation_error("tt_qr_decomposition", format!("SVD failed: {}", e))
+    })?;
 
-    if m >= n {
-        // Standard QR: m >= n
-        qr(matrix, None).map_err(|e| {
-            KernelError::operation_error("tt_qr_decomposition", format!("QR failed: {}", e))
-        })
-    } else {
-        // Wide matrix: transpose, do QR, transpose back
-        let matrix_t = matrix.t().to_owned();
-        let (q_t, r_t) = qr(&matrix_t.view(), None).map_err(|e| {
-            KernelError::operation_error(
-                "tt_qr_decomposition",
-                format!("QR on transpose failed: {}", e),
-            )
-        })?;
-
-        // For A = Q @ R, we have A^T = R^T @ Q^T
-        // So A = (A^T)^T = (R^T @ Q^T)^T = Q @ R^T
-        // Return Q and R^T
-        Ok((q_t.t().to_owned(), r_t.t().to_owned()))
+    // Build R = diag(s_vals) * Vt
+    let mut r_mat = vt;
+    for (row_idx, &sv) in s_vals.iter().enumerate() {
+        r_mat.row_mut(row_idx).mapv_inplace(|x| x * sv);
     }
+
+    // Q = U already has orthonormal columns
+    Ok((u, r_mat))
 }
 
 /// Left-orthogonalize all TT cores using QR decomposition.
@@ -346,8 +341,8 @@ where
         let core_mat_t = core_mat.t().to_owned();
         let (q_t, r_t) = tt_qr_decomposition(&core_mat_t.view())?;
 
-        // Update current core with Q^T
-        let new_rank = q_t.nrows();
+        // Update current core with Q^T; new_rank = min(n*r_right, r_left) from thin SVD
+        let new_rank = q_t.ncols();
         let q = q_t.t().to_owned();
         cores[i] = q
             .to_shape((new_rank, n, r_right))

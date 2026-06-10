@@ -182,7 +182,9 @@ where
         let error = error_sq.max(T::zero()).sqrt();
         let tensor_norm = tensor_norm_sq.sqrt();
         fit = if tensor_norm > T::zero() {
-            (T::one() - error / tensor_norm).max(T::zero()).min(T::one())
+            (T::one() - error / tensor_norm)
+                .max(T::zero())
+                .min(T::one())
         } else {
             T::zero()
         };
@@ -347,7 +349,9 @@ where
         let error = error_sq.max(T::zero()).sqrt();
         let tensor_norm = tensor_norm_sq.sqrt();
         fit = if tensor_norm > T::zero() {
-            (T::one() - error / tensor_norm).max(T::zero()).min(T::one())
+            (T::one() - error / tensor_norm)
+                .max(T::zero())
+                .min(T::one())
         } else {
             T::zero()
         };

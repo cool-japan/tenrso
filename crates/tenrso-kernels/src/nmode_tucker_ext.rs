@@ -9,10 +9,10 @@
 //! Direct use of `ndarray` is forbidden per SCIRS2_INTEGRATION_POLICY.md
 
 use anyhow::Result;
-use scirs2_core::ndarray_ext::{Array, Array2, ArrayView, ArrayView2, IxDyn};
-use scirs2_core::numeric::{Num, One, Zero};
 #[cfg(feature = "parallel")]
 use scirs2_core::ndarray_ext::Axis;
+use scirs2_core::ndarray_ext::{Array, Array2, ArrayView, ArrayView2, IxDyn};
+use scirs2_core::numeric::{Num, One, Zero};
 
 use crate::nmode::{fold_matrix, unfold_tensor};
 
@@ -66,7 +66,9 @@ where
     if matrix_cols != mode_size {
         anyhow::bail!(
             "Matrix columns ({}) must match tensor mode-{} size ({})",
-            matrix_cols, mode, mode_size
+            matrix_cols,
+            mode,
+            mode_size
         );
     }
 
@@ -197,10 +199,8 @@ where
     // Apply modes in ascending reduction-ratio order (smallest output/input first)
     let mut modes: Vec<usize> = factor_matrices.keys().copied().collect();
     modes.sort_by(|&a, &b| {
-        let ratio_a =
-            factor_matrices[&a].shape()[0] as f64 / tensor.shape()[a] as f64;
-        let ratio_b =
-            factor_matrices[&b].shape()[0] as f64 / tensor.shape()[b] as f64;
+        let ratio_a = factor_matrices[&a].shape()[0] as f64 / tensor.shape()[a] as f64;
+        let ratio_b = factor_matrices[&b].shape()[0] as f64 / tensor.shape()[b] as f64;
         ratio_a
             .partial_cmp(&ratio_b)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -369,8 +369,7 @@ where
                 // prefix[carry_level] is still valid (core_idx[0..carry_level] unchanged).
                 if carry_level < n {
                     for j in carry_level..n {
-                        prefix[j + 1] =
-                            prefix[j] * factors[j][[out_idx[j], core_idx[j]]];
+                        prefix[j + 1] = prefix[j] * factors[j][[out_idx[j], core_idx[j]]];
                     }
                 }
             }
@@ -488,8 +487,7 @@ where
                     }
                     if carry_level < n {
                         for j in carry_level..n {
-                            prefix[j + 1] =
-                                prefix[j] * factors[j][[out_idx[j], core_idx[j]]];
+                            prefix[j + 1] = prefix[j] * factors[j][[out_idx[j], core_idx[j]]];
                         }
                     }
                 }
@@ -558,13 +556,12 @@ mod tucker_parallel_tests {
     fn test_nmode_products_parallel_matches_seq() {
         let tensor =
             Array::from_shape_vec(vec![4, 5, 6], (0..120).map(|x| x as f64).collect()).unwrap();
-        let m0 =
-            Array::from_shape_vec((3, 4), (0..12).map(|x| x as f64 * 0.1).collect()).unwrap();
-        let m2 =
-            Array::from_shape_vec((4, 6), (0..24).map(|x| x as f64 * 0.2).collect()).unwrap();
+        let m0 = Array::from_shape_vec((3, 4), (0..12).map(|x| x as f64 * 0.1).collect()).unwrap();
+        let m2 = Array::from_shape_vec((4, 6), (0..24).map(|x| x as f64 * 0.2).collect()).unwrap();
 
         let serial =
-            crate::nmode::nmode_products_seq(&tensor.view(), &[(&m0.view(), 0), (&m2.view(), 2)]).unwrap();
+            crate::nmode::nmode_products_seq(&tensor.view(), &[(&m0.view(), 0), (&m2.view(), 2)])
+                .unwrap();
         let par =
             nmode_products_parallel(&tensor.view(), &[(&m0.view(), 0), (&m2.view(), 2)]).unwrap();
 
@@ -576,12 +573,9 @@ mod tucker_parallel_tests {
     fn test_tucker_operator_parallel_matches_serial() {
         let tensor =
             Array::from_shape_vec(vec![6, 5, 4], (0..120).map(|x| x as f64).collect()).unwrap();
-        let m0 =
-            Array::from_shape_vec((3, 6), (0..18).map(|x| x as f64 * 0.1).collect()).unwrap();
-        let m1 =
-            Array::from_shape_vec((4, 5), (0..20).map(|x| x as f64 * 0.2).collect()).unwrap();
-        let m2 =
-            Array::from_shape_vec((2, 4), (0..8).map(|x| x as f64 * 0.3).collect()).unwrap();
+        let m0 = Array::from_shape_vec((3, 6), (0..18).map(|x| x as f64 * 0.1).collect()).unwrap();
+        let m1 = Array::from_shape_vec((4, 5), (0..20).map(|x| x as f64 * 0.2).collect()).unwrap();
+        let m2 = Array::from_shape_vec((2, 4), (0..8).map(|x| x as f64 * 0.3).collect()).unwrap();
 
         let mut factors = HashMap::new();
         factors.insert(0, m0.view());
@@ -627,21 +621,25 @@ mod tucker_fused_tests {
 
     #[test]
     fn test_fused_matches_sequential_3mode() {
-        let core = Array::from_shape_vec(
-            vec![2, 2, 2],
-            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
-        )
-        .unwrap();
+        let core =
+            Array::from_shape_vec(vec![2, 2, 2], vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+                .unwrap();
         let u1 = array![[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
         let u2 = array![[1.0, 0.0], [0.0, 1.0]];
         let u3 = array![[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
 
-        let seq = crate::nmode::tucker_reconstruct(&core.view(), &[u1.view(), u2.view(), u3.view()]).unwrap();
+        let seq =
+            crate::nmode::tucker_reconstruct(&core.view(), &[u1.view(), u2.view(), u3.view()])
+                .unwrap();
         let fused =
             tucker_reconstruct_fused(&core.view(), &[u1.view(), u2.view(), u3.view()]).unwrap();
 
         assert_eq!(seq.shape(), fused.shape());
-        assert!(max_abs_diff_dyn(&seq, &fused) < 1e-12, "max diff = {}", max_abs_diff_dyn(&seq, &fused));
+        assert!(
+            max_abs_diff_dyn(&seq, &fused) < 1e-12,
+            "max diff = {}",
+            max_abs_diff_dyn(&seq, &fused)
+        );
     }
 
     #[test]
@@ -665,7 +663,9 @@ mod tucker_fused_tests {
         let u1 = Array::from_shape_vec((4, 3), u1_data).unwrap();
         let u2 = Array::from_shape_vec((6, 3), u2_data).unwrap();
 
-        let seq = crate::nmode::tucker_reconstruct(&core.view(), &[u0.view(), u1.view(), u2.view()]).unwrap();
+        let seq =
+            crate::nmode::tucker_reconstruct(&core.view(), &[u0.view(), u1.view(), u2.view()])
+                .unwrap();
         let fused =
             tucker_reconstruct_fused(&core.view(), &[u0.view(), u1.view(), u2.view()]).unwrap();
 
@@ -717,11 +717,9 @@ mod tucker_fused_tests {
             &[u0.view(), u1.view(), u2.view(), u3.view()],
         )
         .unwrap();
-        let fused = tucker_reconstruct_fused(
-            &core.view(),
-            &[u0.view(), u1.view(), u2.view(), u3.view()],
-        )
-        .unwrap();
+        let fused =
+            tucker_reconstruct_fused(&core.view(), &[u0.view(), u1.view(), u2.view(), u3.view()])
+                .unwrap();
 
         assert_eq!(seq.shape(), fused.shape());
         assert!(
@@ -783,11 +781,9 @@ mod tucker_fused_tests {
 
         let serial =
             tucker_reconstruct_fused(&core.view(), &[u0.view(), u1.view(), u2.view()]).unwrap();
-        let par = tucker_reconstruct_fused_parallel(
-            &core.view(),
-            &[u0.view(), u1.view(), u2.view()],
-        )
-        .unwrap();
+        let par =
+            tucker_reconstruct_fused_parallel(&core.view(), &[u0.view(), u1.view(), u2.view()])
+                .unwrap();
 
         assert_eq!(serial.shape(), par.shape());
         assert!(
@@ -818,12 +814,12 @@ mod tucker_fused_tests {
         let u1 = Array::from_shape_vec((4, 2), u1_data).unwrap();
         let u2 = Array::from_shape_vec((3, 2), u2_data).unwrap();
 
-        let seq = crate::nmode::tucker_reconstruct(&core.view(), &[u0.view(), u1.view(), u2.view()]).unwrap();
-        let par = tucker_reconstruct_fused_parallel(
-            &core.view(),
-            &[u0.view(), u1.view(), u2.view()],
-        )
-        .unwrap();
+        let seq =
+            crate::nmode::tucker_reconstruct(&core.view(), &[u0.view(), u1.view(), u2.view()])
+                .unwrap();
+        let par =
+            tucker_reconstruct_fused_parallel(&core.view(), &[u0.view(), u1.view(), u2.view()])
+                .unwrap();
 
         assert_eq!(seq.shape(), par.shape());
         assert!(

@@ -281,16 +281,7 @@ where
 #[cfg(feature = "linalg")]
 impl<T> DenseND<T>
 where
-    T: Clone
-        + Num
-        + NumCast
-        + Float
-        + NumAssign
-        + Sum
-        + Send
-        + Sync
-        + ScalarOperand
-        + 'static,
+    T: Clone + Num + NumCast + Float + NumAssign + Sum + Send + Sync + ScalarOperand + 'static,
 {
     /// Creates a factor matrix for CP decomposition via leverage-score sampling.
     ///
@@ -358,9 +349,8 @@ where
         let unfolded: Array2<T> = tensor.unfold(mode)?;
 
         // Step 2: full SVD — we only need U, singular values are discarded
-        let (u_array, _s_array, _vt) =
-            scirs2_linalg::svd(&unfolded.view(), false, None)
-                .map_err(|e| anyhow::anyhow!("SVD failed in from_leverage_scores: {}", e))?;
+        let (u_array, _s_array, _vt) = scirs2_linalg::svd(&unfolded.view(), false, None)
+            .map_err(|e| anyhow::anyhow!("SVD failed in from_leverage_scores: {}", e))?;
 
         // u_array shape: [mode_size, min(mode_size, n_cols)]
         // Step 3: take leading `rank` columns of U

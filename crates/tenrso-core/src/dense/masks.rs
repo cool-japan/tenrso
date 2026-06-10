@@ -88,13 +88,7 @@ where
         }
         let new_data = scirs2_core::ndarray_ext::Zip::from(&self.data)
             .and(mask)
-            .map_collect(|v, &m| {
-                if m {
-                    v.clone()
-                } else {
-                    T::zero()
-                }
-            });
+            .map_collect(|v, &m| if m { v.clone() } else { T::zero() });
         Ok(Self { data: new_data })
     }
 
@@ -225,11 +219,7 @@ mod mask_tests {
 
     #[test]
     fn test_sparse_indices_2d() {
-        let t = DenseND::<f64>::from_vec(
-            vec![0.0, 1.0, 2.0, 0.0, 0.0, -3.0],
-            &[2, 3],
-        )
-        .unwrap();
+        let t = DenseND::<f64>::from_vec(vec![0.0, 1.0, 2.0, 0.0, 0.0, -3.0], &[2, 3]).unwrap();
         let idxs = t.sparse_indices(0.5);
         // Elements > 0.5 at flat indices 1, 2, 5
         // [0,1]=1.0, [0,2]=2.0, [1,2]=-3.0 (|-3|=3.0 > 0.5)

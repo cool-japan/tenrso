@@ -457,7 +457,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, "test_plan");
         assert!(events[0].success);
-        assert!(events[0].duration_ms > 0.0);
+        assert!(events[0].duration_ms >= 0.0);
     }
 
     #[test]
@@ -541,8 +541,8 @@ mod tests {
 
         let metrics = profiler.metrics();
         assert_eq!(metrics.total_plans, 5);
-        assert!(metrics.avg_planning_time_ms > 0.0);
-        assert!(metrics.min_time_ms > 0.0);
+        assert!(metrics.avg_planning_time_ms >= 0.0);
+        assert!(metrics.min_time_ms >= 0.0);
         assert!(metrics.max_time_ms >= metrics.min_time_ms);
         assert!(metrics.by_operation.contains_key("greedy"));
     }

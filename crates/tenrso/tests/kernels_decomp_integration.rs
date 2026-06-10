@@ -57,8 +57,8 @@ fn relative_reconstruction_error(original: &DenseND<f64>, reconstructed: &DenseN
 #[test]
 fn test_tucker_hosvd_reconstruct_via_kernel() {
     let tensor = DenseND::<f64>::random_uniform(&[8, 6, 5], 0.0, 1.0);
-    let tucker = tucker_hosvd(&tensor, &[4, 3, 3])
-        .expect("tucker_hosvd should succeed on valid input");
+    let tucker =
+        tucker_hosvd(&tensor, &[4, 3, 3]).expect("tucker_hosvd should succeed on valid input");
 
     let factor_views: Vec<_> = tucker.factors.iter().map(|f| f.view()).collect();
     let core_view = tucker.core.view();
@@ -79,7 +79,11 @@ fn test_tucker_hosvd_reconstruct_via_kernel() {
     let err = relative_reconstruction_error(&tensor, &reconstructed);
 
     // Sanity: error must be finite (computation succeeded)
-    assert!(err.is_finite(), "relative error must be finite, got {}", err);
+    assert!(
+        err.is_finite(),
+        "relative error must be finite, got {}",
+        err
+    );
 
     // For rank [4,3,3] on a [8,6,5] tensor, error must be < 1.0
     // (at minimum the decomposition is not worse than predicting zeros)
@@ -97,21 +101,18 @@ fn test_tucker_hosvd_reconstruct_via_kernel() {
 fn test_tucker_hooi_kernel_vs_hosvd_error() {
     let tensor = DenseND::<f64>::random_uniform(&[6, 6, 6], 0.0, 1.0);
 
-    let hosvd = tucker_hosvd(&tensor, &[3, 3, 3])
-        .expect("tucker_hosvd should succeed");
-    let hooi = tucker_hooi(&tensor, &[3, 3, 3], 20, 1e-6)
-        .expect("tucker_hooi should succeed");
+    let hosvd = tucker_hosvd(&tensor, &[3, 3, 3]).expect("tucker_hosvd should succeed");
+    let hooi = tucker_hooi(&tensor, &[3, 3, 3], 20, 1e-6).expect("tucker_hooi should succeed");
 
     // Helper closure: reconstruct using the kernel and compute relative error
-    let compute_error =
-        |decomp: &tenrso_decomp::tucker::TuckerDecomp<f64>| -> f64 {
-            let factor_views: Vec<_> = decomp.factors.iter().map(|f| f.view()).collect();
-            let core_view = decomp.core.view();
-            let recon_arr = tucker_reconstruct(&core_view, &factor_views)
-                .expect("tucker_reconstruct should succeed for a valid decomposition");
-            let recon = DenseND::from_array(recon_arr);
-            relative_reconstruction_error(&tensor, &recon)
-        };
+    let compute_error = |decomp: &tenrso_decomp::tucker::TuckerDecomp<f64>| -> f64 {
+        let factor_views: Vec<_> = decomp.factors.iter().map(|f| f.view()).collect();
+        let core_view = decomp.core.view();
+        let recon_arr = tucker_reconstruct(&core_view, &factor_views)
+            .expect("tucker_reconstruct should succeed for a valid decomposition");
+        let recon = DenseND::from_array(recon_arr);
+        relative_reconstruction_error(&tensor, &recon)
+    };
 
     let hosvd_err = compute_error(&hosvd);
     let hooi_err = compute_error(&hooi);
@@ -130,8 +131,7 @@ fn test_tucker_hooi_kernel_vs_hosvd_error() {
 #[test]
 fn test_tucker_operator_matches_decomp_reconstruct() {
     let tensor = DenseND::<f64>::random_uniform(&[5, 4, 6], 0.0, 1.0);
-    let tucker = tucker_hosvd(&tensor, &[3, 3, 4])
-        .expect("tucker_hosvd should succeed");
+    let tucker = tucker_hosvd(&tensor, &[3, 3, 4]).expect("tucker_hosvd should succeed");
 
     // Path A: kernels tucker_reconstruct
     let factor_views_a: Vec<_> = tucker.factors.iter().map(|f| f.view()).collect();
@@ -164,26 +164,25 @@ fn test_tucker_operator_matches_decomp_reconstruct() {
 #[test]
 fn test_tucker_full_pipeline_shapes() {
     let tensor = DenseND::<f64>::random_uniform(&[10, 8, 6], 0.0, 1.0);
-    let tucker = tucker_hosvd(&tensor, &[5, 4, 3])
-        .expect("tucker_hosvd should succeed");
+    let tucker = tucker_hosvd(&tensor, &[5, 4, 3]).expect("tucker_hosvd should succeed");
 
     // Core must have the requested shape
-    assert_eq!(
-        tucker.core.shape(),
-        &[5, 4, 3],
-        "core shape mismatch"
-    );
+    assert_eq!(tucker.core.shape(), &[5, 4, 3], "core shape mismatch");
 
     // Factor shapes: (mode_size, rank)
-    assert_eq!(tucker.factors[0].shape(), [10, 5], "factor-0 shape mismatch");
+    assert_eq!(
+        tucker.factors[0].shape(),
+        [10, 5],
+        "factor-0 shape mismatch"
+    );
     assert_eq!(tucker.factors[1].shape(), [8, 4], "factor-1 shape mismatch");
     assert_eq!(tucker.factors[2].shape(), [6, 3], "factor-2 shape mismatch");
 
     // Reconstructed tensor must have original shape
     let factor_views: Vec<_> = tucker.factors.iter().map(|f| f.view()).collect();
     let core_view = tucker.core.view();
-    let reconstructed = tucker_reconstruct(&core_view, &factor_views)
-        .expect("tucker_reconstruct should succeed");
+    let reconstructed =
+        tucker_reconstruct(&core_view, &factor_views).expect("tucker_reconstruct should succeed");
 
     assert_eq!(
         reconstructed.shape(),
@@ -240,10 +239,10 @@ fn test_mttkrp_fused_equals_standard_on_cp_factors() {
     let tensor_view = tensor.view();
 
     for mode in 0..3 {
-        let standard = mttkrp(&tensor_view, &factor_views, mode)
-            .expect("mttkrp standard should succeed");
-        let fused = mttkrp_fused(&tensor_view, &factor_views, mode)
-            .expect("mttkrp_fused should succeed");
+        let standard =
+            mttkrp(&tensor_view, &factor_views, mode).expect("mttkrp standard should succeed");
+        let fused =
+            mttkrp_fused(&tensor_view, &factor_views, mode).expect("mttkrp_fused should succeed");
 
         assert_eq!(
             standard.shape(),
@@ -288,12 +287,7 @@ fn test_cp_reconstruction_error_decreases_with_iterations() {
 
     // Factor shapes must be consistent for the 50-iter run
     for (i, factor) in cp_50.factors.iter().enumerate() {
-        assert_eq!(
-            factor.shape()[1],
-            4,
-            "cp_50 factor-{} rank must be 4",
-            i
-        );
+        assert_eq!(factor.shape()[1], 4, "cp_50 factor-{} rank must be 4", i);
         assert_eq!(
             factor.shape()[0],
             tensor.shape()[i],
@@ -304,12 +298,7 @@ fn test_cp_reconstruction_error_decreases_with_iterations() {
 
     // Factor shapes must be consistent for the 5-iter run
     for (i, factor) in cp_5.factors.iter().enumerate() {
-        assert_eq!(
-            factor.shape()[1],
-            4,
-            "cp_5 factor-{} rank must be 4",
-            i
-        );
+        assert_eq!(factor.shape()[1], 4, "cp_5 factor-{} rank must be 4", i);
     }
 }
 
@@ -330,16 +319,15 @@ fn test_mttkrp_blocked_equals_standard_on_tucker_factors() {
     let tensor = DenseND::<f64>::random_uniform(&[5, 6, 7], 0.0, 1.0);
     // Use equal ranks so all factor matrices have the same number of columns (= 3),
     // which is required for MTTKRP (all factors must share the same "CP rank").
-    let tucker = tucker_hosvd(&tensor, &[3, 3, 3])
-        .expect("tucker_hosvd should succeed");
+    let tucker = tucker_hosvd(&tensor, &[3, 3, 3]).expect("tucker_hosvd should succeed");
 
     // All factors have shape [mode_size, 3] -- column counts are equal (3).
     let factor_views: Vec<_> = tucker.factors.iter().map(|f| f.view()).collect();
     let tensor_view = tensor.view();
 
     for mode in 0..3 {
-        let standard = mttkrp(&tensor_view, &factor_views, mode)
-            .expect("mttkrp standard should succeed");
+        let standard =
+            mttkrp(&tensor_view, &factor_views, mode).expect("mttkrp standard should succeed");
         let blocked = mttkrp_blocked(&tensor_view, &factor_views, mode, 4)
             .expect("mttkrp_blocked should succeed");
 
