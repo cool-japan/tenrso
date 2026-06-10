@@ -39,7 +39,7 @@
 - [x] Initialization strategies
   - [x] `random_uniform(shape, low, high) -> Self`
   - [x] `random_normal(shape, mean, std) -> Self`
-  - [ ] `random_leverage_scores(tensor, rank) -> Self` (for CP init) - Future M2
+  - [x] `from_leverage_scores(tensor, mode, rank) -> Self` (CP init, feature `linalg`) — Complete (2026-06-10)
 
 ### Views and Slicing - COMPLETE
 
@@ -206,7 +206,7 @@
 - [x] Serde support for `TensorHandle<T>` (feature-gated)
 - [x] Serde support for `TensorRepr<T>` (feature-gated)
 - [x] Serde support for `AxisMeta` (feature-gated)
-- [ ] Binary format (efficient) - Future (use serde_bincode)
+- [x] Binary format (efficient) — COMPLETE (oxicode, `binary` feature, `save_binary`/`load_binary`)
 - [ ] JSON format (human-readable) - Future (use serde_json)
 - [ ] Arrow IPC format - Deferred to tenrso-ooc
 
@@ -240,8 +240,8 @@
 
 ### Interop
 
-- [ ] Sparse interop via boolean masks - Future M3
-- [ ] CP-ALS leverage score initialization (`random_leverage_scores`) - Future M2
+- [x] Sparse interop via boolean masks — Complete (2026-06-10, `to_bool_mask`, `apply_bool_mask`, `sparse_indices` on DenseND)
+- [x] `from_leverage_scores(tensor, mode, rank) -> Self` (CP init, feature `linalg`) — Complete (2026-06-10)
 - [ ] Squeeze/Unsqueeze shape ops - Future M2+
 
 ---

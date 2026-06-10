@@ -23,6 +23,7 @@ mod statistics;
 // Supporting modules
 pub mod densend_traits;
 pub(crate) mod functions;
+pub mod masks;
 
 // Re-export the main type
 pub use types::DenseND;
