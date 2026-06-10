@@ -151,7 +151,7 @@
     - [x] `mttkrp_fused_parallel` - Parallel fused version
     - [x] Significantly reduced memory usage
     - [x] Column-to-multi-index mapping fixed (all previously ignored tests passing)
-  - [ ] Fully fused + cache-blocking - Future optimization
+  - [x] Fully fused + cache-blocking combined variant — Complete (2026-06-10, `mttkrp_fused_blocked` + `mttkrp_fused_blocked_parallel`)
   - [ ] SIMD inner loops - Future (using scirs2_core where possible)
 
 - [x] Variants
@@ -311,7 +311,7 @@
   - [x] Validation and convergence tracking patterns
   - [x] Cross-crate compatibility (tenrso-core integration)
   - [x] Large tensor scenarios (up to 100^3)
-  - [ ] Use with tenrso-decomp - Pending M2
+  - [x] Use with tenrso-decomp — Complete (2026-06-10, `crates/tenrso/tests/kernels_decomp_integration.rs`)
 
 ### Documentation - COMPLETE
 
@@ -373,7 +373,7 @@
 ### Additional Optimizations (Future)
 
 - [ ] SIMD inner loops for MTTKRP fused kernel
-- [ ] Fully fused + cache-blocking combined variant
+- [x] Fully fused + cache-blocking combined variant — Complete (2026-06-10, `mttkrp_fused_blocked` + `mttkrp_fused_blocked_parallel`)
 - [ ] Parallel Tucker mode application
 - [ ] Fused multi-mode products
 - [ ] Flamegraph profiling / cache miss analysis

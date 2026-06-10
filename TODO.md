@@ -307,7 +307,7 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
 ### Testing
 
 - [ ] Unit tests (per module)
-- [ ] Integration tests (cross-crate)
+- [x] Integration tests (cross-crate) — `crates/tenrso/tests/kernels_decomp_integration.rs` (2026-06-10, 9 tests covering Tucker/CP/MTTKRP-variant kernels<->decomp roundtrips)
 - [ ] Property tests (mathematical correctness)
 - [ ] Benchmarks (performance tracking)
 - [ ] Fuzzing harness (unsafe code)

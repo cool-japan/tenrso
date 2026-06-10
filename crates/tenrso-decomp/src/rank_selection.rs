@@ -540,7 +540,7 @@ pub fn create_cv_split(shape: &[usize], train_ratio: f64) -> (DenseND<f64>, Dens
     let mut val_data = Vec::with_capacity(total_size);
 
     for _ in 0..total_size {
-        let r: f64 = rng.random();
+        let r: f64 = rng.random::<f64>();
         if r < train_ratio {
             train_data.push(1.0);
             val_data.push(0.0);
