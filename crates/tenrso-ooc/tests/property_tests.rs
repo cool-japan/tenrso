@@ -7,8 +7,8 @@ use proptest::prelude::*;
 use scirs2_core::ndarray_ext::Array;
 use tenrso_core::DenseND;
 use tenrso_ooc::{
-    ChunkGraph, ChunkNode, ChunkOp, ChunkSpec, PrefetchStrategy, Prefetcher, StreamConfig,
-    StreamingExecutor,
+    AlignedBuffer, ChunkGraph, ChunkNode, ChunkOp, ChunkSpec, PrefetchStrategy, Prefetcher,
+    StreamConfig, StreamingExecutor,
 };
 
 // ============================================================================
@@ -469,5 +469,107 @@ proptest! {
         prop_assert_eq!(config.prefetch_queue_size, queue_size);
         prop_assert_eq!(config.enable_profiling, true);
         prop_assert_eq!(config.enable_prefetching, true);
+    }
+}
+
+// ============================================================================
+// Unsafe Code Fuzzing: ZeroCopy I/O Round-Trip
+//
+// These property tests act as a lightweight fuzz harness for the unsafe I/O
+// paths in `zerocopy_io.rs` (`from_raw_parts` for both read and write):
+//   - Write: &[f64] → &[u8] via `from_raw_parts` (any bit-pattern → valid u8)
+//   - Read:  &[u8]  → &[f64] via `from_raw_parts` (must be f64-aligned and exact)
+//
+// `AlignedBuffer` exercises `std::alloc::alloc` / `std::alloc::dealloc` with
+// arbitrary sizes and power-of-2 alignments.
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Verifies that the unsafe f64↔u8 byte-reinterpretation used in
+    /// `zerocopy_io::write_tensor_f64` / `read_tensor_f64` produces bit-exact
+    /// round-trips for arbitrary tensor data and shapes.
+    ///
+    /// Directly exercises both `from_raw_parts` directions:
+    ///   - Write: `&[f64]` → `&[u8]` then persisted via `std::fs::write`
+    ///   - Read:  `Vec<u8>` → aligned `Vec<f64>` via `copy_from_slice` into
+    ///     a properly-typed allocation (same bit-cast as `read_tensor_f64`)
+    ///
+    /// This avoids the mmap layer (which requires O_RDWR) while still
+    /// exercising the core unsafe code path that handles raw memory reinterpretation.
+    #[test]
+    fn prop_zerocopy_f64_byte_roundtrip(
+        rows in 1usize..12,
+        cols in 1usize..12,
+        seed in any::<u64>(),
+    ) {
+        let n = rows * cols;
+        let mut state = seed.wrapping_add(1);
+        let data: Vec<f64> = (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state as i64) as f64 / i64::MAX as f64
+            })
+            .collect();
+
+        let tmp = std::env::temp_dir()
+            .join(format!("tenrso_fuzz_bytes_{rows}_{cols}_{seed}.bin"));
+
+        // ── Write path: &[f64] → &[u8] (mirrors write_tensor_f64 unsafe block)
+        let byte_count = n * std::mem::size_of::<f64>();
+        // SAFETY: reinterpreting a &[f64] as &[u8]: any bit-pattern is a valid u8;
+        // byte_count == data.len() * size_of::<f64>() is exact; data outlives byte_slice.
+        let byte_slice = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, byte_count)
+        };
+        std::fs::write(&tmp, byte_slice).expect("write bytes to temp file");
+
+        // ── Read path: Vec<u8> → aligned Vec<f64> (mirrors read_tensor_f64 unsafe block)
+        let file_bytes = std::fs::read(&tmp).expect("read bytes from temp file");
+        let _ = std::fs::remove_file(&tmp);
+        prop_assert_eq!(file_bytes.len(), byte_count, "file size mismatch");
+
+        let mut aligned: Vec<f64> = vec![0.0_f64; n];
+        // SAFETY: `aligned` is a properly-allocated Vec<f64>; reinterpreting as &mut [u8]
+        // to copy raw bytes is safe because: (a) the source bytes came from a valid &[f64]
+        // so their bit-patterns constitute valid f64 values, (b) the destination is aligned
+        // to f64's requirements (Vec<f64> guarantees 8-byte alignment), (c) lengths match.
+        unsafe {
+            let dst = std::slice::from_raw_parts_mut(
+                aligned.as_mut_ptr() as *mut u8,
+                byte_count,
+            );
+            dst.copy_from_slice(&file_bytes);
+        }
+
+        for (i, (expected, actual)) in data.iter().zip(aligned.iter()).enumerate() {
+            prop_assert!(
+                expected.to_bits() == actual.to_bits(),
+                "{}",
+                format!("bit mismatch at index {i} (shape [{rows}x{cols}]): {expected} vs {actual}")
+            );
+        }
+    }
+
+    /// Verifies that `AlignedBuffer::new(size, alignment)` always returns a
+    /// buffer whose backing pointer satisfies `ptr % alignment == 0`.
+    /// Exercises the `std::alloc::alloc` call with arbitrary (size, alignment) pairs.
+    #[test]
+    fn prop_aligned_buffer_pointer_alignment(
+        size in 1usize..4096,
+        align_exp in 4u32..12, // 2^4 = 16 … 2^11 = 2048 bytes
+    ) {
+        let alignment = 1usize << align_exp;
+        let buf = AlignedBuffer::new(size, alignment);
+        let ptr = buf.as_slice().as_ptr() as usize;
+        prop_assert_eq!(
+            ptr % alignment, 0,
+            "{}",
+            format!("ptr {ptr:#x} not aligned to {alignment}; size={size}")
+        );
+        prop_assert_eq!(buf.as_slice().len(), size, "wrong buffer length");
     }
 }

@@ -29,6 +29,30 @@ impl TensorStats {
         }
     }
 
+    /// Create TensorStats from a known density value (0.0 = fully sparse, 1.0 = fully dense).
+    ///
+    /// This is the inverse of the sparsity-hint API: callers who have a sparsity fraction `s`
+    /// pass `density = 1.0 - s`.  The resulting `nnz` is `⌊size * density⌋`, clamped to 1
+    /// for non-empty tensors to avoid zero-nnz edge-cases in cost models.
+    pub fn with_density(shape: Vec<usize>, density: f64) -> Self {
+        let density = density.clamp(0.0, 1.0);
+        let total_elements: usize = shape.iter().product();
+        // For fully dense (density == 1.0) keep nnz = None (no sparsity tracking).
+        // For anything less-than-fully-dense, record an explicit nnz so cost models
+        // can distinguish and the stats are flagged as sparse.
+        let nnz = if density < 1.0 && total_elements > 0 {
+            let n = ((total_elements as f64) * density).round() as usize;
+            Some(n.max(1))
+        } else {
+            None
+        };
+        Self {
+            shape,
+            nnz,
+            density,
+        }
+    }
+
     /// Create stats for a sparse tensor
     pub fn sparse(shape: Vec<usize>, nnz: usize) -> Self {
         let total_elements: usize = shape.iter().product();
@@ -285,6 +309,37 @@ mod tests {
         assert_eq!(stats.effective_nnz(), 6000);
         assert_eq!(stats.density, 1.0);
         assert!(!stats.is_sparse());
+    }
+
+    #[test]
+    fn test_tensor_stats_with_density_full() {
+        let stats = TensorStats::with_density(vec![100, 100], 1.0);
+        assert_eq!(stats.density, 1.0);
+        assert!(stats.nnz.is_none());
+        assert!(!stats.is_sparse());
+    }
+
+    #[test]
+    fn test_tensor_stats_with_density_partial() {
+        let stats = TensorStats::with_density(vec![100, 100], 0.05);
+        // 10000 * 0.05 = 500 nnz
+        assert_eq!(stats.nnz, Some(500));
+        assert!((stats.density - 0.05).abs() < 1e-9);
+        assert!(stats.is_sparse());
+    }
+
+    #[test]
+    fn test_tensor_stats_with_density_zero() {
+        let stats = TensorStats::with_density(vec![100, 100], 0.0);
+        // Clamped to 1 nnz for non-empty tensors
+        assert_eq!(stats.nnz, Some(1));
+        assert!(stats.is_sparse());
+    }
+
+    #[test]
+    fn test_tensor_stats_with_density_empty_tensor() {
+        let stats = TensorStats::with_density(vec![0, 100], 0.5);
+        assert!(stats.nnz.is_none());
     }
 
     #[test]

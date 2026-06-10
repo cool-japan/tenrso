@@ -542,7 +542,17 @@ impl Default for LockFreePrefetcher {
     }
 }
 
-// Make it thread-safe
+// SAFETY: All shared state inside LockFreePrefetcher is independently thread-safe:
+//   - `queue` is an `Arc<SegQueue<_>>`, which is `Send + Sync` (lock-free MPMC queue).
+//   - `prefetched` is an `Arc<DashMap<_, _>>`, which is `Send + Sync` (concurrent hash map).
+//   - `access_history` is an `Arc<parking_lot::Mutex<_>>`, which is `Send + Sync`.
+//   - `queue_len`, `timestamp` are `Arc<Atomic*>`, both `Send + Sync`.
+//   - `stats` is an `Arc<LockFreePrefetchStats>` whose fields are all `Atomic*`.
+//   - `strategy`, `queue_size`, `num_threads`, `history_window` are plain integer/enum
+//     fields set only during construction (before sharing) and never mutated afterward.
+//   - `enabled` is an `AtomicBool`, which is `Send + Sync`.
+// There are no raw pointers or thread-local state. Violating this: adding a non-thread-safe
+// field (e.g., `Cell<T>`, `Rc<T>`, or a raw pointer) without updating these impls.
 unsafe impl Send for LockFreePrefetcher {}
 unsafe impl Sync for LockFreePrefetcher {}
 

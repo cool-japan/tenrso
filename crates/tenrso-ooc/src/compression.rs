@@ -273,7 +273,12 @@ pub fn decompress_bytes(data: &[u8]) -> Result<Vec<u8>> {
 ///
 /// Compressed bytes
 pub fn compress_f64_slice(data: &[f64], codec: CompressionCodec) -> Result<Vec<u8>> {
-    // Convert f64 slice to bytes using std::mem::size_of_val
+    // SAFETY: Reinterpreting a &[f64] as &[u8] is always valid: any bit pattern is a valid
+    // u8. `std::mem::size_of_val(data)` equals `data.len() * size_of::<f64>()`, which is
+    // the exact byte length of the slice's backing memory. `bytes` does not outlive `data`
+    // (both are scoped to this function call). The slice is read-only, matching the shared
+    // reference `data`. Violating this: if `data` were deallocated while `bytes` is live
+    // (impossible here since they share the same stack frame).
     let bytes = unsafe {
         std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
     };
@@ -300,6 +305,15 @@ pub fn decompress_to_f64_vec(data: &[u8]) -> Result<Vec<f64>> {
 
     let count = decompressed.len() / std::mem::size_of::<f64>();
     let mut result = Vec::with_capacity(count);
+    // SAFETY: `decompressed` was produced by `decompress_bytes`, which reconstructs bytes
+    // that were originally written by `compress_f64_slice` via our own serializer. We
+    // verified above that `decompressed.len()` is a multiple of `size_of::<f64>()`, so
+    // `count` f64 values fit exactly. `ptr` points to the start of the Vec's allocation,
+    // which is valid for `count` f64 reads. The data was stored in native-endian IEEE 754
+    // f64 format (the same byte order as the current host), so every 8-byte word is a
+    // valid f64. Violating this: if the decompressed bytes came from a different-endian
+    // system or were not originally f64 data, the values would be garbage (not UB, but
+    // logically wrong); actual UB would require misalignment or out-of-bounds access.
     unsafe {
         let ptr = decompressed.as_ptr() as *const f64;
         for i in 0..count {

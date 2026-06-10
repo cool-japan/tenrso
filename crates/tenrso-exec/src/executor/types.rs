@@ -550,15 +550,30 @@ impl CpuExecutor {
         use std::any::TypeId;
 
         if TypeId::of::<T>() == TypeId::of::<f32>() {
-            // Safe: We've verified T is f32
-            let buffer_f32 = self.memory_pool_f32.acquire(shape);
-            // SAFETY: We checked that T == f32, so transmuting Vec<f32> to Vec<T> is safe
-            unsafe { std::mem::transmute::<Vec<f32>, Vec<T>>(buffer_f32) }
+            // TypeId check above proves T is exactly f32.
+            let mut buffer_f32 = self.memory_pool_f32.acquire(shape);
+            let len = buffer_f32.len();
+            let cap = buffer_f32.capacity();
+            let ptr = buffer_f32.as_mut_ptr() as *mut T;
+            std::mem::forget(buffer_f32);
+            // SAFETY: TypeId::of::<T>() == TypeId::of::<f32>() was verified above, so T and
+            // f32 are the same type with identical size, alignment, and bit representation.
+            // ptr, len, and cap come from a valid Vec<f32> allocation; forget() prevents
+            // double-free. Violating this: if T were a different type that happened to match
+            // via TypeId spoofing (impossible in safe Rust), the reinterpretation would be UB.
+            unsafe { Vec::from_raw_parts(ptr, len, cap) }
         } else if TypeId::of::<T>() == TypeId::of::<f64>() {
-            // Safe: We've verified T is f64
-            let buffer_f64 = self.memory_pool_f64.acquire(shape);
-            // SAFETY: We checked that T == f64, so transmuting Vec<f64> to Vec<T> is safe
-            unsafe { std::mem::transmute::<Vec<f64>, Vec<T>>(buffer_f64) }
+            // TypeId check above proves T is exactly f64.
+            let mut buffer_f64 = self.memory_pool_f64.acquire(shape);
+            let len = buffer_f64.len();
+            let cap = buffer_f64.capacity();
+            let ptr = buffer_f64.as_mut_ptr() as *mut T;
+            std::mem::forget(buffer_f64);
+            // SAFETY: TypeId::of::<T>() == TypeId::of::<f64>() was verified above, so T and
+            // f64 are the same type with identical size, alignment, and bit representation.
+            // ptr, len, and cap come from a valid Vec<f64> allocation; forget() prevents
+            // double-free. Violating this: same argument as f32 branch above.
+            unsafe { Vec::from_raw_parts(ptr, len, cap) }
         } else {
             // For other types, allocate directly (no pooling)
             vec![T::default(); shape.iter().product()]
@@ -584,12 +599,30 @@ impl CpuExecutor {
         use std::any::TypeId;
 
         if TypeId::of::<T>() == TypeId::of::<f32>() {
-            // SAFETY: We checked that T == f32, so transmuting Vec<T> to Vec<f32> is safe
-            let buffer_f32: Vec<f32> = unsafe { std::mem::transmute::<Vec<T>, Vec<f32>>(buffer) };
+            // TypeId check above proves T is exactly f32.
+            let mut buffer = buffer;
+            let len = buffer.len();
+            let cap = buffer.capacity();
+            let ptr = buffer.as_mut_ptr() as *mut f32;
+            std::mem::forget(buffer);
+            // SAFETY: TypeId::of::<T>() == TypeId::of::<f32>() was verified above, so T and
+            // f32 are the same type. ptr, len, cap come from a valid Vec<T> allocation;
+            // forget() prevents double-free. The resulting Vec<f32> is returned to the pool
+            // which allocated it, so allocator identity is preserved.
+            let buffer_f32: Vec<f32> = unsafe { Vec::from_raw_parts(ptr, len, cap) };
             self.memory_pool_f32.release(shape, buffer_f32);
         } else if TypeId::of::<T>() == TypeId::of::<f64>() {
-            // SAFETY: We checked that T == f64, so transmuting Vec<T> to Vec<f64> is safe
-            let buffer_f64: Vec<f64> = unsafe { std::mem::transmute::<Vec<T>, Vec<f64>>(buffer) };
+            // TypeId check above proves T is exactly f64.
+            let mut buffer = buffer;
+            let len = buffer.len();
+            let cap = buffer.capacity();
+            let ptr = buffer.as_mut_ptr() as *mut f64;
+            std::mem::forget(buffer);
+            // SAFETY: TypeId::of::<T>() == TypeId::of::<f64>() was verified above, so T and
+            // f64 are the same type. ptr, len, cap come from a valid Vec<T> allocation;
+            // forget() prevents double-free. The resulting Vec<f64> is returned to the pool
+            // which allocated it, so allocator identity is preserved.
+            let buffer_f64: Vec<f64> = unsafe { Vec::from_raw_parts(ptr, len, cap) };
             self.memory_pool_f64.release(shape, buffer_f64);
         }
         // For other types, buffer is dropped (no pooling)

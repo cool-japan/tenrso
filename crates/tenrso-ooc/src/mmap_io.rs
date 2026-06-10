@@ -81,6 +81,13 @@ impl MmapTensor<f64> {
     /// - Version is unsupported
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;
+        // SAFETY: `file` was successfully opened with read permissions by `File::open`.
+        // The resulting `Mmap` maps the entire file and is stored in `self._mmap`, keeping
+        // the mapping alive for the lifetime of the struct. The `file` local variable is
+        // dropped at the end of `open`, but the OS keeps the underlying file descriptor
+        // alive for the duration of the mapping on all supported platforms (POSIX and
+        // Windows). Violating this: if the file were deleted or truncated externally while
+        // the Mmap is live, accessing bytes beyond the new EOF would trigger a SIGBUS/SEH.
         let mmap = unsafe { Mmap::map(&file)? };
 
         // Validate magic bytes
@@ -152,7 +159,14 @@ impl MmapTensor<f64> {
         let data_len = self.shape.iter().product::<usize>();
         let byte_slice = &self._mmap[self.data_offset..self.data_offset + data_len * 8];
 
-        // Safety: We've validated the size and alignment
+        // SAFETY: `byte_slice` is a subslice of `self._mmap` starting at `self.data_offset`
+        // and covering exactly `data_len * 8` bytes. In `open` we validated that
+        // `actual_data_size >= expected_data_size`, so the subslice is in-bounds. The mmap
+        // base address is page-aligned (≥4096 bytes), satisfying f64's 8-byte alignment.
+        // The data was written by `write_tensor_binary` in IEEE 754 native-endian f64 format,
+        // so every 8-byte word is a valid f64. The slice borrows `self`, which owns the
+        // `_mmap`, ensuring the mapping outlives the slice. Violating this: external file
+        // truncation after `open` (see `Mmap::map` SAFETY note above).
         unsafe { std::slice::from_raw_parts(byte_slice.as_ptr() as *const f64, data_len) }
     }
 
@@ -200,6 +214,12 @@ impl MmapTensorMut<f64> {
     /// - File format is invalid
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
+        // SAFETY: `file` was opened with both read and write permissions. The resulting
+        // `MmapMut` maps the entire file for read-write access and is stored in
+        // `self._mmap`, keeping the mapping alive for the lifetime of the struct. The OS
+        // keeps the underlying mapping valid after `file` is dropped at end of `open`.
+        // Violating this: concurrent mutable access to the same file from multiple
+        // processes without coordination, or external truncation while mapped.
         let mmap = unsafe { MmapMut::map_mut(&file)? };
 
         // Validate magic bytes
@@ -260,7 +280,13 @@ impl MmapTensorMut<f64> {
         let data_len = self.shape.iter().product::<usize>();
         let byte_slice = &mut self._mmap[self.data_offset..self.data_offset + data_len * 8];
 
-        // Safety: We've validated the size and alignment
+        // SAFETY: `byte_slice` is a mutable subslice of `self._mmap` covering exactly
+        // `data_len * 8` bytes (file format validated in `open`). The mmap is
+        // page-aligned, satisfying f64's 8-byte alignment. `&mut self` gives us exclusive
+        // access to the mmap, so no other reference to these bytes can exist simultaneously.
+        // The resulting `&mut [f64]` borrows `self` (via `byte_slice`) and cannot outlive
+        // the `MmapMut`. Violating this: obtaining two `&mut [f64]` views simultaneously
+        // (impossible with `&mut self` gating), or external file modification via another fd.
         unsafe { std::slice::from_raw_parts_mut(byte_slice.as_mut_ptr() as *mut f64, data_len) }
     }
 

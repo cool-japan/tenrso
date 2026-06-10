@@ -583,6 +583,144 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
         )
     }
 
+    /// Transpose (permute axes): z = permute(x, axes)
+    ///
+    /// Permutes the tensor axes according to `axes`, which must be a permutation
+    /// of `0..x.ndim()`. The backward pass applies the inverse permutation.
+    ///
+    /// # Complexity
+    ///
+    /// O(n) for the copy; O(ndim) for axis validation.
+    pub fn transpose(&self, input: &Variable, axes: Vec<usize>) -> Result<Variable> {
+        let input_val = self.value(input)?;
+        let ndim = input_val.ndim();
+        if axes.len() != ndim {
+            return Err(anyhow!(
+                "transpose: axes length {} != tensor ndim {}",
+                axes.len(),
+                ndim
+            ));
+        }
+        let mut seen = vec![false; ndim];
+        for &ax in &axes {
+            if ax >= ndim {
+                return Err(anyhow!(
+                    "transpose: axis {} out of range for ndim {}",
+                    ax,
+                    ndim
+                ));
+            }
+            if seen[ax] {
+                return Err(anyhow!("transpose: duplicate axis {}", ax));
+            }
+            seen[ax] = true;
+        }
+        let result = input_val.view().permuted_axes(IxDyn(&axes)).to_owned();
+        self.add_node(
+            Operation::Transpose {
+                input: input.id,
+                axes,
+            },
+            result,
+            vec![input.id],
+        )
+    }
+
+    /// Broadcast: z = broadcast(x, target_shape)
+    ///
+    /// Broadcasts the input tensor to `target_shape` using NumPy broadcasting
+    /// semantics — trailing dimensions are matched, leading singleton dimensions
+    /// are expanded, and missing leading dimensions are implicitly 1.
+    /// The original shape is stored in the graph for the backward pass.
+    ///
+    /// # Complexity
+    ///
+    /// O(n) for the copy where n = product(target_shape).
+    pub fn broadcast(&self, input: &Variable, target_shape: &[usize]) -> Result<Variable> {
+        let input_val = self.value(input)?;
+        let original_shape = input_val.shape().to_vec();
+        let result = input_val
+            .broadcast(IxDyn(target_shape))
+            .ok_or_else(|| {
+                anyhow!(
+                    "broadcast: cannot broadcast {:?} to {:?}",
+                    original_shape,
+                    target_shape
+                )
+            })?
+            .to_owned();
+        self.add_node(
+            Operation::Broadcast {
+                input: input.id,
+                original_shape,
+            },
+            result,
+            vec![input.id],
+        )
+    }
+
+    /// Slice: z = x[ranges]
+    ///
+    /// Extracts a sub-tensor using per-axis half-open `(start, end)` ranges.
+    /// All axes must satisfy `0 ≤ start ≤ end ≤ dim_size`. The backward pass
+    /// scatters the output gradient back into a zeros tensor with the input shape.
+    ///
+    /// # Complexity
+    ///
+    /// O(n) where n = product(end_i − start_i).
+    pub fn slice_nd(&self, input: &Variable, ranges: Vec<(usize, usize)>) -> Result<Variable> {
+        let input_val = self.value(input)?;
+        let ndim = input_val.ndim();
+        if ranges.len() != ndim {
+            return Err(anyhow!(
+                "slice_nd: ranges length {} != tensor ndim {}",
+                ranges.len(),
+                ndim
+            ));
+        }
+        for (ax, &(start, end)) in ranges.iter().enumerate() {
+            let dim = input_val.shape()[ax];
+            if end > dim || start > end {
+                return Err(anyhow!(
+                    "slice_nd: invalid range [{}, {}) for axis {} of size {}",
+                    start,
+                    end,
+                    ax,
+                    dim
+                ));
+            }
+        }
+        let new_shape: Vec<usize> = ranges.iter().map(|&(s, e)| e - s).collect();
+        let flat_size: usize = new_shape.iter().product::<usize>();
+        let mut result_flat: Vec<T> = Vec::with_capacity(flat_size);
+        for out_flat in 0..flat_size {
+            let mut out_idx = vec![0usize; ndim];
+            let mut remaining = out_flat;
+            for d in (0..ndim).rev() {
+                if new_shape[d] > 0 {
+                    out_idx[d] = remaining % new_shape[d];
+                    remaining /= new_shape[d];
+                }
+            }
+            let in_idx: Vec<usize> = out_idx
+                .iter()
+                .enumerate()
+                .map(|(ax, &i)| ranges[ax].0 + i)
+                .collect();
+            result_flat.push(input_val[in_idx.as_slice()]);
+        }
+        let result = ArrayD::from_shape_vec(IxDyn(&new_shape), result_flat)
+            .context("slice_nd: failed to construct output array")?;
+        self.add_node(
+            Operation::Slice {
+                input: input.id,
+                ranges,
+            },
+            result,
+            vec![input.id],
+        )
+    }
+
     // ===== Backward Pass =====
 
     /// Perform backward pass from the given output node
@@ -935,10 +1073,93 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
                 Ok(vec![(*input, grad_input)])
             }
 
-            _ => Err(anyhow!(
-                "Backward not implemented for operation: {:?}",
-                operation
-            )),
+            Operation::Transpose { input, axes } => {
+                // grad_x = permute(grad_out, inverse permutation of axes)
+                //
+                // Forward: y[axes[0], axes[1], ...] = x, so backward
+                // scatters grad_y back along the original axes by reversing the permutation.
+                let ndim = axes.len();
+                let mut inv_axes = vec![0usize; ndim];
+                for (i, &ax) in axes.iter().enumerate() {
+                    inv_axes[ax] = i;
+                }
+                let grad_input = grad_output
+                    .view()
+                    .permuted_axes(IxDyn(&inv_axes))
+                    .to_owned();
+                Ok(vec![(*input, grad_input)])
+            }
+
+            Operation::Broadcast {
+                input,
+                original_shape,
+            } => {
+                // Backward: sum over all axes that were added or expanded during broadcast.
+                //
+                // Algorithm:
+                // 1. Pad original_shape on the left with 1s to match grad_output.ndim().
+                // 2. For each axis where padded_orig[ax] == 1 and out_shape[ax] > 1:
+                //    sum over that axis (keepdim: remove then re-insert as size 1).
+                // 3. Reshape to original_shape (removes leading padded-1 dimensions).
+                let ndim_out = grad_output.ndim();
+                let ndim_in = original_shape.len();
+                let pad_left = ndim_out.saturating_sub(ndim_in);
+                let padded_orig: Vec<usize> = std::iter::repeat_n(1, pad_left)
+                    .chain(original_shape.iter().copied())
+                    .collect();
+                let out_shape = grad_output.shape().to_vec();
+                let mut grad = grad_output.clone();
+                for ax in 0..ndim_out {
+                    if padded_orig[ax] == 1 && out_shape[ax] > 1 {
+                        let summed = grad.sum_axis(Axis(ax));
+                        let mut new_shape = summed.shape().to_vec();
+                        new_shape.insert(ax, 1);
+                        grad = summed
+                            .to_shape(IxDyn(&new_shape))
+                            .context("Broadcast backward keepdim reshape failed")?
+                            .to_owned();
+                    }
+                }
+                grad = grad
+                    .to_shape(IxDyn(original_shape))
+                    .context("Broadcast backward final reshape failed")?
+                    .to_owned();
+                Ok(vec![(*input, grad)])
+            }
+
+            Operation::Slice { input, ranges } => {
+                // Backward: scatter grad_output into zeros of input shape.
+                //
+                // For each element at output position out_idx,
+                // the corresponding input position is ranges[ax].0 + out_idx[ax] per axis.
+                let input_val = nodes
+                    .get(input)
+                    .and_then(|n| n.value.as_ref())
+                    .ok_or_else(|| anyhow!("Input value not available for Slice backward"))?;
+                let input_shape = input_val.shape().to_vec();
+                let slice_shape: Vec<usize> = ranges.iter().map(|&(s, e)| e - s).collect();
+                let ndim = input_shape.len();
+                let flat_size: usize = slice_shape.iter().product::<usize>();
+                let mut grad_input = ArrayD::<T>::zeros(IxDyn(&input_shape));
+                for out_flat in 0..flat_size {
+                    let mut out_idx = vec![0usize; ndim];
+                    let mut remaining = out_flat;
+                    for d in (0..ndim).rev() {
+                        if slice_shape[d] > 0 {
+                            out_idx[d] = remaining % slice_shape[d];
+                            remaining /= slice_shape[d];
+                        }
+                    }
+                    let in_idx: Vec<usize> = out_idx
+                        .iter()
+                        .enumerate()
+                        .map(|(ax, &i)| ranges[ax].0 + i)
+                        .collect();
+                    let g = grad_output[out_idx.as_slice()];
+                    grad_input[in_idx.as_slice()] = grad_input[in_idx.as_slice()] + g;
+                }
+                Ok(vec![(*input, grad_input)])
+            }
         }
     }
 
@@ -1222,6 +1443,7 @@ impl fmt::Display for GraphStats {
 mod tests {
     use super::*;
     use scirs2_core::ndarray_ext::array;
+    use scirs2_core::ndarray_ext::{ArrayD, IxDyn};
 
     #[test]
     fn test_basic_addition() -> Result<()> {
@@ -1509,6 +1731,230 @@ mod tests {
         // d/dy (x/y) = -x/y^2 = -6/4 = -1.5
         assert_eq!(grad_y[[0]], -1.5);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_transpose_forward_backward() -> Result<()> {
+        let graph = ComputationGraph::<f64>::new();
+        // 2D matrix: [[1,2,3],[4,5,6]] shape [2,3]
+        let x = graph.variable(
+            ArrayD::from_shape_vec(IxDyn(&[2, 3]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap(),
+            true,
+        )?;
+        let y = graph.transpose(&x, vec![1, 0])?; // [2,3] -> [3,2]
+        let y_val = graph.value(&y)?;
+        assert_eq!(y_val.shape(), &[3, 2]);
+        // y[0,0]=1, y[0,1]=4, y[1,0]=2, y[1,1]=5, y[2,0]=3, y[2,1]=6
+        assert_eq!(y_val[[0usize, 0]], 1.0);
+        assert_eq!(y_val[[0usize, 1]], 4.0);
+        assert_eq!(y_val[[1usize, 0]], 2.0);
+        assert_eq!(y_val[[2usize, 1]], 6.0);
+
+        graph.backward(&graph.sum(&y)?)?;
+        let grad_x = graph.gradient(&x)?;
+        // Transpose backward = inverse-permute = transpose again; all-ones grad_out
+        // -> grad_x is all-ones with shape [2,3]
+        assert_eq!(grad_x.shape(), &[2, 3]);
+        for i in 0..2 {
+            for j in 0..3 {
+                assert_eq!(grad_x[[i, j]], 1.0);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_transpose_3d_backward() -> Result<()> {
+        let graph = ComputationGraph::<f64>::new();
+        // x shape [2,3,4]; permute to [4,2,3]
+        let size = 2 * 3 * 4;
+        let data: Vec<f64> = (1..=size).map(|i| i as f64).collect();
+        let x = graph.variable(
+            ArrayD::from_shape_vec(IxDyn(&[2, 3, 4]), data).unwrap(),
+            true,
+        )?;
+        let y = graph.transpose(&x, vec![2, 0, 1])?;
+        let y_val = graph.value(&y)?;
+        assert_eq!(y_val.shape(), &[4, 2, 3]);
+        // y[k,i,j] = x[i,j,k]
+        // x[0,0,0] = 1 -> y[0,0,0] = 1
+        assert_eq!(y_val[[0usize, 0, 0]], 1.0);
+        // x[1,2,3] = 24 -> y[3,1,2] = 24
+        assert_eq!(y_val[[3usize, 1, 2]], 24.0);
+
+        graph.backward(&graph.sum(&y)?)?;
+        let grad_x = graph.gradient(&x)?;
+        assert_eq!(grad_x.shape(), &[2, 3, 4]);
+        // All-ones output gradient -> all-ones input gradient
+        for i in 0..2 {
+            for j in 0..3 {
+                for k in 0..4 {
+                    assert_eq!(grad_x[[i, j, k]], 1.0, "grad_x[{i},{j},{k}] != 1.0");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_transpose_invalid_axes() -> Result<()> {
+        let graph = ComputationGraph::<f64>::new();
+        let x = graph.variable(
+            ArrayD::from_shape_vec(IxDyn(&[2, 3]), vec![0.0; 6]).unwrap(),
+            true,
+        )?;
+        // Wrong length
+        assert!(graph.transpose(&x, vec![0]).is_err());
+        // Out of range axis
+        assert!(graph.transpose(&x, vec![0, 5]).is_err());
+        // Duplicate axis
+        assert!(graph.transpose(&x, vec![0, 0]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_broadcast_forward_backward() -> Result<()> {
+        let graph = ComputationGraph::<f64>::new();
+        // x shape [3], broadcast to [4,3]
+        let x = graph.variable(
+            ArrayD::from_shape_vec(IxDyn(&[3]), vec![1.0, 2.0, 3.0]).unwrap(),
+            true,
+        )?;
+        let y = graph.broadcast(&x, &[4, 3])?;
+        let y_val = graph.value(&y)?;
+        assert_eq!(y_val.shape(), &[4, 3]);
+        // Each row of y should equal x
+        for row in 0..4 {
+            for col in 0..3 {
+                assert_eq!(y_val[[row, col]], (col + 1) as f64);
+            }
+        }
+
+        graph.backward(&graph.sum(&y)?)?;
+        let grad_x = graph.gradient(&x)?;
+        // Each element of x was used 4 times (one per row) -> gradient = 4
+        assert_eq!(grad_x.shape(), &[3]);
+        for j in 0..3 {
+            assert_eq!(grad_x[[j]], 4.0, "grad_x[{j}] = {}", grad_x[[j]]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_broadcast_singleton_expansion() -> Result<()> {
+        let graph = ComputationGraph::<f64>::new();
+        // x shape [1,3], broadcast to [4,3]
+        let x = graph.variable(
+            ArrayD::from_shape_vec(IxDyn(&[1, 3]), vec![1.0, 2.0, 3.0]).unwrap(),
+            true,
+        )?;
+        let y = graph.broadcast(&x, &[4, 3])?;
+        graph.backward(&graph.sum(&y)?)?;
+        let grad_x = graph.gradient(&x)?;
+        // Shape must be preserved as [1, 3] (keepdim)
+        assert_eq!(grad_x.shape(), &[1, 3]);
+        for j in 0..3 {
+            assert_eq!(grad_x[[0, j]], 4.0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_broadcast_scalar_to_matrix() -> Result<()> {
+        let graph = ComputationGraph::<f64>::new();
+        // x scalar (shape [1]), broadcast to [3,4]
+        let x = graph.variable(
+            ArrayD::from_shape_vec(IxDyn(&[1]), vec![5.0]).unwrap(),
+            true,
+        )?;
+        let y = graph.broadcast(&x, &[3, 4])?;
+        let y_val = graph.value(&y)?;
+        assert_eq!(y_val.shape(), &[3, 4]);
+        for i in 0..3 {
+            for j in 0..4 {
+                assert_eq!(y_val[[i, j]], 5.0);
+            }
+        }
+        graph.backward(&graph.sum(&y)?)?;
+        let grad_x = graph.gradient(&x)?;
+        // Scalar used 12 times -> gradient sum = 12
+        assert_eq!(grad_x.shape(), &[1]);
+        assert_eq!(grad_x[[0]], 12.0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_slice_nd_forward_backward() -> Result<()> {
+        let graph = ComputationGraph::<f64>::new();
+        // x shape [4,5]; slice [1..3, 2..4] -> shape [2,2]
+        let data: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let x = graph.variable(ArrayD::from_shape_vec(IxDyn(&[4, 5]), data).unwrap(), true)?;
+        let y = graph.slice_nd(&x, vec![(1, 3), (2, 4)])?;
+        let y_val = graph.value(&y)?;
+        assert_eq!(y_val.shape(), &[2, 2]);
+        // x[i,j] = i*5 + j
+        // y[0,0] = x[1,2] = 7; y[0,1] = x[1,3] = 8
+        // y[1,0] = x[2,2] = 12; y[1,1] = x[2,3] = 13
+        assert_eq!(y_val[[0usize, 0]], 7.0);
+        assert_eq!(y_val[[0usize, 1]], 8.0);
+        assert_eq!(y_val[[1usize, 0]], 12.0);
+        assert_eq!(y_val[[1usize, 1]], 13.0);
+
+        graph.backward(&graph.sum(&y)?)?;
+        let grad_x = graph.gradient(&x)?;
+        assert_eq!(grad_x.shape(), &[4, 5]);
+        // Only elements within the slice [1..3, 2..4] should have gradient 1.0
+        for i in 0..4 {
+            for j in 0..5 {
+                let expected = if (1..3).contains(&i) && (2..4).contains(&j) {
+                    1.0
+                } else {
+                    0.0
+                };
+                assert_eq!(
+                    grad_x[[i, j]],
+                    expected,
+                    "grad_x[{i},{j}] = {} != {expected}",
+                    grad_x[[i, j]]
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_slice_nd_full_slice() -> Result<()> {
+        let graph = ComputationGraph::<f64>::new();
+        let x = graph.variable(
+            ArrayD::from_shape_vec(IxDyn(&[3, 3]), vec![1.0; 9]).unwrap(),
+            true,
+        )?;
+        // Full slice: [0..3, 0..3] -> same as input
+        let y = graph.slice_nd(&x, vec![(0, 3), (0, 3)])?;
+        graph.backward(&graph.sum(&y)?)?;
+        let grad_x = graph.gradient(&x)?;
+        for i in 0..3 {
+            for j in 0..3 {
+                assert_eq!(grad_x[[i, j]], 1.0);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_slice_nd_invalid_ranges() -> Result<()> {
+        let graph = ComputationGraph::<f64>::new();
+        let x = graph.variable(
+            ArrayD::from_shape_vec(IxDyn(&[3, 3]), vec![1.0; 9]).unwrap(),
+            true,
+        )?;
+        // End out of bounds
+        assert!(graph.slice_nd(&x, vec![(0, 4), (0, 3)]).is_err());
+        // Start > end
+        assert!(graph.slice_nd(&x, vec![(2, 1), (0, 3)]).is_err());
+        // Wrong number of ranges
+        assert!(graph.slice_nd(&x, vec![(0, 2)]).is_err());
         Ok(())
     }
 }

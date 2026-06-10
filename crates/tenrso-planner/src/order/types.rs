@@ -21,9 +21,25 @@ pub(super) struct IntermediateTensor {
     pub(super) stats: TensorStats,
 }
 impl IntermediateTensor {
-    /// Create from an original input
+    /// Create from an original input (always dense by default; used in tests)
+    #[cfg(test)]
     pub(super) fn from_input(indices: String, shape: Vec<usize>, original_idx: usize) -> Self {
         let stats = TensorStats::dense(shape.clone());
+        Self {
+            indices,
+            shape,
+            original_idx: Some(original_idx),
+            stats,
+        }
+    }
+
+    /// Create from an original input with explicit stats (e.g. from sparsity hints)
+    pub(super) fn from_input_with_stats(
+        indices: String,
+        shape: Vec<usize>,
+        original_idx: usize,
+        stats: TensorStats,
+    ) -> Self {
         Self {
             indices,
             shape,

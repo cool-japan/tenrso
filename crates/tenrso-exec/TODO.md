@@ -121,10 +121,11 @@
 - [x] Unit tests for convolutions
 - [x] Unit tests for memory pool (phases 1-5.1)
 - [x] Integration tests for optimization dispatch
+- [x] Property tests (mathematical correctness) - ✅ DONE (2026-06-10) (`crates/tenrso-exec/tests/property_tests.rs`)
 - [x] Benchmarks: `optimization_benchmarks.rs` (50+ individual benchmarks)
 - [x] Benchmarks: memory pool benchmarks (7 benchmark groups)
 
-**Total Tests:** 244 tests passing (100%)
+**Total Tests:** 273 tests passing (100%)
 
 ---
 

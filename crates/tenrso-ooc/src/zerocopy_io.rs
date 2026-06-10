@@ -100,6 +100,11 @@ impl ZeroCopyReader {
     #[cfg(feature = "mmap")]
     pub fn mmap_view(&mut self) -> Result<&[u8]> {
         if self.mmap.is_none() {
+            // SAFETY: `self.file` was opened with read permissions via `File::open` and is
+            // valid for the lifetime of this struct. The resulting Mmap borrows against the
+            // file handle, which outlives the Mmap because both are owned by `self`.
+            // Violating this: if the file were truncated externally while mapped, reading
+            // past the new EOF would be UB; callers must not modify the file during use.
             let mmap = unsafe {
                 MmapOptions::new()
                     .map(&self.file)
@@ -171,7 +176,13 @@ impl ZeroCopyReader {
                 anyhow::bail!("File too small for requested shape");
             }
 
-            // Zero-copy: transmute bytes to f64 slice
+            // SAFETY: `view` is a byte slice from a valid mmap of at least `total_bytes`
+            // bytes (checked above). mmap guarantees page-aligned base addresses; since
+            // f64 requires 8-byte alignment and all modern OSes align mmap to at least a
+            // page (4096 bytes), the cast is valid. The bytes were written by our own
+            // serializer in native IEEE 754 f64 format, so every bit pattern is a valid f64.
+            // Violating this: if the mmap base were not 8-byte aligned or the byte count
+            // were not a multiple of 8, the slice would contain a partial f64.
             let f64_slice =
                 unsafe { std::slice::from_raw_parts(view.as_ptr() as *const f64, total_elements) };
 
@@ -181,6 +192,12 @@ impl ZeroCopyReader {
         #[cfg(not(feature = "mmap"))]
         {
             let mut data = vec![0f64; total_elements];
+            // SAFETY: `data` is a Vec<f64> of length `total_elements`; its allocation is
+            // therefore exactly `total_bytes` bytes. Reinterpreting f64 memory as u8 is
+            // always valid because any sequence of bytes is a valid u8 slice. The resulting
+            // `byte_slice` is only live within this block and does not outlive `data`.
+            // Violating this: aliasing `data` as both &mut [f64] and &mut [u8] at the same
+            // time would be UB; we only hold `byte_slice` for the `read_at` call.
             let byte_slice = unsafe {
                 std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, total_bytes)
             };
@@ -224,6 +241,12 @@ impl ZeroCopyWriter {
             .set_len(size as u64)
             .context("Failed to set file length")?;
 
+        // SAFETY: `self.file` was opened with both read and write permissions in
+        // `ZeroCopyWriter::create`. The file length was just set to `size` bytes via
+        // `set_len`, so the mmap covers a fully allocated region. The MmapMut is stored
+        // in `self.mmap` and will not outlive `self`.
+        // Violating this: external truncation of the file while mapped, or mapping a
+        // zero-length file (prevented by `set_len` being called first).
         let mmap = unsafe {
             MmapOptions::new()
                 .map_mut(&self.file)
@@ -283,8 +306,13 @@ impl ZeroCopyWriter {
             anyhow::bail!("Mmap too small for tensor");
         }
 
-        // Zero-copy: transmute f64 slice to bytes
+        // Zero-copy: reinterpret f64 slice as bytes for writing
         let tensor_slice = tensor.as_slice().context("Tensor not contiguous")?;
+        // SAFETY: Reinterpreting a &[f64] as &[u8] is always valid: any bit pattern is a
+        // valid u8, and the resulting byte slice is read-only and does not outlive
+        // `tensor_slice`. `total_bytes == tensor_slice.len() * size_of::<f64>()` so the
+        // length is exact. Violating this: holding `byte_slice` beyond `tensor_slice`'s
+        // lifetime, or mutating the tensor concurrently.
         let byte_slice =
             unsafe { std::slice::from_raw_parts(tensor_slice.as_ptr() as *const u8, total_bytes) };
 
@@ -298,6 +326,11 @@ impl ZeroCopyWriter {
     #[cfg(not(feature = "mmap"))]
     pub fn write_tensor_f64(&mut self, tensor: &ArrayView<f64, IxDyn>) -> Result<()> {
         let tensor_slice = tensor.as_slice().context("Tensor not contiguous")?;
+        // SAFETY: Reinterpreting a &[f64] as &[u8] is always valid: any bit pattern is a
+        // valid u8, and the resulting byte slice is read-only and does not outlive
+        // `tensor_slice`. The length `tensor_slice.len() * size_of::<f64>()` matches the
+        // underlying allocation exactly. Violating this: holding `byte_slice` beyond
+        // `tensor_slice`'s lifetime, or mutating the tensor concurrently.
         let byte_slice = unsafe {
             std::slice::from_raw_parts(
                 tensor_slice.as_ptr() as *const u8,
@@ -337,19 +370,36 @@ impl AlignedBuffer {
     }
 
     /// Get aligned slice
+    ///
+    /// Returns a slice of exactly `size` bytes (= capacity - alignment) whose start
+    /// address is a multiple of `alignment`.  The backing `Vec` has capacity
+    /// `size + alignment` so the aligned window always fits regardless of the raw
+    /// pointer's original alignment.
     pub fn as_slice(&self) -> &[u8] {
         let ptr = self.data.as_ptr() as usize;
         let aligned_ptr = (ptr + self.alignment - 1) & !(self.alignment - 1);
-        let offset = aligned_ptr - ptr;
-        &self.data[offset..offset + (self.data.len() - offset - self.alignment)]
+        let offset = aligned_ptr - ptr; // in [0, alignment)
+                                        // `len` is always `size`, independent of `offset`.
+                                        // capacity = size + alignment, so capacity - alignment = size, which is always ≥ 0.
+        let len = self.data.len() - self.alignment;
+        &self.data[offset..offset + len]
     }
 
     /// Get mutable aligned slice
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         let ptr = self.data.as_mut_ptr() as usize;
+        // Round ptr up to the next multiple of alignment; the rounding amount (offset) is in
+        // [0, alignment), which is within the extra `alignment` bytes the constructor reserved.
         let aligned_ptr = (ptr + self.alignment - 1) & !(self.alignment - 1);
-        let offset = aligned_ptr - ptr;
-        let len = self.data.len() - offset - self.alignment;
+        // `len = size = capacity - alignment` is invariant; it does NOT depend on the rounding.
+        // With capacity = size + alignment and rounding ∈ [0, alignment), the range
+        // [aligned_ptr, aligned_ptr + len) lies entirely within the Vec's allocation:
+        //   aligned_ptr + len ≤ (ptr + alignment - 1) + (capacity - alignment) < ptr + capacity.
+        let len = self.data.len() - self.alignment;
+        // SAFETY: `aligned_ptr` is within the Vec's allocation (rounding < alignment ≤ capacity).
+        // The range `[aligned_ptr, aligned_ptr + len)` lies within the allocation as shown above.
+        // `self.data` has exclusive ownership via `&mut self`, so no aliasing.
+        // Precondition: `self.alignment > 0` (enforced by `new`); capacity = size + alignment.
         unsafe { std::slice::from_raw_parts_mut(aligned_ptr as *mut u8, len) }
     }
 }
@@ -497,6 +547,9 @@ mod tests {
         let test_data = vec![1.0f64, 2.0, 3.0, 4.0];
         {
             let mut file = std::fs::File::create(&test_file).unwrap();
+            // SAFETY: Reinterpreting a &[f64] as &[u8] is always valid: any bit pattern is
+            // a valid u8. The slice does not outlive `test_data` which is live through the
+            // end of this block. Length = `test_data.len() * size_of::<f64>()` is exact.
             let bytes = unsafe {
                 std::slice::from_raw_parts(
                     test_data.as_ptr() as *const u8,

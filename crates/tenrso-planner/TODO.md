@@ -50,6 +50,7 @@
   - [x] Memory pressure consideration
   - [x] Conversion cost estimation
   - [x] 17 unit tests
+  - [x] Low-rank + sparse mixed planning — `select_representation` wired into greedy/DP/beam planners; `PlanHints::sparsity_hints` consumed via `TensorStats::with_density`; `PlanNode::repr` set from actual output stats (2026-06-10)
   - **Module:** `repr.rs` (440 lines)
 
 - [x] **Tiling Strategy** - COMPLETE
@@ -58,8 +59,9 @@
   - [x] Matrix multiplication blocking
   - [x] Cache miss estimation
   - [x] Multi-level (nested) tiling for modern cache hierarchies
-  - [x] 14+ unit tests
-  - **Module:** `tiling.rs` (807 lines)
+  - [x] Cache-oblivious tiling (Frigo et al., FOCS 1999) — `CacheObliviousTileSpec`, `CacheObliviousIter`, `MatmulCacheObliviousBlock`, `matmul_cache_oblivious_sequence`
+  - [x] 14+ cache-aware unit tests + 6 cache-oblivious unit tests
+  - **Module:** `tiling.rs` (1295 lines)
 
 - [x] **Plan Management** - COMPLETE
   - [x] Plan caching (LRU/LFU/ARC eviction policies)
@@ -82,13 +84,13 @@
 - [x] Unit tests for genetic algorithm planner - 6 tests
 - [x] Unit tests for adaptive planner - 9 tests
 - [x] Unit tests for representation selection - 17 tests
-- [x] Unit tests for tiling strategy - 14 tests
+- [x] Unit tests for tiling strategy - 20 tests (14 cache-aware + 6 cache-oblivious)
 - [x] API structure tests - 3 tests
 - [x] Property tests for plan optimality - 7 tests
 - [x] Benchmarks for plan quality - 14 benchmark suites
 - [x] Examples and documentation - 4 examples
 
-**Total Tests:** 271 tests passing (100%)
+**Total Tests:** 257 unit + 41 doc = 298 tests passing (100%) — updated 2026-06-10
 
 ---
 

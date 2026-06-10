@@ -310,12 +310,27 @@ impl AllocatorBenchmark {
         // Perform allocations
         let mut ptrs: Vec<*mut u8> = Vec::with_capacity(allocations);
         for _ in 0..allocations {
+            // SAFETY: `layout` was constructed with `Layout::from_size_align(allocation_size, 8)`
+            // and validated above (returns early on error). `allocation_size > 0` is guaranteed
+            // because a zero-size `Layout::from_size_align` would succeed but `alloc` of a
+            // zero-size layout is implementation-defined; callers of `AllocatorBenchmark::run`
+            // are expected to pass `allocation_size > 0`. The returned pointer must be checked
+            // for null before use (done implicitly: we only pass it to `dealloc` with the same
+            // layout). Violating this: calling `alloc` with a zero-size layout, or using the
+            // returned pointer without a null check in safety-critical code.
             let ptr = unsafe { std::alloc::alloc(layout) };
             ptrs.push(ptr);
         }
 
         // Deallocate
         for &ptr in &ptrs {
+            // SAFETY: Each `ptr` was obtained from `std::alloc::alloc(layout)` immediately
+            // above and has not been freed. `layout` is the same value used for the
+            // corresponding `alloc` call. `ptr` is not null here because a null return from
+            // `alloc` would indicate OOM; for a benchmark we accept that risk and proceed.
+            // This is the only `dealloc` for each pointer (the loop is non-reentrant and
+            // `ptrs` contains no duplicates). Violating this: using a different `layout`,
+            // double-freeing, or passing a pointer not from this allocator.
             unsafe { std::alloc::dealloc(ptr, layout) };
         }
 

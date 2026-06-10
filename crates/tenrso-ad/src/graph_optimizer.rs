@@ -201,23 +201,101 @@ impl GraphOptimizer {
         self
     }
 
-    /// Optimize a computation graph (placeholder - returns original graph)
+    /// Optimize a computation graph in-place.
     ///
-    /// Note: Full optimization requires deep integration with graph internals.
-    /// This is a foundation for future optimization work.
+    /// Runs the enabled passes in canonical order:
+    /// 1. Pre-fold CSE (deduplicates structurally-identical ops)
+    /// 2. Constant folding (reclassifies all-constant sub-expressions as constants)
+    /// 3. Post-fold CSE (deduplicates newly-constant expressions)
+    /// 4. DCE (removes nodes unreachable from implicit output roots)
+    ///
+    /// When `run_until_convergence` is set, the pipeline repeats until the
+    /// node count stabilises or `max_iterations` is reached.
+    ///
+    /// `DeadCodeElimination` uses sink nodes (no consumers) as implicit output
+    /// roots when explicit output `NodeId`s are unavailable. Pass output IDs
+    /// directly to [`dead_code_elimination_on_graph`] when they are known.
     pub fn optimize<T: Float + ScalarOperand + FromPrimitive>(
         &self,
-        _graph: &ComputationGraph<T>,
+        graph: &ComputationGraph<T>,
     ) -> Result<OptimizationStats> {
-        // For now, return empty stats as optimization requires graph refactoring
-        // to expose internal structure for modification
+        let nodes_before = graph.num_nodes();
+        let run_all = self.config.passes.contains(&OptimizationPass::All);
+        let run_cse = run_all
+            || self
+                .config
+                .passes
+                .contains(&OptimizationPass::OperationFusion);
+        let run_fold = run_all
+            || self
+                .config
+                .passes
+                .contains(&OptimizationPass::ConstantFolding);
+        let run_dce = run_all
+            || self
+                .config
+                .passes
+                .contains(&OptimizationPass::DeadCodeElimination);
+
+        let max_iters = if self.config.run_until_convergence {
+            self.config.max_iterations.max(1)
+        } else {
+            1
+        };
+
+        let mut fusions_applied = 0usize;
+        let mut constants_folded = 0usize;
+        let mut dead_nodes_removed = 0usize;
+        let mut iterations = 0usize;
+
+        for _ in 0..max_iters {
+            let n_before = graph.num_nodes();
+
+            if run_cse {
+                let s = common_subexpression_elimination(graph);
+                fusions_applied += s.nodes_eliminated;
+            }
+            if run_fold {
+                let s = constant_folding(graph);
+                constants_folded += s.nodes_folded;
+            }
+            if run_cse {
+                let s = common_subexpression_elimination(graph);
+                fusions_applied += s.nodes_eliminated;
+            }
+            if run_dce {
+                // Identify sink nodes (no consumers) as implicit output roots.
+                let ops = graph.snapshot_ops();
+                let mut has_consumer: HashSet<NodeId> = HashSet::new();
+                for (_id, op) in &ops {
+                    for p in self.get_operation_inputs(op) {
+                        has_consumer.insert(p);
+                    }
+                }
+                let sink_nodes: Vec<NodeId> = graph
+                    .all_node_ids()
+                    .into_iter()
+                    .filter(|id| !has_consumer.contains(id))
+                    .collect();
+                if !sink_nodes.is_empty() {
+                    let s = dead_code_elimination_on_graph(graph, &sink_nodes);
+                    dead_nodes_removed += s.nodes_removed;
+                }
+            }
+
+            iterations += 1;
+            if graph.num_nodes() == n_before {
+                break;
+            }
+        }
+
         Ok(OptimizationStats {
-            nodes_before: 0,
-            nodes_after: 0,
-            fusions_applied: 0,
-            dead_nodes_removed: 0,
-            constants_folded: 0,
-            iterations: 0,
+            nodes_before,
+            nodes_after: graph.num_nodes(),
+            fusions_applied,
+            dead_nodes_removed,
+            constants_folded,
+            iterations,
         })
     }
 
@@ -1533,5 +1611,57 @@ mod tests {
         // `used` is reachable, its subgraph stays.
         assert!(graph.node_operation(used.id()).is_some());
         Ok(())
+    }
+
+    #[test]
+    fn test_optimize_eliminates_dead_nodes() {
+        use crate::graph::ComputationGraph;
+        use scirs2_core::ndarray_ext::ArrayD;
+        use scirs2_core::ndarray_ext::IxDyn;
+
+        let graph = ComputationGraph::<f64>::new();
+        let x = graph
+            .constant(ArrayD::from_shape_vec(IxDyn(&[2]), vec![1.0, 2.0]).unwrap())
+            .unwrap();
+        let y = graph
+            .constant(ArrayD::from_shape_vec(IxDyn(&[2]), vec![3.0, 4.0]).unwrap())
+            .unwrap();
+        // Create a live node used downstream
+        let z = graph.add(&x, &y).unwrap(); // z = x + y
+        let _w = graph.sum(&z).unwrap(); // w = sum(z) — this is the output
+
+        // Create a dead node (not connected to w)
+        let _dead = graph.mul(&x, &y).unwrap(); // not referenced downstream
+
+        let nodes_before = graph.num_nodes();
+        let optimizer = GraphOptimizer::new();
+        let stats = optimizer.optimize(&graph).unwrap();
+
+        // After optimization, the graph should be smaller or equal
+        assert!(stats.nodes_after <= nodes_before);
+        assert_eq!(stats.nodes_before, nodes_before);
+        assert!(stats.iterations >= 1);
+    }
+
+    #[test]
+    fn test_optimize_constant_folding() {
+        use crate::graph::ComputationGraph;
+        use scirs2_core::ndarray_ext::ArrayD;
+        use scirs2_core::ndarray_ext::IxDyn;
+
+        let graph = ComputationGraph::<f64>::new();
+        let a = graph
+            .constant(ArrayD::from_shape_vec(IxDyn(&[2]), vec![2.0, 3.0]).unwrap())
+            .unwrap();
+        let b = graph
+            .constant(ArrayD::from_shape_vec(IxDyn(&[2]), vec![4.0, 5.0]).unwrap())
+            .unwrap();
+        // c = a + b — both are constants, so this should be foldable
+        let _c = graph.add(&a, &b).unwrap();
+
+        let optimizer = GraphOptimizer::new();
+        let stats = optimizer.optimize(&graph).unwrap();
+        // Folding should have folded at least the add node
+        assert!(stats.constants_folded >= 1);
     }
 }

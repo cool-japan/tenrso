@@ -2,9 +2,12 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use crate::api::{ContractionSpec, Plan, PlanHints, PlanNode, ReprHint};
-use crate::cost::{estimate_flops, TensorStats};
+#[cfg(test)]
+use crate::api::ReprHint;
+use crate::api::{ContractionSpec, Plan, PlanHints, PlanNode};
+use crate::cost::{estimate_flops, estimate_output_sparsity, TensorStats};
 use crate::parser::EinsumSpec;
+use crate::repr::{select_representation, ReprConfig};
 use anyhow::{anyhow, Result};
 use scirs2_core::random::{SeedableRng, StdRng};
 use std::collections::HashMap;
@@ -78,11 +81,7 @@ fn compute_pairwise_output_shape(
 /// # Complexity
 ///
 /// O(n^3) where n is the number of inputs (n-1 steps, each checking O(n^2) pairs)
-pub fn greedy_planner(
-    spec: &EinsumSpec,
-    shapes: &[Vec<usize>],
-    _hints: &PlanHints,
-) -> Result<Plan> {
+pub fn greedy_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -> Result<Plan> {
     if spec.num_inputs() != shapes.len() {
         return Err(anyhow!(
             "Number of inputs ({}) does not match shapes ({})",
@@ -96,7 +95,10 @@ pub fn greedy_planner(
         .zip(shapes.iter())
         .enumerate()
         .map(|(i, (indices, shape))| {
-            IntermediateTensor::from_input(indices.clone(), shape.clone(), i)
+            let sparsity = hints.sparsity_hints.get(&i).copied().unwrap_or(0.0);
+            let density = (1.0 - sparsity).clamp(0.0, 1.0);
+            let stats = TensorStats::with_density(shape.clone(), density);
+            IntermediateTensor::from_input_with_stats(indices.clone(), shape.clone(), i, stats)
         })
         .collect();
     let mut plan = Plan::new();
@@ -140,6 +142,16 @@ pub fn greedy_planner(
             a.original_idx.unwrap_or(1000 + i),
             b.original_idx.unwrap_or(1000 + j),
         ];
+        let output_density = {
+            let a_stats = a.stats.clone();
+            let b_stats = b.stats.clone();
+            match estimate_output_sparsity(&pairwise_spec, &[a_stats, b_stats]) {
+                Ok(sparsity) => (1.0 - sparsity).clamp(0.0, 1.0),
+                Err(_) => 1.0,
+            }
+        };
+        let output_stats = TensorStats::with_density(output_shape.clone(), output_density);
+        let output_repr = select_representation(&output_stats, &ReprConfig::default());
         let node = PlanNode {
             inputs: input_indices.clone(),
             output_spec: ContractionSpec::new(
@@ -148,13 +160,12 @@ pub fn greedy_planner(
             ),
             cost: best_cost,
             memory: output_shape.iter().product::<usize>() * 8,
-            repr: ReprHint::Auto,
+            repr: output_repr,
         };
         plan.nodes.push(node);
         total_flops += best_cost;
         peak_memory = peak_memory.max(output_shape.iter().product::<usize>() * 8);
         contraction_order.push(best_pair);
-        let output_stats = TensorStats::dense(output_shape.clone());
         let intermediate = IntermediateTensor::from_contraction(
             pairwise_spec.output.clone(),
             output_shape,
@@ -219,7 +230,10 @@ pub fn dp_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -
         .zip(shapes.iter())
         .enumerate()
         .map(|(i, (indices, shape))| {
-            IntermediateTensor::from_input(indices.clone(), shape.clone(), i)
+            let sparsity = hints.sparsity_hints.get(&i).copied().unwrap_or(0.0);
+            let density = (1.0 - sparsity).clamp(0.0, 1.0);
+            let stats = TensorStats::with_density(shape.clone(), density);
+            IntermediateTensor::from_input_with_stats(indices.clone(), shape.clone(), i, stats)
         })
         .collect();
     let num_states = 1 << n;
@@ -281,7 +295,16 @@ pub fn dp_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -
                 if let Ok(output_shape) =
                     compute_pairwise_output_shape(&pairwise_spec, tensor1, tensor2)
                 {
-                    let output_stats = TensorStats::dense(output_shape.clone());
+                    let output_density = {
+                        let s1 = tensor1.stats.clone();
+                        let s2 = tensor2.stats.clone();
+                        match estimate_output_sparsity(&pairwise_spec, &[s1, s2]) {
+                            Ok(sparsity) => (1.0 - sparsity).clamp(0.0, 1.0),
+                            Err(_) => 1.0,
+                        }
+                    };
+                    let output_stats =
+                        TensorStats::with_density(output_shape.clone(), output_density);
                     let intermediate = IntermediateTensor::from_contraction(
                         pairwise_spec.output.clone(),
                         output_shape,
@@ -324,6 +347,12 @@ pub fn dp_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -
         let cost = estimate_flops(&pairwise_spec, &stats)?;
         let memory = output_shape.iter().product::<usize>() * 8;
         *peak_memory = (*peak_memory).max(memory);
+        let output_density = match estimate_output_sparsity(&pairwise_spec, &stats) {
+            Ok(sparsity) => (1.0 - sparsity).clamp(0.0, 1.0),
+            Err(_) => 1.0,
+        };
+        let output_stats = TensorStats::with_density(output_shape.clone(), output_density);
+        let output_repr = select_representation(&output_stats, &ReprConfig::default());
         let mut input_indices = Vec::new();
         for i in 0..64 {
             if (submask & (1 << i)) != 0 {
@@ -343,7 +372,7 @@ pub fn dp_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -
             ),
             cost,
             memory,
-            repr: ReprHint::Auto,
+            repr: output_repr,
         };
         plan.nodes.push(node);
         Ok(())
@@ -385,7 +414,7 @@ pub fn dp_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -
 pub fn beam_search_planner(
     spec: &EinsumSpec,
     shapes: &[Vec<usize>],
-    _hints: &PlanHints,
+    hints: &PlanHints,
     beam_width: usize,
 ) -> Result<Plan> {
     if spec.num_inputs() != shapes.len() {
@@ -413,7 +442,10 @@ pub fn beam_search_planner(
         .zip(shapes.iter())
         .enumerate()
         .map(|(i, (indices, shape))| {
-            IntermediateTensor::from_input(indices.clone(), shape.clone(), i)
+            let sparsity = hints.sparsity_hints.get(&i).copied().unwrap_or(0.0);
+            let density = (1.0 - sparsity).clamp(0.0, 1.0);
+            let stats = TensorStats::with_density(shape.clone(), density);
+            IntermediateTensor::from_input_with_stats(indices.clone(), shape.clone(), i, stats)
         })
         .collect();
     #[derive(Clone)]
@@ -451,6 +483,18 @@ pub fn beam_search_planner(
                                     a.original_idx.unwrap_or(1000 + i),
                                     b.original_idx.unwrap_or(1000 + j),
                                 ];
+                                let output_density = {
+                                    let sa = a.stats.clone();
+                                    let sb = b.stats.clone();
+                                    match estimate_output_sparsity(&pairwise_spec, &[sa, sb]) {
+                                        Ok(sparsity) => (1.0 - sparsity).clamp(0.0, 1.0),
+                                        Err(_) => 1.0,
+                                    }
+                                };
+                                let output_stats =
+                                    TensorStats::with_density(output_shape.clone(), output_density);
+                                let output_repr =
+                                    select_representation(&output_stats, &ReprConfig::default());
                                 let node = PlanNode {
                                     inputs: input_indices,
                                     output_spec: ContractionSpec::new(
@@ -459,7 +503,7 @@ pub fn beam_search_planner(
                                     ),
                                     cost,
                                     memory: output_shape.iter().product::<usize>() * 8,
-                                    repr: ReprHint::Auto,
+                                    repr: output_repr,
                                 };
                                 new_candidate.plan.nodes.push(node);
                                 new_candidate.total_flops += cost;
@@ -467,7 +511,6 @@ pub fn beam_search_planner(
                                     .peak_memory
                                     .max(output_shape.iter().product::<usize>() * 8);
                                 new_candidate.plan.order.push((i, j));
-                                let output_stats = TensorStats::dense(output_shape.clone());
                                 let intermediate = IntermediateTensor::from_contraction(
                                     pairwise_spec.output.clone(),
                                     output_shape,
@@ -1505,5 +1548,76 @@ mod tests {
         let plan = genetic_algorithm_planner(&spec, &shapes, &hints, 20, 10, 0.2, 2).unwrap();
         assert_eq!(plan.nodes.len(), 0);
         assert_eq!(plan.estimated_flops, 0.0);
+    }
+
+    // ----- repr hint tests -----
+
+    #[test]
+    fn test_repr_hint_sparse_input() {
+        use crate::api::Planner;
+        use crate::order::GreedyPlanner;
+        // Two very sparse inputs (95% sparse) with large shapes → output should be Sparse
+        let mut hints = PlanHints::default();
+        hints.sparsity_hints.insert(0, 0.95);
+        hints.sparsity_hints.insert(1, 0.95);
+        let planner = GreedyPlanner::new();
+        let plan = planner
+            .make_plan("ij,jk->ik", &[vec![1000, 1000], vec![1000, 1000]], &hints)
+            .unwrap();
+        assert_eq!(plan.nodes.len(), 1);
+        // With 95% sparse inputs the output density ≈ 0.05*0.05 = 0.0025 (99.75% sparse),
+        // and size = 1_000_000 >= min_sparse_size(10_000) so repr must be Sparse.
+        assert_eq!(
+            plan.nodes[0].repr,
+            ReprHint::Sparse,
+            "Expected Sparse repr for highly-sparse inputs, got {:?}",
+            plan.nodes[0].repr
+        );
+    }
+
+    #[test]
+    fn test_repr_hint_dense_default() {
+        use crate::api::Planner;
+        use crate::order::GreedyPlanner;
+        // No sparsity hints → all dense → output should be Dense
+        let hints = PlanHints::default();
+        let planner = GreedyPlanner::new();
+        let plan = planner
+            .make_plan("ij,jk->ik", &[vec![10, 20], vec![20, 30]], &hints)
+            .unwrap();
+        assert_eq!(plan.nodes.len(), 1);
+        assert_eq!(
+            plan.nodes[0].repr,
+            ReprHint::Dense,
+            "Expected Dense repr for fully-dense inputs, got {:?}",
+            plan.nodes[0].repr
+        );
+    }
+
+    #[test]
+    fn test_repr_hint_lowrank_candidate() {
+        use crate::api::Planner;
+        use crate::order::GreedyPlanner;
+        // A very rectangular output shape triggers LowRank:
+        // input 0: "ij" shape [10000, 10] — rectangular, min/max ratio = 0.001 < 0.3
+        // input 1: "jk" shape [10, 10000]
+        // output "ik" shape [10000, 10000] — actually square, not rectangular.
+        // Instead use shapes that give a rectangular output:
+        // "ij,j->i" with shape [10000, 5] gives output shape [10000] — 1D, not ≥2D.
+        // Use "ij,jk->ik" where output is [10000, 10], ratio 10/10000 = 0.001 < 0.3
+        let hints = PlanHints::default();
+        let planner = GreedyPlanner::new();
+        let plan = planner
+            .make_plan("ij,jk->ik", &[vec![10_000, 10], vec![10, 10]], &hints)
+            .unwrap();
+        assert_eq!(plan.nodes.len(), 1);
+        // Output shape is [10000, 10]: min_dim=10, max_dim=10000, ratio=0.001 < 0.3
+        // size = 100000 >= 10000 → LowRank
+        assert_eq!(
+            plan.nodes[0].repr,
+            ReprHint::LowRank,
+            "Expected LowRank repr for rectangular output, got {:?}",
+            plan.nodes[0].repr
+        );
     }
 }

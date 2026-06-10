@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn test_svd_round_single_core_unchanged() {
         let core1 = Array3::<f64>::ones((1, 10, 1));
-        let original_norm = tt_norm_and_reconstruct(&[core1.clone()]);
+        let original_norm = tt_norm_and_reconstruct(std::slice::from_ref(&core1));
 
         let mut cores = vec![core1];
         tt_round(&mut cores, Some(5), 1e-6).unwrap();

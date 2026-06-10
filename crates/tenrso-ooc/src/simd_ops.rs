@@ -182,6 +182,15 @@ pub fn simd_max_f64(a: &[f64]) -> f64 {
 // AVX2 Implementations (x86_64)
 // ============================================================================
 
+// SAFETY for all `#[target_feature(enable = "avx2")] unsafe fn` below:
+// Each function is only called from its corresponding safe wrapper after the wrapper
+// verifies `is_x86_feature_detected!("avx2")` (and "fma" for the FMA variant) at
+// runtime. `#[target_feature(enable = "avx2")]` makes the AVX2 instruction set
+// available to the compiler for the function body. Slice lengths are checked (via
+// assert_eq!) by the public-facing safe wrappers before delegation, so pointer
+// arithmetic inside the function never exceeds the slice bounds.
+// Violating this: calling these functions directly without a CPU-feature check, or
+// passing mismatched slice lengths (which is prevented by the assert_eq! guards).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn simd_add_f64_avx2(a: &[f64], b: &[f64], dst: &mut [f64]) {

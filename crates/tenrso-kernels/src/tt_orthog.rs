@@ -153,6 +153,7 @@ where
 /// # Returns
 ///
 /// * `(Q, R)` - Orthogonal matrix Q and upper triangular R
+///
 /// Performs thin QR via SVD: `M = U · diag(S) · Vt = Q · R`.
 ///
 /// Returns `(Q, R)` where Q has orthonormal columns (Q^T Q = I) and R = diag(S) · Vt.

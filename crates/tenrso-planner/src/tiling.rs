@@ -488,6 +488,318 @@ pub fn compute_matmul_multilevel_blocks(
     ((l1_m, l1_k, l1_n), (l2_m, l2_k, l2_n), (l3_m, l3_k, l3_n))
 }
 
+// ============================================================================
+// Cache-Oblivious Tiling (Frigo et al., FOCS 1999)
+// ============================================================================
+
+/// Cache-oblivious tile specification for N-dimensional tensor iteration.
+///
+/// Unlike cache-aware tiling (which requires knowing cache sizes), this uses
+/// recursive dimension halving that achieves optimal cache utilization for any
+/// cache size Z without knowing Z a priori.  For a 2D array of side n the
+/// resulting traversal order guarantees O(n²/sqrt(Z)) cache misses vs
+/// O(n³/Z) for row-major traversal — a sqrt(Z) improvement independent of
+/// element type.
+///
+/// The recursion is implemented with an explicit stack to avoid stack overflow
+/// on large tensors (never uses actual function-call recursion).
+///
+/// Reference: Frigo, Leiserson, Prokop, Ramachandran,
+/// "Cache-Oblivious Algorithms", FOCS 1999.
+#[derive(Debug, Clone)]
+pub struct CacheObliviousTileSpec {
+    /// Shape of the tensor being tiled (one entry per dimension).
+    pub shape: Vec<usize>,
+    /// Base case threshold in elements — when the remaining tile volume is
+    /// ≤ this value the tile is emitted rather than subdivided further.
+    ///
+    /// Default: 256 (aligns with typical L1 cache-line granularity for f32/f64).
+    pub base_threshold: usize,
+    /// Bytes per element (used only for `memory_per_base_tile` reporting).
+    pub bytes_per_element: usize,
+}
+
+impl CacheObliviousTileSpec {
+    /// Default base threshold: 256 elements.
+    pub const DEFAULT_BASE_THRESHOLD: usize = 256;
+
+    /// Create a spec with default base threshold (256 elements).
+    pub fn new(shape: &[usize], bytes_per_element: usize) -> Self {
+        Self {
+            shape: shape.to_vec(),
+            base_threshold: Self::DEFAULT_BASE_THRESHOLD,
+            bytes_per_element,
+        }
+    }
+
+    /// Create a spec with a custom base threshold.
+    pub fn with_base_threshold(
+        shape: &[usize],
+        bytes_per_element: usize,
+        base_threshold: usize,
+    ) -> Self {
+        Self {
+            shape: shape.to_vec(),
+            base_threshold: base_threshold.max(1),
+            bytes_per_element,
+        }
+    }
+
+    /// Estimated bytes in a single base tile.
+    ///
+    /// Returns `base_threshold * bytes_per_element`, capped at the full tensor
+    /// size so the value is never misleadingly large for small tensors.
+    pub fn memory_per_base_tile(&self) -> usize {
+        let total_elements: usize = self.shape.iter().product();
+        let tile_elements = self.base_threshold.min(total_elements);
+        tile_elements * self.bytes_per_element
+    }
+
+    /// Build an iterator that yields tiles in cache-oblivious (DFS recursive
+    /// half-split) order.
+    ///
+    /// Each yielded item is `Vec<(usize, usize)>` — one `(start, end)` range
+    /// per dimension.  The ranges are half-open: `start..end`.
+    pub fn iter_tiles(&self) -> CacheObliviousIter {
+        if self.shape.contains(&0) {
+            // Empty tensor: return an immediately-exhausted iterator.
+            return CacheObliviousIter {
+                stack: Vec::new(),
+                base_threshold: self.base_threshold,
+            };
+        }
+        let lo = vec![0usize; self.shape.len()];
+        let hi = self.shape.clone();
+        CacheObliviousIter {
+            stack: vec![(lo, hi)],
+            base_threshold: self.base_threshold,
+        }
+    }
+
+    /// Total number of base tiles produced by `iter_tiles()`.
+    ///
+    /// Computed as the ceiling-division of each dimension by the per-dimension
+    /// effective tile size, which is estimated as the `base_threshold`-th root
+    /// of the threshold volume.  This is an upper bound; actual tile count
+    /// matches for power-of-two shapes.
+    pub fn total_tiles(&self) -> usize {
+        if self.shape.is_empty() {
+            return 0;
+        }
+        let ndim = self.shape.len();
+        // Estimate tile size per dimension: threshold^(1/ndim), floored to ≥1.
+        let per_dim = (self.base_threshold as f64).powf(1.0 / ndim as f64).floor() as usize;
+        let per_dim = per_dim.max(1);
+        self.shape.iter().map(|&d| d.div_ceil(per_dim)).product()
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Iterator over N-dimensional tiles in cache-oblivious order.
+///
+/// Produced by [`CacheObliviousTileSpec::iter_tiles`].
+///
+/// Each item is `Vec<(usize, usize)>` — one half-open `[start, end)` range
+/// per dimension.
+///
+/// The traversal is a depth-first halving of the dimension with the largest
+/// current extent.  An explicit stack replaces function-call recursion so
+/// arbitrarily large tensors never overflow the call stack.
+pub struct CacheObliviousIter {
+    /// Stack entries: (lo_per_dim, hi_per_dim).
+    stack: Vec<(Vec<usize>, Vec<usize>)>,
+    base_threshold: usize,
+}
+
+impl Iterator for CacheObliviousIter {
+    type Item = Vec<(usize, usize)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let (lo, hi) = self.stack.pop()?;
+
+            // Compute the volume of this sub-region.
+            let volume: usize = lo
+                .iter()
+                .zip(hi.iter())
+                .map(|(l, h)| h.saturating_sub(*l))
+                .product();
+
+            if volume == 0 {
+                // Degenerate region; skip and try the next stack entry.
+                continue;
+            }
+
+            if volume <= self.base_threshold {
+                // Base case: emit this tile.
+                return Some(lo.iter().zip(hi.iter()).map(|(&l, &h)| (l, h)).collect());
+            }
+
+            // Recursive case: find the dimension with the largest extent and
+            // split it at the midpoint.
+            let (split_dim, max_ext) = lo
+                .iter()
+                .zip(hi.iter())
+                .map(|(l, h)| h - l)
+                .enumerate()
+                .max_by_key(|&(_, ext)| ext)
+                .unwrap(); // safe: volume > 0 guarantees at least one dim > 0
+
+            debug_assert!(max_ext >= 2, "max_ext={max_ext}, volume={volume}");
+
+            let mid = lo[split_dim] + max_ext / 2;
+
+            // First half:  lo unchanged, hi[split_dim] = mid
+            let mut hi_first = hi.clone();
+            hi_first[split_dim] = mid;
+
+            // Second half: lo[split_dim] = mid, hi unchanged
+            let mut lo_second = lo.clone();
+            lo_second[split_dim] = mid;
+
+            // Push second half FIRST so that first half is popped first
+            // (stack is LIFO — last-pushed = first-popped).
+            self.stack.push((lo_second, hi));
+            self.stack.push((lo, hi_first));
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+
+/// One leaf block in a cache-oblivious matrix multiplication decomposition.
+///
+/// Represents the sub-problem: `C[m_range, n_range] += A[m_range, k_range] × B[k_range, n_range]`.
+///
+/// All ranges are half-open `[start, end)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatmulCacheObliviousBlock {
+    /// Row range in A and C.
+    pub m_range: (usize, usize),
+    /// Shared (contraction) dimension range in A and B.
+    pub k_range: (usize, usize),
+    /// Column range in B and C.
+    pub n_range: (usize, usize),
+}
+
+impl MatmulCacheObliviousBlock {
+    /// Number of rows in this block.
+    #[inline]
+    pub fn m_size(&self) -> usize {
+        self.m_range.1 - self.m_range.0
+    }
+
+    /// Size of the contraction dimension in this block.
+    #[inline]
+    pub fn k_size(&self) -> usize {
+        self.k_range.1 - self.k_range.0
+    }
+
+    /// Number of columns in this block.
+    #[inline]
+    pub fn n_size(&self) -> usize {
+        self.n_range.1 - self.n_range.0
+    }
+}
+
+/// Compute the cache-oblivious block sequence for `C = A × B`
+/// where `A` is `m × k` and `B` is `k × n` (output `C` is `m × n`).
+///
+/// Returns blocks in depth-first recursive-halving order (Frigo et al. 1999).
+/// Each block can be executed independently as an accumulation:
+/// ```text
+/// C[m_range, n_range] += A[m_range, k_range] × B[k_range, n_range]
+/// ```
+///
+/// The split rule at each level:
+/// - If `m` is the largest dimension → split `m`.
+/// - Else if `n` is the largest → split `n`.
+/// - Otherwise (`k` is the largest) → split `k`.
+///
+/// When `k` is split the **two sub-problems share the same output tile** and
+/// must both be applied (their partial products are accumulated into C).
+///
+/// # Arguments
+///
+/// * `m` — number of rows in A / C.
+/// * `k` — shared (contraction) dimension.
+/// * `n` — number of columns in B / C.
+/// * `base_threshold` — element count (using `m*k + k*n + m*n` as the metric)
+///   at which recursion stops.  A value of `256` is appropriate for f32/f64.
+///   Pass `usize::MAX` to get a single block with no subdivision.
+///
+/// # Cache complexity
+///
+/// O(mn·k / (L · sqrt(Z))) cache misses for any fully-associative LRU cache
+/// of size Z with cache-line size L.
+///
+/// # Panics
+///
+/// Never panics.  Returns an empty `Vec` if any dimension is zero.
+pub fn matmul_cache_oblivious_sequence(
+    m: usize,
+    k: usize,
+    n: usize,
+    base_threshold: usize,
+) -> Vec<MatmulCacheObliviousBlock> {
+    if m == 0 || k == 0 || n == 0 {
+        return Vec::new();
+    }
+
+    let threshold = base_threshold.max(1);
+    // Worst-case capacity: O(m*k*n / threshold) — pre-allocate conservatively.
+    let mut result: Vec<MatmulCacheObliviousBlock> = Vec::new();
+
+    // Stack entries: (m0, m1, k0, k1, n0, n1)
+    let mut stack: Vec<(usize, usize, usize, usize, usize, usize)> = vec![(0, m, 0, k, 0, n)];
+
+    while let Some((m0, m1, k0, k1, n0, n1)) = stack.pop() {
+        let dm = m1 - m0;
+        let dk = k1 - k0;
+        let dn = n1 - n0;
+
+        // Use the combined footprint metric: memory touched by A + B + C tiles.
+        let total = dm
+            .saturating_mul(dk)
+            .saturating_add(dk.saturating_mul(dn))
+            .saturating_add(dm.saturating_mul(dn));
+
+        if total == 0 {
+            continue;
+        }
+
+        if total <= threshold {
+            result.push(MatmulCacheObliviousBlock {
+                m_range: (m0, m1),
+                k_range: (k0, k1),
+                n_range: (n0, n1),
+            });
+            continue;
+        }
+
+        // Split the largest dimension.
+        if dm >= dk && dm >= dn {
+            // Split m.
+            let mid = m0 + dm / 2;
+            stack.push((mid, m1, k0, k1, n0, n1)); // second half first
+            stack.push((m0, mid, k0, k1, n0, n1)); // first half last → popped first
+        } else if dn >= dm && dn >= dk {
+            // Split n.
+            let mid = n0 + dn / 2;
+            stack.push((m0, m1, k0, k1, mid, n1));
+            stack.push((m0, m1, k0, k1, n0, mid));
+        } else {
+            // Split k.
+            let mid = k0 + dk / 2;
+            stack.push((m0, m1, mid, k1, n0, n1));
+            stack.push((m0, m1, k0, mid, n0, n1));
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,5 +1122,208 @@ mod tests {
         assert!(l3.0 <= 100);
         assert!(l3.1 <= 2000);
         assert!(l3.2 <= 500);
+    }
+
+    // ========================================================================
+    // Tests for Cache-Oblivious Tiling (Frigo et al., FOCS 1999)
+    // ========================================================================
+
+    mod cache_oblivious_tests {
+        use super::*;
+
+        /// Build a coverage bitmap and verify every position is hit exactly once.
+        fn check_2d_coverage(tiles: &[Vec<(usize, usize)>], rows: usize, cols: usize) {
+            let mut hits = vec![0u32; rows * cols];
+            for tile in tiles {
+                let (r0, r1) = tile[0];
+                let (c0, c1) = tile[1];
+                for r in r0..r1 {
+                    for c in c0..c1 {
+                        hits[r * cols + c] += 1;
+                    }
+                }
+            }
+            for (idx, &h) in hits.iter().enumerate() {
+                assert_eq!(
+                    h,
+                    1,
+                    "position ({}, {}) hit {} times",
+                    idx / cols,
+                    idx % cols,
+                    h
+                );
+            }
+        }
+
+        /// Build a coverage bitmap for a 3-D tensor and verify each position is
+        /// hit exactly once.
+        fn check_3d_coverage(tiles: &[Vec<(usize, usize)>], d0: usize, d1: usize, d2: usize) {
+            let mut hits = vec![0u32; d0 * d1 * d2];
+            for tile in tiles {
+                let (a0, a1) = tile[0];
+                let (b0, b1) = tile[1];
+                let (c0, c1) = tile[2];
+                for a in a0..a1 {
+                    for b in b0..b1 {
+                        for c in c0..c1 {
+                            hits[a * d1 * d2 + b * d2 + c] += 1;
+                        }
+                    }
+                }
+            }
+            for (idx, &h) in hits.iter().enumerate() {
+                let a = idx / (d1 * d2);
+                let rem = idx % (d1 * d2);
+                let b = rem / d2;
+                let c = rem % d2;
+                assert_eq!(h, 1, "position ({a},{b},{c}) hit {h} times");
+            }
+        }
+
+        #[test]
+        fn test_cache_oblivious_iter_2d() {
+            // 8×8 tensor with threshold=4 → tiles of ≤4 elements.
+            let spec = CacheObliviousTileSpec::with_base_threshold(&[8, 8], 8, 4);
+            let tiles: Vec<_> = spec.iter_tiles().collect();
+
+            // Verify complete, non-overlapping coverage.
+            check_2d_coverage(&tiles, 8, 8);
+
+            // Sanity: every tile should have ≤4 elements.
+            for tile in &tiles {
+                let vol: usize = tile.iter().map(|(lo, hi)| hi - lo).product();
+                assert!(vol <= 4, "tile volume {vol} exceeds threshold 4");
+            }
+        }
+
+        #[test]
+        fn test_cache_oblivious_iter_3d() {
+            // 4×4×4 tensor with threshold=8.
+            let spec = CacheObliviousTileSpec::with_base_threshold(&[4, 4, 4], 8, 8);
+            let tiles: Vec<_> = spec.iter_tiles().collect();
+
+            check_3d_coverage(&tiles, 4, 4, 4);
+
+            for tile in &tiles {
+                let vol: usize = tile.iter().map(|(lo, hi)| hi - lo).product();
+                assert!(vol <= 8, "tile volume {vol} exceeds threshold 8");
+            }
+        }
+
+        #[test]
+        fn test_cache_oblivious_spec_new() {
+            let spec = CacheObliviousTileSpec::new(&[100, 100], 8);
+
+            // total_tiles should be at least 2 for a 100×100 tensor with default
+            // threshold=256 (each "tile" covers at most 256 elements → ≥ 40 tiles).
+            assert!(
+                spec.total_tiles() > 1,
+                "expected >1 tile, got {}",
+                spec.total_tiles()
+            );
+
+            // memory_per_base_tile: min(256, 10_000) * 8 = 2_048 bytes.
+            let mpt = spec.memory_per_base_tile();
+            assert!(mpt > 0, "memory_per_base_tile must be positive");
+            assert!(
+                mpt <= 100 * 100 * 8,
+                "memory_per_base_tile exceeds full tensor"
+            );
+
+            // Verify the iterator still covers everything fully.
+            let tiles: Vec<_> = spec.iter_tiles().collect();
+            check_2d_coverage(&tiles, 100, 100);
+        }
+
+        #[test]
+        fn test_matmul_co_sequence_coverage() {
+            // 8×8×8 matmul with threshold=64 (= full tensor footprint of 8*8+8*8+8*8=192? No:
+            // 8*8 + 8*8 + 8*8 = 192 > 64, so we do get multiple blocks).
+            let blocks = matmul_cache_oblivious_sequence(8, 8, 8, 64);
+            assert!(!blocks.is_empty());
+
+            // Build a 3-D hit count [m][k][n].
+            let m = 8usize;
+            let k = 8usize;
+            let n = 8usize;
+            let mut hits = vec![0u32; m * k * n];
+            for blk in &blocks {
+                for mi in blk.m_range.0..blk.m_range.1 {
+                    for ki in blk.k_range.0..blk.k_range.1 {
+                        for ni in blk.n_range.0..blk.n_range.1 {
+                            hits[mi * k * n + ki * n + ni] += 1;
+                        }
+                    }
+                }
+            }
+            for (idx, &h) in hits.iter().enumerate() {
+                let mi = idx / (k * n);
+                let rem = idx % (k * n);
+                let ki = rem / n;
+                let ni = rem % n;
+                assert_eq!(
+                    h, 1,
+                    "(m={mi},k={ki},n={ni}) covered {h} times (expected exactly 1)"
+                );
+            }
+        }
+
+        #[test]
+        fn test_matmul_co_sequence_small() {
+            // threshold larger than the full problem → should emit exactly one block
+            // covering the entire 2×2×2 space.
+            let blocks = matmul_cache_oblivious_sequence(2, 2, 2, 100);
+            assert_eq!(
+                blocks.len(),
+                1,
+                "expected exactly 1 block, got {}",
+                blocks.len()
+            );
+            assert_eq!(
+                blocks[0],
+                MatmulCacheObliviousBlock {
+                    m_range: (0, 2),
+                    k_range: (0, 2),
+                    n_range: (0, 2),
+                }
+            );
+        }
+
+        #[test]
+        fn test_matmul_co_sequence_asymmetric() {
+            // 16×4×8 with threshold=32 → footprint at root = 16*4+4*8+16*8 = 64+32+128 = 224 > 32
+            // so multiple blocks are expected.
+            let blocks = matmul_cache_oblivious_sequence(16, 4, 8, 32);
+            assert!(
+                blocks.len() > 1,
+                "expected >1 block for asymmetric 16×4×8, got {}",
+                blocks.len()
+            );
+
+            // Verify total coverage: each (m,k,n) triple must appear exactly once.
+            let m = 16usize;
+            let k = 4usize;
+            let n = 8usize;
+            let mut hits = vec![0u32; m * k * n];
+            for blk in &blocks {
+                for mi in blk.m_range.0..blk.m_range.1 {
+                    for ki in blk.k_range.0..blk.k_range.1 {
+                        for ni in blk.n_range.0..blk.n_range.1 {
+                            hits[mi * k * n + ki * n + ni] += 1;
+                        }
+                    }
+                }
+            }
+            for (idx, &h) in hits.iter().enumerate() {
+                let mi = idx / (k * n);
+                let rem = idx % (k * n);
+                let ki = rem / n;
+                let ni = rem % n;
+                assert_eq!(
+                    h, 1,
+                    "(m={mi},k={ki},n={ni}) covered {h} times (expected exactly 1)"
+                );
+            }
+        }
     }
 }

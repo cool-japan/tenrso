@@ -32,6 +32,7 @@ ooc = ["dep:tenrso-ooc"]
 
 [dev-dependencies]
 criterion.workspace = true
+proptest.workspace = true
 
 [[bench]]
 name = "executor_ops"

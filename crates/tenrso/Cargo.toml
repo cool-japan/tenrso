@@ -32,6 +32,10 @@ tenrso-ad = { workspace = true, optional = true }
 # Utilities (for examples)
 anyhow.workspace = true
 
+[dev-dependencies]
+scirs2-core = { workspace = true }
+tenrso-ad = { workspace = true }
+
 [features]
 default = ["ooc"]
 # Enable out-of-core processing (Arrow, Parquet, mmap)

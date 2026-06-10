@@ -226,8 +226,8 @@
   - [x] 3D reconstruction tests
   - [x] Error cases (invalid modes, mismatched dims)
 
-- [ ] Parallel mode application - Future
-- [ ] Fused multi-mode products - Future
+- [x] Parallel mode application - ✅ DONE (2026-06-10) (`nmode_product_parallel`, `nmode_products_parallel`, `tucker_operator_parallel`, feature `parallel`)
+- [x] Fused multi-mode products - ✅ DONE (2026-06-10) (`tucker_reconstruct_fused`, `tucker_reconstruct_fused_parallel`)
 - [ ] Memory-efficient intermediate tensors - Future
 
 ---

@@ -42,10 +42,15 @@ fn test_cp_als_rank1_exact() {
         }
     }
 
-    // For a rank-1 tensor, reconstruction exists
-    // Note: Current solver is a placeholder, so reconstruction quality is limited
-    // TODO: Improve when proper linear solver is integrated
-    assert!(reconstructed.shape() == tensor.shape());
+    // A rank-1 tensor decomposed with rank=1 should reconstruct nearly perfectly.
+    // The relative error max_error / tensor_max should be < 1%.
+    let tensor_max = 5.0 * 5.0 * 5.0; // (i+1)*(j+1)*(k+1) max with size=5
+    assert!(
+        max_error / tensor_max < 0.01,
+        "rank-1 reconstruction relative error {:.6} too large",
+        max_error / tensor_max
+    );
+    assert!(reconstructed.shape() == tensor.shape()); // keep shape check too
 }
 
 #[test]
@@ -174,9 +179,8 @@ fn test_cp_tucker_comparison() {
     // Tucker error should be reasonable
     assert!(tucker_error < 1.0);
 
-    // CP error may be higher due to placeholder solver
-    // TODO: Verify cp_error < 1.0 when proper solver is integrated
-    assert!(cp_error >= 0.0);
+    // CP error must be below 1.0 — a reconstruction worse than the zero tensor is unacceptable.
+    assert!(cp_error < 1.0, "cp_error = {}", cp_error);
 }
 
 #[test]
@@ -189,10 +193,12 @@ fn test_cp_als_convergence() {
     // Should complete some iterations
     assert!(cp.iters > 0 && cp.iters <= 50);
 
-    // Fit should be non-negative
-    // Note: Placeholder solver may give 0.0 fit initially
-    // TODO: Verify cp.fit > 0.0 when proper linear solver is integrated
-    assert!(cp.fit >= 0.0 && cp.fit <= 1.0, "Fit: {}", cp.fit);
+    // Fit must be strictly positive — the production solver should make real progress.
+    assert!(
+        cp.fit > 0.0 && cp.fit <= 1.0,
+        "Fit on 4×4×4 tensor, rank 2: {}",
+        cp.fit
+    );
 }
 
 #[test]

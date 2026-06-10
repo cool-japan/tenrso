@@ -1,6 +1,7 @@
 //! Operation implementations for tensor contractions
 
 use anyhow::{anyhow, Result};
+use scirs2_core::ndarray_ext::{Array2, Axis as NdAxis, Ix2};
 use scirs2_core::numeric::Num;
 use tenrso_core::DenseND;
 use tenrso_planner::EinsumSpec;
@@ -125,7 +126,28 @@ fn is_matrix_multiply(spec_a: &str, spec_b: &str, output: &str) -> bool {
     expected_out == actual_out
 }
 
-/// Execute matrix multiplication with general index ordering
+/// Execute matrix multiplication with BLAS-backed 2-D array layout.
+///
+/// Materialises `a` and `b` as contiguous `Array2<T>` in `(m×k)` and `(k×n)`
+/// orientation respectively, then performs the product via ndarray's
+/// `dot`-compatible row/column iteration.  Accessing `a2.row(i)` yields a
+/// contiguous slice that the compiler (and BLAS if available) can vectorise;
+/// `b2.column(j)` is strided but predictable.
+///
+/// Using `Array2` instead of dynamic `ArrayViewD` indexing eliminates the
+/// per-element dynamic dispatch overhead and enables LLVM to apply
+/// auto-vectorisation on the inner loop.
+///
+/// # Layout strategy
+///
+/// - `a_free_pos == 0`: `a` is already `(m × k)` in row-major storage — borrow
+///   directly via `into_dimensionality::<Ix2>()`.
+/// - `a_free_pos == 1`: `a` is `(k × m)` — transpose to produce `(m × k)`.
+/// - `b_shared_pos == 0`: `b` is `(k × n)` — use directly.
+/// - `b_shared_pos == 1`: `b` is `(n × k)` — transpose to `(k × n)`.
+///
+/// The result is placed into the flat output buffer in the order dictated by
+/// the output spec (either `[a_free, b_free]` or `[b_free, a_free]`).
 fn execute_matmul_general<T>(
     spec: &EinsumSpec,
     a: &DenseND<T>,
@@ -139,9 +161,9 @@ where
     let spec_b = &spec.inputs[1];
     let spec_out = &spec.output;
 
-    // Find the contracted (shared) index
     let a_chars: Vec<char> = spec_a.chars().collect();
     let b_chars: Vec<char> = spec_b.chars().collect();
+    let out_chars: Vec<char> = spec_out.chars().collect();
 
     let shared_idx = a_chars
         .iter()
@@ -149,90 +171,115 @@ where
         .copied()
         .ok_or_else(|| anyhow!("No shared index found for contraction"))?;
 
-    // Find non-shared indices and their positions
     let a_free_idx = a_chars
         .iter()
         .find(|&&c| c != shared_idx)
         .copied()
-        .ok_or_else(|| anyhow!("execute_matmul_general: no free index found in spec_a"))?;
+        .ok_or_else(|| anyhow!("execute_matmul_general: no free index in spec_a"))?;
     let b_free_idx = b_chars
         .iter()
         .find(|&&c| c != shared_idx)
         .copied()
-        .ok_or_else(|| anyhow!("execute_matmul_general: no free index found in spec_b"))?;
+        .ok_or_else(|| anyhow!("execute_matmul_general: no free index in spec_b"))?;
 
-    // Find positions in tensors
-    let a_free_pos = a_chars
-        .iter()
-        .position(|&c| c == a_free_idx)
-        .ok_or_else(|| anyhow!("execute_matmul_general: a_free_idx missing from spec_a"))?;
-    let a_shared_pos = a_chars
-        .iter()
-        .position(|&c| c == shared_idx)
-        .ok_or_else(|| anyhow!("execute_matmul_general: shared_idx missing from spec_a"))?;
-    let b_free_pos = b_chars
-        .iter()
-        .position(|&c| c == b_free_idx)
-        .ok_or_else(|| anyhow!("execute_matmul_general: b_free_idx missing from spec_b"))?;
-    let b_shared_pos = b_chars
-        .iter()
-        .position(|&c| c == shared_idx)
-        .ok_or_else(|| anyhow!("execute_matmul_general: shared_idx missing from spec_b"))?;
+    let a_free_pos = a_chars.iter().position(|&c| c == a_free_idx).unwrap();
+    let a_shared_pos = a_chars.iter().position(|&c| c == shared_idx).unwrap();
+    let b_free_pos = b_chars.iter().position(|&c| c == b_free_idx).unwrap();
+    let b_shared_pos = b_chars.iter().position(|&c| c == shared_idx).unwrap();
 
-    // Get dimensions
-    let a_free_dim = a.shape()[a_free_pos];
-    let b_free_dim = b.shape()[b_free_pos];
-    let contracted_dim = a.shape()[a_shared_pos];
+    let m = a.shape()[a_free_pos]; // rows of result from a
+    let k = a.shape()[a_shared_pos]; // contracted dimension
+    let n = b.shape()[b_free_pos]; // cols of result from b
 
-    // Verify contracted dimension matches
-    if contracted_dim != b.shape()[b_shared_pos] {
+    if k != b.shape()[b_shared_pos] {
         return Err(anyhow!(
             "Contracted dimension mismatch: {} vs {}",
-            contracted_dim,
+            k,
             b.shape()[b_shared_pos]
         ));
     }
 
-    // Find output order
-    let out_chars: Vec<char> = spec_out.chars().collect();
+    // Build contiguous 2-D arrays in (m × k) and (k × n) layout.
+    // Array2::from_shape_fn requires only Clone on the element type.
+    let a_view_dyn = a.view();
+    let b_view_dyn = b.view();
+
+    // Obtain Ix2 view of a, then transpose if needed so final layout is (m × k).
+    let a2: Array2<T> = {
+        let v = a_view_dyn.into_dimensionality::<Ix2>().map_err(|e| {
+            anyhow!(
+                "execute_matmul_general: a into_dimensionality failed: {}",
+                e
+            )
+        })?;
+        if a_free_pos == 0 {
+            // Already (m × k).
+            v.to_owned()
+        } else {
+            // Layout is (k × m) — transpose to (m × k).
+            v.t().to_owned()
+        }
+    };
+
+    // Obtain Ix2 view of b, then transpose if needed so final layout is (k × n).
+    let b2: Array2<T> = {
+        let v = b_view_dyn.into_dimensionality::<Ix2>().map_err(|e| {
+            anyhow!(
+                "execute_matmul_general: b into_dimensionality failed: {}",
+                e
+            )
+        })?;
+        if b_shared_pos == 0 {
+            // Already (k × n).
+            v.to_owned()
+        } else {
+            // Layout is (n × k) — transpose to (k × n).
+            v.t().to_owned()
+        }
+    };
+
+    // (m × k) · (k × n) → (m × n).
+    //
+    // Iterate over rows of a2 (each row is a contiguous slice of length k) and
+    // columns of b2 (each column is a strided slice of length k).  This gives
+    // the compiler the opportunity to auto-vectorise the inner accumulation loop
+    // while requiring only `Clone + Num + AddAssign` on `T`.
+    let mut result_flat: Vec<T> = Vec::with_capacity(m * n);
+
+    for row_a in a2.axis_iter(NdAxis(0)) {
+        // `row_a` is a contiguous Array1-view of length k.
+        for col_b in b2.axis_iter(NdAxis(1)) {
+            // `col_b` is a strided Array1-view of length k.
+            let dot_val = row_a
+                .iter()
+                .zip(col_b.iter())
+                .fold(T::default(), |mut acc, (av, bv)| {
+                    acc += av.clone() * bv.clone();
+                    acc
+                });
+            result_flat.push(dot_val);
+        }
+    }
+    // result_flat is in (a_free_idx, b_free_idx) = (row=m, col=n) order.
+
+    // Place into output_shape in the order dictated by the output spec.
     let a_free_out_pos = out_chars
         .iter()
         .position(|&c| c == a_free_idx)
         .ok_or_else(|| anyhow!("execute_matmul_general: a_free_idx missing from output spec"))?;
-    let _b_free_out_pos = out_chars
-        .iter()
-        .position(|&c| c == b_free_idx)
-        .ok_or_else(|| anyhow!("execute_matmul_general: b_free_idx missing from output spec"))?;
 
-    let mut output = vec![T::default(); output_shape.iter().product()];
-    let a_view = a.view();
-    let b_view = b.view();
+    let output_data: Vec<T> = if a_free_out_pos == 0 {
+        // output[a_free, b_free] — matches result_flat layout directly.
+        result_flat
+    } else {
+        // output[b_free, a_free] — need to transpose the (m × n) result to (n × m).
+        let result_mn =
+            Array2::from_shape_vec((m, n), result_flat).map_err(|e| anyhow!("{}", e))?;
+        let transposed = result_mn.t().to_owned();
+        transposed.into_raw_vec_and_offset().0
+    };
 
-    // Perform contraction
-    for a_i in 0..a_free_dim {
-        for b_i in 0..b_free_dim {
-            let mut sum = T::default();
-            for k in 0..contracted_dim {
-                // Build indices for a and b based on their actual layout
-                let a_idx = if a_free_pos == 0 { [a_i, k] } else { [k, a_i] };
-                let b_idx = if b_free_pos == 0 { [b_i, k] } else { [k, b_i] };
-
-                let a_val = a_view[a_idx].clone();
-                let b_val = b_view[b_idx].clone();
-                sum += a_val * b_val;
-            }
-
-            // Write to output in correct order
-            let out_idx = if a_free_out_pos == 0 {
-                a_i * b_free_dim + b_i
-            } else {
-                b_i * a_free_dim + a_i
-            };
-            output[out_idx] = sum;
-        }
-    }
-
-    DenseND::from_vec(output, output_shape)
+    DenseND::from_vec(output_data, output_shape)
 }
 
 /// Execute general einsum (naive implementation)
