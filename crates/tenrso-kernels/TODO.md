@@ -406,8 +406,8 @@
 
 - [x] SIMD inner loops for MTTKRP fused kernel (2026-04-14)
 - [ ] Fully fused + cache-blocking combined variant
-- [ ] Parallel Tucker mode application
-- [ ] Fused multi-mode products
+- [x] Parallel Tucker mode application — Complete (2026-06-10, `nmode_product_parallel`, `nmode_products_parallel`, `tucker_operator_parallel`, `feature = "parallel"`)
+- [x] Fused multi-mode products — Complete (2026-06-10, `tucker_reconstruct_fused` + `tucker_reconstruct_fused_parallel`; avoids all N-1 intermediate tensor allocations)
 - [ ] Flamegraph profiling / cache miss analysis
 
 ---
