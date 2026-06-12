@@ -9,6 +9,15 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
 
 ---
 
+## Stubs to implement (added 2026-06-12 by /cooljapan-stub-check)
+
+- [ ] `tenrso-ooc`: `crates/tenrso-ooc/src/gpu.rs:525` — implement GPU device enumeration when backends are available (currently TODO comment only)
+  - Priority: P2 | Scope: medium | Hint: oxicuda
+- [ ] `tenrso-exec`: `crates/tenrso-exec/src/ops.rs:66` — optimize einsum general-case with blocked/tiled execution and OxiBLAS (currently naive nested loop)
+  - Priority: P2 | Scope: medium | Hint: oxiblas
+- [ ] `tenrso-ad`: `crates/tenrso-ad/src/hooks.rs:251` — register einsum, decomposition gradient hooks with Tensorlogic AD system
+  - Priority: P2 | Scope: medium | Hint: none
+
 ## Alpha.2 Release Highlights (2025-12-16)
 
 ### Documentation Quality Improvements ✅
