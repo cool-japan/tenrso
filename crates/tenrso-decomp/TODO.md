@@ -1739,7 +1739,7 @@ According to project policy ("Single code should be less than 2000 lines"), the 
 
 **Command for refactoring** (when desired):
 ```bash
-cd /Users/kitasan/work/tenrso/crates/tenrso-decomp
+cd crates/tenrso-decomp
 splitrs --help  # See options
 ```
 
