@@ -2,7 +2,6 @@
 
 > **Version:** 0.1.0
 > **Status:** 🎉 **0.1.0 STABLE RELEASED** - 2,178 nextest + ~564 doctests passing (100%)
-> **Release Date:** 2026-04-14
 > **Last Updated:** 2026-06-10
 
 This document tracks high-level tasks across the entire TenRSo project. For crate-specific tasks, see individual `crates/*/TODO.md` files.
@@ -516,3 +515,18 @@ Open a GitHub issue with:
 - Label: `roadmap` or `enhancement`
 - Reference this TODO.md
 - Tag @cool-japan maintainers
+
+## Stubs to implement (added 2026-06-22 by /cooljapan-stub-check)
+
+- [ ] **tenrso** `tenrso-exec`: `crates/tenrso-exec/src/ops.rs:66` — `TODO`: `Optimize with blocked/tiled execution and BLAS`
+  - **Priority:** P2  **Scope:** large  **Cross-project:** oxiblas
+  - **Approach:** einsum is currently a naive nested-loop (only matmul special-cased); add blocked/tiled contraction and route 2D contractions through oxiblas gemm.
+  - **Risk:** Index/stride mapping from einsum subscripts to gemm must be exact; cover non-contiguous and broadcasted axes to avoid silent wrong results.
+- [ ] **tenrso** `tenrso-ad`: `crates/tenrso-ad/src/hooks.rs:251` — `TODO`: `Register einsum, decompositions, etc. with Tensorlogic`
+  - **Priority:** P2  **Scope:** medium  **Cross-project:** none
+  - **Approach:** Register forward + backward rules for einsum and decomposition ops with the Tensorlogic autodiff hook table.
+  - **Risk:** Backward rules must match the forward contraction semantics exactly; verify gradients against finite differences.
+- [ ] **tenrso** `tenrso-ooc`: `crates/tenrso-ooc/src/gpu.rs:525` — `TODO`: `Add GPU device enumeration when backends are implemented`
+  - **Priority:** P2  **Scope:** medium  **Cross-project:** none
+  - **Approach:** Enumerate available GPU devices (CUDA/ROCm/Vulkan/Metal) once the corresponding backends land, augmenting the current CPU-only device list.
+  - **Risk:** Backend-gated; must degrade gracefully to CPU enumeration when no GPU backend feature is enabled.
