@@ -49,3 +49,11 @@ harness = false
 [[bench]]
 name = "reshape_permute"
 harness = false
+
+[[bench]]
+name = "ndarray_baseline"
+harness = false
+
+[[bench]]
+name = "alloc_profile"
+harness = false

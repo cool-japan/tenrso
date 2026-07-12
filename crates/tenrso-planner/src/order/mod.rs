@@ -6,6 +6,7 @@ pub mod dpplanner_traits;
 pub mod functions;
 pub mod geneticalgorithmplanner_traits;
 pub mod greedyplanner_traits;
+pub mod plan_ops;
 pub mod simulatedannealingplanner_traits;
 pub mod types;
 

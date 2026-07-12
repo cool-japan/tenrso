@@ -1,0 +1,244 @@
+name: Benchmarks
+
+# ---------------------------------------------------------------------------
+# Closes two TODO.md items:
+#   - [ ] CI performance budgets
+#   - [ ] Benchmark comparison (vs baseline)
+#
+# Design choice: Criterion's own baseline machinery (`--save-baseline` /
+# `--baseline` / `--baseline-lenient`) rather than
+# `benchmark-action/github-action-benchmark`. Rationale:
+#   - All 8 implementation crates already ship Criterion suites (harness =
+#     false in each Cargo.toml); no new benchmark code or format is needed.
+#   - Criterion's own Student's-t regression detector operates on the *same*
+#     statistical model that produced the numbers (resampled confidence
+#     intervals), so "Performance has regressed" is calibrated to Criterion's
+#     own noise estimate rather than a third-party heuristic.
+#   - `github-action-benchmark` needs a stable JSON/bencher output format and
+#     typically wants write access to a gh-pages branch or a commit comment;
+#     that is more moving parts than this workspace needs right now. Criterion
+#     baselines are just directories under `target/criterion/`, which we can
+#     cache directly.
+#
+# Shared-runner noise: GitHub-hosted runners are noisy (noisy-neighbour CPU
+# steal, thermal throttling, variable core assignment). Two mitigations are
+# used throughout this workflow:
+#   1. Every absolute-time budget below carries an explicit multiplier
+#      documented inline (see .github/scripts/check_perf_budgets.py).
+#   2. Criterion's own baseline regression check (`--baseline-lenient`) is
+#      treated as ADVISORY (never fails the job) because it is a tighter,
+#      statistically-driven comparison that is more prone to shared-runner
+#      false positives than the generously-margined absolute budgets, which
+#      are the actual hard gates.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [ master, main, "0.*" ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch: {}
+
+concurrency:
+  group: bench-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  bench-budgets:
+    name: Benchmark comparison + performance budgets
+    runs-on: ubuntu-latest
+    # Generous ceiling: cp_als_target alone is documented at ~21-44s x
+    # sample_size(10) => up to ~7.5 min; tucker_hooi_target and tt_svd_target
+    # add more. This is a wall-clock backstop for the *job*, not a perf
+    # budget (those are enforced explicitly by check_perf_budgets.py).
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Caching is not used in ci.yml (its jobs are cheap enough to build from
+      # scratch), but this workflow builds the full dependency tree (arrow,
+      # parquet, tokio, opentelemetry, ...) in release/bench profile, which is
+      # expensive to redo on every run. Cache key is Cargo.lock-derived so it
+      # invalidates automatically on dependency changes.
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bench-
+
+      # Criterion baseline cache: separate from the build cache above because
+      # it must survive `cargo clean`-equivalent cache eviction independently,
+      # and because GitHub Actions caches are immutable per key, this uses the
+      # "unique key + prefix restore-keys" idiom so pushes to the default
+      # branch can publish a new baseline without clobbering (or failing to
+      # write) an existing cache entry.
+      - name: Restore Criterion baseline (from last default-branch run)
+        uses: actions/cache/restore@v4
+        id: restore-baseline
+        with:
+          path: target/criterion
+          key: criterion-baseline-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            criterion-baseline-${{ runner.os }}-
+
+      - name: Detect whether a "master" Criterion baseline is available
+        id: baseline
+        run: |
+          # maxdepth 4 because Criterion's on-disk id directories are
+          # "group[/function[/value]]" (1-3 path components), so a named
+          # baseline sibling can be as deep as target/criterion/<group>/
+          # <function>/<value>/master (depth 4 from target/criterion/ itself)
+          # -- e.g. matmul_comparison/dense/64x64_sp90/master.
+          if find target/criterion -maxdepth 4 -type d -name master 2>/dev/null | grep -q .; then
+            echo "have_baseline=true" >> "$GITHUB_OUTPUT"
+            echo "Found a cached 'master' Criterion baseline; will compare against it."
+          else
+            echo "have_baseline=false" >> "$GITHUB_OUTPUT"
+            echo "No cached 'master' Criterion baseline yet; this run establishes one (comparison skipped)."
+          fi
+
+      # --------------------------------------------------------------------
+      # Target benchmarks. Filters match Criterion's benchmark id() (the
+      # unsanitized "group/function/value" string), which is stable across
+      # OSes even though Criterion sanitizes '/' and other characters when
+      # deriving the on-disk directory name.
+      # --------------------------------------------------------------------
+
+      - name: "Bench: CP-ALS target (256^3, rank-64, 10 iters)"
+        run: |
+          # Note: no --sample-size flag needed here -- bench_cp_als_target
+          # already calls group.sample_size(10) in code, and an explicit
+          # in-code BenchmarkGroup override always wins over the CLI default.
+          FLAGS=""
+          if [ "${{ steps.baseline.outputs.have_baseline }}" = "true" ]; then
+            FLAGS="--baseline-lenient master"
+          fi
+          cargo bench -p tenrso-decomp --bench decompositions -- cp_als_target $FLAGS \
+            | tee cp_als_target.bench.log
+
+      - name: "Bench: Tucker-HOOI target (512x512x128, r[64,64,32], 10 iters)"
+        run: |
+          FLAGS=""
+          if [ "${{ steps.baseline.outputs.have_baseline }}" = "true" ]; then
+            FLAGS="--baseline-lenient master"
+          fi
+          cargo bench -p tenrso-decomp --bench decompositions -- tucker_hooi_target $FLAGS \
+            | tee tucker_hooi_target.bench.log
+
+      - name: "Bench: TT-SVD target (32^6, max-rank 20) [best-effort, may OOM]"
+        id: tt_svd_bench
+        # 32^6 = 1,073,741,824 f64 elements (~8.6GB) before TT-SVD even starts.
+        # TODO.md records this exact shape as "not yet measured" precisely
+        # because of this allocation size. Shared GitHub-hosted runners have
+        # 16GB total RAM shared with the OS/job overhead, so this step can be
+        # OOM-killed by the kernel; that must not fail the whole job.
+        continue-on-error: true
+        run: |
+          FLAGS=""
+          if [ "${{ steps.baseline.outputs.have_baseline }}" = "true" ]; then
+            FLAGS="--baseline-lenient master"
+          fi
+          cargo bench -p tenrso-decomp --bench decompositions -- tt_svd_target $FLAGS \
+            | tee tt_svd_target.bench.log
+
+      - name: "Bench: masked einsum vs dense naive (>=5x @ 90% sparsity)"
+        run: |
+          FLAGS=""
+          if [ "${{ steps.baseline.outputs.have_baseline }}" = "true" ]; then
+            FLAGS="--baseline-lenient master"
+          fi
+          cargo bench -p tenrso-sparse --bench masked_einsum_bench -- matmul/comparison $FLAGS \
+            | tee masked_comparison.bench.log
+
+      - name: Report Criterion's own regression signal (advisory)
+        if: always()
+        run: |
+          # Criterion prints one of "Performance has regressed.",
+          # "Performance has improved.", or nothing (no significant change)
+          # per benchmark when run with --baseline(-lenient). This is
+          # deliberately advisory-only (see workflow header comment): it is a
+          # tighter statistical test than the generous absolute budgets below
+          # and is more exposed to shared-runner noise, especially for the
+          # sample_size(10) target benchmarks.
+          REGRESSED=0
+          for log in cp_als_target.bench.log tucker_hooi_target.bench.log tt_svd_target.bench.log masked_comparison.bench.log; do
+            if [ -f "$log" ] && grep -q "Performance has regressed" "$log"; then
+              echo "::warning::Criterion flagged a statistically-significant regression in $log (advisory, not gating)"
+              grep -B2 "Performance has regressed" "$log" || true
+              REGRESSED=1
+            fi
+          done
+          if [ "$REGRESSED" = "0" ]; then
+            echo "No Criterion-flagged regressions against the master baseline (or no baseline yet)."
+          fi
+
+      - name: Check explicit performance budgets (hard gate)
+        run: python3 .github/scripts/check_perf_budgets.py --criterion-root target/criterion
+
+      # --------------------------------------------------------------------
+      # Publish this run's results as the new "master" baseline, but only
+      # from the default branch (never from a PR, which could poison the
+      # baseline with an in-progress/experimental change). This copies the
+      # `new/` result directories to sibling `master/` directories instead of
+      # re-running `--save-baseline master` a second time, which would double
+      # the cost of this already-expensive job.
+      #
+      # This is safe because Criterion *always* writes each run's results to
+      # a `new/` directory first regardless of which baseline flag (if any)
+      # was passed -- verified against criterion-0.8.2's own source
+      # (analysis/mod.rs): the copy-into-a-named-baseline step only happens
+      # automatically when Criterion is in its own `Baseline::Save` mode
+      # (i.e. no `--baseline`/`--baseline-lenient` given), which we don't use
+      # here since every invocation above passes `--baseline-lenient master`
+      # once a baseline exists. So doing the "new" -> "master" promotion
+      # ourselves, only on the default branch, is what actually makes
+      # "master" mean "last known-good default-branch measurement" rather
+      # than "whatever the most recent run of any kind happened to produce".
+      # --------------------------------------------------------------------
+      - name: Promote this run's results to the "master" baseline
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') }}
+        run: |
+          set -e
+          found=0
+          while IFS= read -r -d '' new_dir; do
+            found=1
+            group_dir=$(dirname "$new_dir")
+            rm -rf "$group_dir/master"
+            cp -r "$new_dir" "$group_dir/master"
+            echo "Promoted $new_dir -> $group_dir/master"
+          done < <(find target/criterion -maxdepth 4 -type d -name new -print0)
+          if [ "$found" = "0" ]; then
+            echo "No Criterion 'new' result directories found; nothing to promote."
+          fi
+
+      - name: Save Criterion baseline cache
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') }}
+        uses: actions/cache/save@v4
+        with:
+          path: target/criterion
+          key: criterion-baseline-${{ runner.os }}-${{ github.run_id }}
+
+      - name: Upload Criterion reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-reports
+          path: |
+            target/criterion/cp_als_target
+            target/criterion/tucker_hooi_target
+            target/criterion/tt_svd_target
+            target/criterion/matmul_comparison
+            *.bench.log
+          if-no-files-found: warn
+          retention-days: 30

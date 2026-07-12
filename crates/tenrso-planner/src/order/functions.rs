@@ -12,31 +12,66 @@ use anyhow::{anyhow, Result};
 use scirs2_core::random::{SeedableRng, StdRng};
 use std::collections::HashMap;
 
+use super::plan_ops::{build_plan_from_order, randomized_greedy_order};
 use super::types::IntermediateTensor;
-/// Find the contraction spec for two intermediate tensors
-fn compute_pairwise_spec(a: &IntermediateTensor, b: &IntermediateTensor) -> Result<EinsumSpec> {
-    let indices_a: std::collections::HashSet<char> = a.indices.chars().collect();
-    let indices_b: std::collections::HashSet<char> = b.indices.chars().collect();
-    let shared: std::collections::HashSet<char> =
-        indices_a.intersection(&indices_b).copied().collect();
-    let mut output_indices = Vec::new();
-    for c in a.indices.chars() {
-        if !shared.contains(&c) && !output_indices.contains(&c) {
-            output_indices.push(c);
+/// Compute the surviving-index einsum spec for one pairwise contraction step.
+///
+/// An index of operand `a` or `b` **survives** the step iff it is still needed
+/// afterwards — that is, it appears in the final einsum output `final_output`, or
+/// in one of `remaining_indices` (the index strings of the operands that are
+/// *not* consumed by this step).  Every other index — whether it is *shared* by
+/// the pair or appears in only one operand — is contracted (summed) here, because
+/// this is its last live appearance across {both operands, all remaining
+/// operands, the final output}.
+///
+/// Surviving indices are emitted in order of first appearance across `a` then
+/// `b`, with duplicates dropped (a repeated index inside one operand collapses to
+/// a single diagonal axis).  On the **final** step — signalled by an empty
+/// `remaining_indices` — the survivors are exactly the requested output indices,
+/// so they are emitted in `final_output`'s order rather than first-appearance
+/// order.  This restores the caller's requested layout for specs such as
+/// `"ij,jk,kl->li"`.
+///
+/// # Why the extra context is needed
+///
+/// The previous implementation dropped every *shared* index unconditionally and
+/// then sorted the survivors alphabetically.  Both are wrong: dropping a shared
+/// index silently sums over a batch index that is still needed downstream (e.g.
+/// `b` in `"bij,bjk,bkl->bil"` produced a right-shaped but wrong-valued result),
+/// and sorting discards the requested output order.  Deciding correctly requires
+/// knowing which indices are still *live*, hence `remaining_indices` and
+/// `final_output`.  This mirrors the executor's `step_output_labels`.
+pub(super) fn compute_pairwise_spec(
+    a_indices: &str,
+    b_indices: &str,
+    remaining_indices: &[&str],
+    final_output: &str,
+) -> Result<EinsumSpec> {
+    let mut output = String::new();
+    for c in a_indices.chars().chain(b_indices.chars()) {
+        if output.contains(c) {
+            continue;
+        }
+        let needed_later =
+            final_output.contains(c) || remaining_indices.iter().any(|l| l.contains(c));
+        if needed_later {
+            output.push(c);
         }
     }
-    for c in b.indices.chars() {
-        if !shared.contains(&c) && !output_indices.contains(&c) {
-            output_indices.push(c);
+    if remaining_indices.is_empty() {
+        // Final step: the survivors are exactly the requested output indices, so
+        // honour the caller's requested order instead of first-appearance order.
+        let survivors: std::collections::HashSet<char> = output.chars().collect();
+        let requested: std::collections::HashSet<char> = final_output.chars().collect();
+        if survivors == requested {
+            output = final_output.to_string();
         }
     }
-    output_indices.sort();
-    let output: String = output_indices.into_iter().collect();
-    let spec_str = format!("{},{}->{}", a.indices, b.indices, output);
+    let spec_str = format!("{},{}->{}", a_indices, b_indices, output);
     EinsumSpec::parse(&spec_str)
 }
 /// Compute the output shape for a pairwise contraction
-fn compute_pairwise_output_shape(
+pub(super) fn compute_pairwise_output_shape(
     spec: &EinsumSpec,
     a: &IntermediateTensor,
     b: &IntermediateTensor,
@@ -112,9 +147,29 @@ pub fn greedy_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHint
         let mut best_shape = None;
         for i in 0..intermediates.len() {
             for j in (i + 1)..intermediates.len() {
+                // Operands still live *after* contracting this pair: every other
+                // intermediate. Their indices (plus the final output) decide which
+                // of the pair's indices survive the step.
+                let remaining: Vec<&str> = intermediates
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, _)| *k != i && *k != j)
+                    .map(|(_, t)| t.indices.as_str())
+                    .collect();
                 let a = &intermediates[i];
                 let b = &intermediates[j];
-                if let Ok(pairwise_spec) = compute_pairwise_spec(a, b) {
+                if let Ok(pairwise_spec) =
+                    compute_pairwise_spec(&a.indices, &b.indices, &remaining, &spec.output)
+                {
+                    // A step that contracts *all* of a pair's indices yields a
+                    // scalar. The planner represents intermediates as einsum
+                    // subscripts, which cannot express an empty operand, so a
+                    // scalar may only appear as the *final* result. Deferring such
+                    // a fully-dead contraction is always possible and never
+                    // changes the result — only the order.
+                    if pairwise_spec.output.is_empty() && intermediates.len() > 2 {
+                        continue;
+                    }
                     let stats = vec![a.stats.clone(), b.stats.clone()];
                     if let Ok(cost) = estimate_flops(&pairwise_spec, &stats) {
                         if cost < best_cost {
@@ -249,6 +304,14 @@ pub fn dp_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -
         if popcount <= 1 {
             continue;
         }
+        // Indices still needed *outside* this subnetwork: those of any original
+        // input whose bit is not in `mask`. An index internal to `mask` (and not
+        // in the final output) is contracted when `mask` is formed; a shared
+        // index that also appears outside `mask` survives.
+        let remaining_for_mask: Vec<&str> = (0..n)
+            .filter(|b| (mask & (1 << b)) == 0)
+            .map(|b| intermediates[b].indices.as_str())
+            .collect();
         let mut best_cost = f64::INFINITY;
         let mut best_partition = 0;
         let mut submask = mask;
@@ -260,7 +323,12 @@ pub fn dp_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -
                         cached_contractions.get(&submask),
                         cached_contractions.get(&complement),
                     ) {
-                        if let Ok(pairwise_spec) = compute_pairwise_spec(tensor1, tensor2) {
+                        if let Ok(pairwise_spec) = compute_pairwise_spec(
+                            &tensor1.indices,
+                            &tensor2.indices,
+                            &remaining_for_mask,
+                            &spec.output,
+                        ) {
                             let stats = vec![tensor1.stats.clone(), tensor2.stats.clone()];
                             if let Ok(contraction_cost) = estimate_flops(&pairwise_spec, &stats) {
                                 let total_cost = cost1 + cost2 + contraction_cost;
@@ -279,10 +347,13 @@ pub fn dp_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -
             submask = (submask - 1) & mask;
         }
         if best_partition == 0 {
-            return Err(anyhow!(
-                "DP planner: no valid partition found for mask {}",
-                mask
-            ));
+            // No representable partition of this subset: every split would create
+            // a scalar intermediate the planner's einsum representation cannot
+            // chain into a later step (e.g. a subset of purely contracted
+            // vectors). Leave the subset infeasible (`dp[mask]` stays `None`); any
+            // superset routes around it, and if the full network turns out to be
+            // unreachable the final lookup reports it.
+            continue;
         }
         dp[mask] = Some((best_cost, best_partition));
         let submask = best_partition;
@@ -291,7 +362,12 @@ pub fn dp_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -
             cached_contractions.get(&submask),
             cached_contractions.get(&complement),
         ) {
-            if let Ok(pairwise_spec) = compute_pairwise_spec(tensor1, tensor2) {
+            if let Ok(pairwise_spec) = compute_pairwise_spec(
+                &tensor1.indices,
+                &tensor2.indices,
+                &remaining_for_mask,
+                &spec.output,
+            ) {
                 if let Ok(output_shape) =
                     compute_pairwise_output_shape(&pairwise_spec, tensor1, tensor2)
                 {
@@ -319,12 +395,19 @@ pub fn dp_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -
     let (total_cost, _) = dp[full_mask].ok_or_else(|| anyhow!("DP planner: no solution found"))?;
     let mut plan = Plan::new();
     plan.estimated_flops = total_cost;
+    /// Walk the optimal DP tree in post-order, emitting one [`PlanNode`] per merge
+    /// and recording each merge as the `(submask, complement)` bitmask pair so the
+    /// caller can turn the tree into an executor-consumable positional order.
+    #[allow(clippy::too_many_arguments)]
     fn reconstruct_plan(
         mask: usize,
         dp: &[Option<(f64, usize)>],
         cached_contractions: &HashMap<usize, IntermediateTensor>,
         plan: &mut Plan,
         peak_memory: &mut usize,
+        merges: &mut Vec<(usize, usize)>,
+        intermediates: &[IntermediateTensor],
+        final_output: &str,
     ) -> Result<()> {
         if mask.count_ones() == 1 {
             return Ok(());
@@ -333,15 +416,43 @@ pub fn dp_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -
             dp[mask].ok_or_else(|| anyhow!("Missing DP state for mask {}", mask))?;
         let submask = best_partition;
         let complement = mask ^ submask;
-        reconstruct_plan(submask, dp, cached_contractions, plan, peak_memory)?;
-        reconstruct_plan(complement, dp, cached_contractions, plan, peak_memory)?;
+        reconstruct_plan(
+            submask,
+            dp,
+            cached_contractions,
+            plan,
+            peak_memory,
+            merges,
+            intermediates,
+            final_output,
+        )?;
+        reconstruct_plan(
+            complement,
+            dp,
+            cached_contractions,
+            plan,
+            peak_memory,
+            merges,
+            intermediates,
+            final_output,
+        )?;
+        let n = intermediates.len();
+        let remaining_for_mask: Vec<&str> = (0..n)
+            .filter(|b| (mask & (1 << b)) == 0)
+            .map(|b| intermediates[b].indices.as_str())
+            .collect();
         let tensor1 = cached_contractions
             .get(&submask)
             .ok_or_else(|| anyhow!("Missing cached tensor for submask {}", submask))?;
         let tensor2 = cached_contractions
             .get(&complement)
             .ok_or_else(|| anyhow!("Missing cached tensor for complement {}", complement))?;
-        let pairwise_spec = compute_pairwise_spec(tensor1, tensor2)?;
+        let pairwise_spec = compute_pairwise_spec(
+            &tensor1.indices,
+            &tensor2.indices,
+            &remaining_for_mask,
+            final_output,
+        )?;
         let output_shape = compute_pairwise_output_shape(&pairwise_spec, tensor1, tensor2)?;
         let stats = vec![tensor1.stats.clone(), tensor2.stats.clone()];
         let cost = estimate_flops(&pairwise_spec, &stats)?;
@@ -375,17 +486,54 @@ pub fn dp_planner(spec: &EinsumSpec, shapes: &[Vec<usize>], hints: &PlanHints) -
             repr: output_repr,
         };
         plan.nodes.push(node);
+        merges.push((submask, complement));
         Ok(())
     }
     let mut peak_memory = 0;
+    let mut merges: Vec<(usize, usize)> = Vec::with_capacity(n.saturating_sub(1));
     reconstruct_plan(
         full_mask,
         &dp,
         &cached_contractions,
         &mut plan,
         &mut peak_memory,
+        &mut merges,
+        &intermediates,
+        &spec.output,
     )?;
     plan.estimated_memory = peak_memory;
+    // Turn the post-order merge tree into a positional `(i, j)` order over a
+    // shrinking working list, exactly matching the executor's remove-two-push-one
+    // discipline: each token is a subset bitmask, merges consume two present
+    // tokens and push their union. Post-order guarantees both operands of a merge
+    // are already single tokens when it is processed.
+    let mut working: Vec<usize> = (0..n).map(|i| 1usize << i).collect();
+    let mut order: Vec<(usize, usize)> = Vec::with_capacity(merges.len());
+    for &(submask, complement) in &merges {
+        let pos_a = working
+            .iter()
+            .position(|&token| token == submask)
+            .ok_or_else(|| anyhow!("DP order: submask {} not present in working list", submask))?;
+        let pos_b = working
+            .iter()
+            .position(|&token| token == complement)
+            .ok_or_else(|| {
+                anyhow!(
+                    "DP order: complement {} not present in working list",
+                    complement
+                )
+            })?;
+        order.push((pos_a, pos_b));
+        let (hi, lo) = if pos_a > pos_b {
+            (pos_a, pos_b)
+        } else {
+            (pos_b, pos_a)
+        };
+        working.remove(hi);
+        working.remove(lo);
+        working.push(submask | complement);
+    }
+    plan.order = order;
     Ok(plan)
 }
 /// Beam search planner for contraction order
@@ -470,9 +618,23 @@ pub fn beam_search_planner(
             }
             for i in 0..candidate.intermediates.len() {
                 for j in (i + 1)..candidate.intermediates.len() {
+                    let remaining: Vec<&str> = candidate
+                        .intermediates
+                        .iter()
+                        .enumerate()
+                        .filter(|(k, _)| *k != i && *k != j)
+                        .map(|(_, t)| t.indices.as_str())
+                        .collect();
                     let a = &candidate.intermediates[i];
                     let b = &candidate.intermediates[j];
-                    if let Ok(pairwise_spec) = compute_pairwise_spec(a, b) {
+                    if let Ok(pairwise_spec) =
+                        compute_pairwise_spec(&a.indices, &b.indices, &remaining, &spec.output)
+                    {
+                        // Defer fully-dead contractions (empty intermediate) to the
+                        // final step: the planner cannot chain a scalar operand.
+                        if pairwise_spec.output.is_empty() && candidate.intermediates.len() > 2 {
+                            continue;
+                        }
                         let stats = vec![a.stats.clone(), b.stats.clone()];
                         if let Ok(cost) = estimate_flops(&pairwise_spec, &stats) {
                             if let Ok(output_shape) =
@@ -555,24 +717,34 @@ pub fn beam_search_planner(
 use std::f64::consts::E;
 /// Simulated annealing planner for contraction order
 ///
-/// Uses stochastic search with temperature-based acceptance to escape local minima.
-/// Good for large tensor networks where DP is infeasible and greedy may be suboptimal.
+/// Uses stochastic search with temperature-based acceptance to escape local
+/// minima. Good for large tensor networks where DP is infeasible and greedy may
+/// be suboptimal.
 ///
-/// Uses SciRS2-Core's professional-grade RNG with fixed seed (12345) for reproducibility.
+/// Uses SciRS2-Core's professional-grade RNG with fixed seed (12345) for
+/// reproducibility.
 ///
 /// # Algorithm
 ///
-/// 1. Start with greedy plan as initial solution
-/// 2. Generate neighbor by swapping two random contractions (using SciRS2 RNG)
-/// 3. Accept if better, or with probability exp(-ΔE/T) if worse
-/// 4. Decrease temperature gradually
-/// 5. Repeat for max_iterations
-/// 6. Return best plan found
+/// The search space is the set of **valid contraction trees**, each represented
+/// by an executable positional order (`Vec<(usize, usize)>`). The total FLOP cost
+/// of a tree is order-invariant to the *linearisation* of independent steps, so
+/// SA moves between *different trees*, not between permutations of a fixed tree:
+///
+/// 1. Start from the deterministic greedy order (also the guaranteed-valid
+///    fallback).
+/// 2. Propose a neighbour by sampling a fresh randomised-greedy tree
+///    (`randomized_greedy_order`).
+/// 3. Score both with the corrected pairwise cost model via
+///    `build_plan_from_order`.
+/// 4. Accept if cheaper, else with probability `exp(-ΔE / T)`.
+/// 5. Cool the temperature and track the best order seen.
+/// 6. Rebuild and return the plan for the best order — its `order` field is
+///    always populated and executable.
 ///
 /// # Complexity
 ///
-/// O(max_iterations * n) where n is number of inputs
-/// Practical: max_iterations = 1000-10000, works for any n
+/// `O(max_iterations · n³)` (each proposal is a full randomised-greedy walk).
 ///
 /// # Parameters
 ///
@@ -587,38 +759,42 @@ pub fn simulated_annealing_planner(
     cooling_rate: f64,
     max_iterations: usize,
 ) -> Result<Plan> {
-    let mut current_plan = greedy_planner(spec, shapes, hints)?;
-    let mut current_cost = current_plan.estimated_flops;
-    let mut best_plan = current_plan.clone();
+    let greedy = greedy_planner(spec, shapes, hints)?;
+    // Fewer than two steps: there is exactly one contraction tree, so there is
+    // nothing to anneal — return the greedy plan (already has a valid `order`).
+    if greedy.nodes.len() < 2 {
+        return Ok(greedy);
+    }
+
+    // Use SciRS2-Core's RNG with fixed seed for reproducibility.
+    let mut rng = StdRng::seed_from_u64(12345);
+    let mut current_order = greedy.order.clone();
+    let mut current_cost = greedy.estimated_flops;
+    let mut best_order = current_order.clone();
     let mut best_cost = current_cost;
     let mut temperature = initial_temp;
 
-    // Use SciRS2-Core's RNG with fixed seed for reproducibility
-    let mut rng = StdRng::seed_from_u64(12345);
     for iteration in 0..max_iterations {
-        if current_plan.nodes.len() < 2 {
-            break;
-        }
-        let i = rng.random_range(0..current_plan.nodes.len());
-        let j = rng.random_range(0..current_plan.nodes.len());
-        if i == j {
-            continue;
-        }
-        let mut neighbor_plan = current_plan.clone();
-        neighbor_plan.nodes.swap(i, j);
-        let neighbor_cost = neighbor_plan.nodes.iter().map(|n| n.cost).sum::<f64>();
-        let delta = neighbor_cost - current_cost;
+        let candidate_order = match randomized_greedy_order(spec, shapes, hints, &mut rng, 3) {
+            Ok(order) => order,
+            Err(_) => continue,
+        };
+        let candidate_cost = match build_plan_from_order(spec, shapes, hints, &candidate_order) {
+            Ok(plan) => plan.estimated_flops,
+            Err(_) => continue,
+        };
+        let delta = candidate_cost - current_cost;
         let accept = if delta < 0.0 {
             true
         } else {
-            let prob = E.powf(-delta / temperature);
+            let prob = E.powf(-delta / temperature.max(1e-12));
             rng.random_f64() < prob
         };
         if accept {
-            current_plan = neighbor_plan;
-            current_cost = neighbor_cost;
+            current_order = candidate_order;
+            current_cost = candidate_cost;
             if current_cost < best_cost {
-                best_plan = current_plan.clone();
+                best_order = current_order.clone();
                 best_cost = current_cost;
             }
         }
@@ -632,8 +808,9 @@ pub fn simulated_annealing_planner(
             break;
         }
     }
-    best_plan.estimated_flops = best_cost;
-    Ok(best_plan)
+
+    // Rebuild the winning tree into a full, executable plan.
+    build_plan_from_order(spec, shapes, hints, &best_order)
 }
 
 /// Genetic algorithm planner for contraction order
@@ -642,23 +819,33 @@ pub fn simulated_annealing_planner(
 /// Excellent for large tensor networks (20+ tensors) where DP is infeasible
 /// and beam search may miss good solutions.
 ///
-/// Uses SciRS2-Core's professional-grade RNG with fixed seed (42) for reproducibility.
+/// Uses SciRS2-Core's professional-grade RNG with fixed seed (42) for
+/// reproducibility.
 ///
 /// # Algorithm
 ///
-/// 1. Initialize population of random contraction orders (using SciRS2 RNG)
-/// 2. Evaluate fitness (inverse cost) for each individual
-/// 3. Select best individuals for reproduction (tournament selection with SciRS2 RNG)
-/// 4. Create offspring via crossover (order-preserving with SciRS2 RNG)
-/// 5. Apply mutation (swap operations) for diversity
-/// 6. Replace worst individuals with offspring (elitism)
-/// 7. Repeat for max_generations
-/// 8. Return best plan found
+/// Individuals are **valid contraction trees**, each carried as an executable
+/// positional order (`Vec<(usize, usize)>`) together with its true FLOP cost
+/// (evaluated with the corrected pairwise cost model via
+/// `build_plan_from_order`):
+///
+/// 1. Seed the population with the deterministic greedy tree, then fill it with
+///    diverse randomised-greedy trees (`randomized_greedy_order`).
+/// 2. Each generation, sort by cost, keep the best `elitism_count` unchanged,
+///    and breed the rest by tournament selection (size 3).
+/// 3. Reproduction is mutation-based: with probability `mutation_rate` a child is
+///    a freshly sampled randomised-greedy tree, otherwise it clones its parent.
+///    (Positional-order crossover is *not* closed under validity for contraction
+///    trees — an arbitrary splice of two orders rarely remains a legal
+///    remove-two-push-one sequence — so this is a `(μ + λ)` evolutionary strategy
+///    without crossover, which keeps every individual executable by construction.)
+/// 4. Return the plan rebuilt from the best order found; its `order` field is
+///    always populated and executable.
 ///
 /// # Complexity
 ///
-/// O(generations * population_size * n³) where n is number of inputs
-/// Practical: population_size = 50-200, generations = 50-200
+/// `O(generations · population_size · n³)` where n is number of inputs.
+/// Practical: population_size = 50-200, generations = 50-200.
 ///
 /// # Parameters
 ///
@@ -676,122 +863,103 @@ pub fn genetic_algorithm_planner(
     elitism_count: usize,
 ) -> Result<Plan> {
     let n = spec.num_inputs();
-
     if n <= 1 {
         return greedy_planner(spec, shapes, hints);
     }
 
-    // Initialize population with random permutations + greedy seed
-    let mut population: Vec<Plan> = Vec::with_capacity(population_size);
-
-    // Add greedy solution as seed
-    population.push(greedy_planner(spec, shapes, hints)?);
-
-    // Use SciRS2-Core's RNG with fixed seed for reproducibility
-    let mut rng = StdRng::seed_from_u64(42);
-
-    // Fill rest with random valid plans
-    while population.len() < population_size {
-        // Generate random contraction order by shuffling greedy plan
-        let mut plan = population[0].clone();
-
-        // Fisher-Yates shuffle of nodes
-        for i in (1..plan.nodes.len()).rev() {
-            let j = rng.random_range(0..=i);
-            plan.nodes.swap(i, j);
-        }
-
-        // Recompute cost
-        plan.estimated_flops = plan.nodes.iter().map(|n| n.cost).sum();
-        population.push(plan);
+    let greedy = greedy_planner(spec, shapes, hints)?;
+    // A single contraction step admits exactly one tree; nothing to evolve.
+    if greedy.nodes.len() < 2 {
+        return Ok(greedy);
     }
 
-    let mut best_plan = population[0].clone();
-    let mut best_cost = best_plan.estimated_flops;
+    // An individual is a valid order paired with its true total cost.
+    type Individual = (Vec<(usize, usize)>, f64);
+    let pop_target = population_size.max(1);
+    let cost_of = |order: &[(usize, usize)]| -> Option<f64> {
+        build_plan_from_order(spec, shapes, hints, order)
+            .ok()
+            .map(|plan| plan.estimated_flops)
+    };
 
-    // Evolution loop
+    // Use SciRS2-Core's RNG with fixed seed for reproducibility.
+    let mut rng = StdRng::seed_from_u64(42);
+
+    // Seed with the deterministic greedy tree, then add randomised-greedy trees.
+    let mut population: Vec<Individual> = Vec::with_capacity(pop_target);
+    population.push((greedy.order.clone(), greedy.estimated_flops));
+    // Bound the sampling attempts so a pathological spec cannot spin forever;
+    // every feasible spec yields a valid randomised-greedy tree (greedy already
+    // succeeded above), so this cap is only a safety net.
+    let mut attempts = 0usize;
+    let max_attempts = pop_target.saturating_mul(8).max(16);
+    while population.len() < pop_target && attempts < max_attempts {
+        attempts += 1;
+        if let Ok(order) = randomized_greedy_order(spec, shapes, hints, &mut rng, 4) {
+            if let Some(cost) = cost_of(&order) {
+                population.push((order, cost));
+            }
+        }
+    }
+
+    let mut best: Individual = population
+        .iter()
+        .cloned()
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or((greedy.order.clone(), greedy.estimated_flops));
+
     for _generation in 0..max_generations {
-        // Sort population by fitness (lower cost = better)
-        population.sort_by(|a, b| {
-            a.estimated_flops
-                .partial_cmp(&b.estimated_flops)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Update best
-        if population[0].estimated_flops < best_cost {
-            best_plan = population[0].clone();
-            best_cost = best_plan.estimated_flops;
+        population.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        if population[0].1 < best.1 {
+            best = population[0].clone();
         }
 
-        // Create next generation
-        let mut offspring: Vec<Plan> = Vec::new();
-
-        // Elitism: keep best individuals
+        let mut offspring: Vec<Individual> = Vec::with_capacity(pop_target);
+        // Elitism: carry the best individuals forward unchanged.
         for item in population.iter().take(elitism_count.min(population.len())) {
             offspring.push(item.clone());
         }
 
-        // Generate offspring through crossover and mutation
-        while offspring.len() < population_size {
-            // Tournament selection (size 3). The population is guaranteed
-            // non-empty by the caller, so `min_by` yields `Some`.
-            let parent1_idx = (0..3)
+        while offspring.len() < pop_target {
+            // Tournament selection (size 3). `population` is non-empty.
+            let parent_idx = (0..3)
                 .map(|_| rng.random_range(0..population.len()))
                 .min_by(|&a, &b| {
                     population[a]
-                        .estimated_flops
-                        .partial_cmp(&population[b].estimated_flops)
+                        .1
+                        .partial_cmp(&population[b].1)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .unwrap_or(0);
 
-            let parent2_idx = (0..3)
-                .map(|_| rng.random_range(0..population.len()))
-                .min_by(|&a, &b| {
-                    population[a]
-                        .estimated_flops
-                        .partial_cmp(&population[b].estimated_flops)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .unwrap_or(0);
-
-            // Order crossover (OX): preserve relative order from both parents
-            let mut child = population[parent1_idx].clone();
-            if child.nodes.len() > 1 {
-                let crossover_point = rng
-                    .random_range(1..child.nodes.len())
-                    .max(1)
-                    .min(child.nodes.len() - 1);
-
-                // Take some nodes from parent2
-                if parent2_idx != parent1_idx
-                    && population[parent2_idx].nodes.len() > crossover_point
-                {
-                    for i in 0..crossover_point {
-                        if i < population[parent2_idx].nodes.len() {
-                            child.nodes[i] = population[parent2_idx].nodes[i].clone();
-                        }
-                    }
+            // Mutation-based reproduction: resample a fresh tree, or clone parent.
+            let child = if rng.random_f64() < mutation_rate {
+                match randomized_greedy_order(spec, shapes, hints, &mut rng, 4) {
+                    Ok(order) => match cost_of(&order) {
+                        Some(cost) => (order, cost),
+                        None => population[parent_idx].clone(),
+                    },
+                    Err(_) => population[parent_idx].clone(),
                 }
-            }
-
-            // Mutation: swap random adjacent nodes
-            if rng.random_f64() < mutation_rate && child.nodes.len() > 1 {
-                let swap_idx = rng.gen_range(0..child.nodes.len() - 1);
-                child.nodes.swap(swap_idx, swap_idx + 1);
-            }
-
-            // Recompute cost
-            child.estimated_flops = child.nodes.iter().map(|n| n.cost).sum();
-
+            } else {
+                population[parent_idx].clone()
+            };
             offspring.push(child);
         }
 
         population = offspring;
     }
 
-    Ok(best_plan)
+    if let Some(final_best) = population
+        .iter()
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        if final_best.1 < best.1 {
+            best = final_best.clone();
+        }
+    }
+
+    build_plan_from_order(spec, shapes, hints, &best.0)
 }
 
 /// Refine a plan using local search
@@ -893,9 +1061,8 @@ mod tests {
     }
     #[test]
     fn test_compute_pairwise_spec() {
-        let a = IntermediateTensor::from_input("ij".to_string(), vec![10, 20], 0);
-        let b = IntermediateTensor::from_input("jk".to_string(), vec![20, 30], 1);
-        let spec = compute_pairwise_spec(&a, &b).unwrap();
+        // Final matmul step (no operands remain): j is contracted, output is "ik".
+        let spec = compute_pairwise_spec("ij", "jk", &[], "ik").unwrap();
         assert!(spec.output.contains('i'));
         assert!(!spec.output.contains('j'));
         assert!(spec.output.contains('k'));

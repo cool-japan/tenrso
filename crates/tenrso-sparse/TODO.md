@@ -8,6 +8,49 @@
 
 ---
 
+## Masked einsum speedup — measured 2026-07-11 (Xeon Gold 5315Y, 8c, shared/noisy)
+
+Settled the blueprint target "Masked operations: >= 5x speedup vs dense naive"
+(documented at 90% zeros). Harness: `examples/masked_speedup.rs` times every
+variant round-robin in one process (noise-robust ratio); `benches/masked_einsum_bench.rs`
+feeds the CI gate in `.github/scripts/check_perf_budgets.py`.
+
+**Fairness fix (benchmark):** the old "dense naive" baseline indexed through
+`ArrayView<_, IxDyn>` (`view[&[i,j][..]]`) — a dynamic-stride dot-product + bounds
+check *per element*. The masked kernel did the same, so both sides were dominated
+by indexing overhead, not by masking. Fixed the baseline to index contiguous
+`&[f64]` slices with the same scalar inner loop as the kernel; added a pre-timing
+correctness gate (masked == dense at every mask position). This *removed* a
+spurious inflation, i.e. it made the target harder, not easier.
+
+**Kernel optimization (`masked_matmul`):** the shipped kernel walked `B[j,k]` down
+a column (stride `N`) for each masked `(i,k)` — every load hit a fresh cache line
+and used one of 8 f64s, so it moved ~8x more memory per MAC than the dense loop and
+*lost* to dense at 50%/90% for 64/256, and only reached 1.7-3.9x at 512³/90%.
+Fix: pack the distinct columns the mask touches into contiguous buffers (one linear
+pass over B), then do contiguous-vs-contiguous dot products. Non-contiguous inputs
+fall back to the strided path. Correctness unchanged (451 tests pass).
+
+**Measured speedup vs dense naive (masked/dense, medians, 3 interleaved runs):**
+
+| size | 50%  | 90%   | 99%    |
+|------|------|-------|--------|
+| 64   | ~1.0x| **~5.2x** | ~34x |
+| 256  | ~1.5x| **~10-18x** | ~180x |
+| 512  | ~4-6x| **~14-27x** | ~100-200x |
+
+**Verdict:** >= 5x at 90% zeros is MET at 256 and 512 with wide margin
+(kernel change turned 1.3x/1.7x into 16x/14x). At 64x64 the true ratio is ~5.1-5.2x
+— it MEETS the target but with essentially NO margin: at n=64 both operands are
+L1/L2-resident, so dense naive is already cache-optimal (~0.23 ms) and the masked
+path's fixed overhead (COO build, mask iteration, column packing) eats the gain.
+Under separate-run Criterion on this loaded box the 64x64 gate measured 3.5x (FAIL)
+while 256/512 passed — the 64x64 hard gate in `check_perf_budgets.py` is a
+flakiness risk and should be reconsidered (advisory, or dropped) by the gate owner;
+256 and 512 are the robust gates.
+
+---
+
 ## Refactoring — 2026-04-15
 
 - **`solvers.rs` split via manual refactor** (splitrs dry-run suggested a trait-based split

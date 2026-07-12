@@ -1,7 +1,7 @@
 //! Property-based tests for `tenrso-exec`
 //!
 //! Verifies mathematical invariants of the execution engine across
-//! randomly generated inputs.  Eight properties are checked:
+//! randomly generated inputs.  The properties checked:
 //!
 //! 1. Identity:         transpose(A, [0,1]) = A  (no-op permutation)
 //! 2. Transpose:        transpose(A, [1,0])[j,i] = A[i,j]
@@ -13,17 +13,24 @@
 //! 7. Linearity:        einsum("ij,jk->ik", A, α·B) = α · einsum("ij,jk->ik", A, B)
 //! 8. Matmul determinism: two identical einsum calls produce the same result
 //!    (checks memory-pool correctness)
+//! 9. Unary einsum:     einsum("ij->ji"), ("ii->i"), ("ii->"), ("ij->i"), …
+//!    cross-checked against a naive reference and against the `transpose` /
+//!    `reduce` executor methods.
 //!
 //! Notes on design
 //! ---------------
-//! The executor's `einsum` API requires **≥ 2 inputs** — single-input unary
-//! specs ("ij->ij", "ij->ji", "ij->") are not routed through the general
-//! einsum path by this executor.  Properties 1–4 therefore test the
-//! `transpose` and `reduce` executor methods, which are the documented way
-//! to express those operations.  This is consistent with the existing unit
-//! tests in `src/executor/functions_tests/`.
+//! Single-input unary specs (`"ij->ji"`, `"ii->i"`, `"ii->"`, `"ij->i"`, …) are
+//! executed by [`tenrso_exec::ops::execute_unary_einsum`], which the executor
+//! short-circuits to before planning: a `Plan` schedules *pairwise* contractions
+//! and there is no pair to schedule for one operand.  Until that path existed,
+//! a one-input spec produced zero contraction steps and the executor returned
+//! the **input tensor unchanged** — silently wrong for every unary spec.  The
+//! `unary_*` properties and `regression_single_input_einsum_is_not_a_passthrough`
+//! below guard that.  Properties 1–4 still exercise the `transpose` / `reduce`
+//! executor methods, which remain the direct API for those operations.
 
 use proptest::prelude::*;
+use std::collections::HashMap;
 use tenrso_core::{DenseND, TensorHandle};
 use tenrso_exec::{einsum_ex, CpuExecutor, ExecHints, TenrsoExecutor};
 
@@ -44,6 +51,94 @@ fn finite_f64() -> impl Strategy<Value = f64> {
 /// Strategy for a `Vec<f64>` with exactly `n` finite elements.
 fn finite_vec(n: usize) -> impl Strategy<Value = Vec<f64>> {
     prop::collection::vec(finite_f64(), n..=n)
+}
+
+/// Run a single-input spec through the *public* `einsum_ex` builder.
+fn unary_einsum(spec: &str, data: Vec<f64>, shape: &[usize]) -> DenseND<f64> {
+    let handle = make_tensor(data, shape);
+    einsum_ex::<f64>(spec)
+        .inputs(&[handle])
+        .hints(&ExecHints::default())
+        .run()
+        .unwrap_or_else(|e| panic!("{spec}: einsum_ex failed: {e}"))
+        .as_dense()
+        .cloned()
+        .unwrap_or_else(|| panic!("{spec}: einsum_ex returned a non-dense tensor"))
+}
+
+/// Decode a row-major flat index into a multi-dimensional index.
+fn decode(flat: usize, shape: &[usize]) -> Vec<usize> {
+    let mut idx = vec![0usize; shape.len()];
+    let mut rest = flat;
+    for d in (0..shape.len()).rev() {
+        idx[d] = rest % shape[d];
+        rest /= shape[d];
+    }
+    idx
+}
+
+/// Deliberately-naive single-operand einsum, sharing no code with the engine.
+///
+/// Indexes the operand **by index character** — so a repeated character reads
+/// the generalised diagonal (`"ii"` → `A[i, i]`) — and brute-forces the sum over
+/// every character that does not occur in the output.  Slow and obviously
+/// correct: the point is that a stride/permutation mistake in the engine cannot
+/// also be present here.
+fn naive_unary_einsum(spec: &str, data: &[f64], shape: &[usize]) -> (Vec<f64>, Vec<usize>) {
+    let (lhs, rhs) = spec
+        .split_once("->")
+        .unwrap_or_else(|| panic!("{spec}: not an explicit einsum spec"));
+    let sub_in: Vec<char> = lhs.chars().collect();
+    let sub_out: Vec<char> = rhs.chars().collect();
+    assert_eq!(sub_in.len(), shape.len(), "{spec}: rank mismatch");
+
+    let mut dims: HashMap<char, usize> = HashMap::new();
+    for (c, &d) in sub_in.iter().zip(shape) {
+        dims.insert(*c, d);
+    }
+
+    let mut summed: Vec<char> = dims
+        .keys()
+        .copied()
+        .filter(|c| !sub_out.contains(c))
+        .collect();
+    summed.sort_unstable();
+
+    let out_shape: Vec<usize> = sub_out.iter().map(|c| dims[c]).collect();
+    let sum_shape: Vec<usize> = summed.iter().map(|c| dims[c]).collect();
+    let out_total: usize = out_shape.iter().product();
+    let sum_total: usize = sum_shape.iter().product();
+
+    // Row-major strides of the *input*, used to read A[char-indexed position].
+    let mut in_strides = vec![1usize; shape.len()];
+    for d in (0..shape.len().saturating_sub(1)).rev() {
+        in_strides[d] = in_strides[d + 1] * shape[d + 1];
+    }
+
+    let mut out = vec![0.0f64; out_total];
+    for (flat, slot) in out.iter_mut().enumerate() {
+        let out_idx = decode(flat, &out_shape);
+        let mut acc = 0.0f64;
+        for s in 0..sum_total {
+            let sum_idx = decode(s, &sum_shape);
+            let mut value: HashMap<char, usize> = HashMap::new();
+            for (c, v) in sub_out.iter().zip(&out_idx) {
+                value.insert(*c, *v);
+            }
+            for (c, v) in summed.iter().zip(&sum_idx) {
+                value.insert(*c, *v);
+            }
+            let offset: usize = sub_in
+                .iter()
+                .zip(&in_strides)
+                .map(|(c, stride)| value[c] * stride)
+                .sum();
+            acc += data[offset];
+        }
+        *slot = acc;
+    }
+
+    (out, out_shape)
 }
 
 // ─── property 1: identity permutation ───────────────────────────────────────
@@ -366,4 +461,175 @@ proptest! {
             }
         }
     }
+}
+
+// ─── property 9: unary einsum vs the naive reference ────────────────────────
+
+proptest! {
+    /// Every unary spec class, cross-checked element-wise against
+    /// [`naive_unary_einsum`] through the public `einsum_ex` builder.
+    ///
+    /// This is the strongest guard against an index-mapping error: the engine
+    /// walks summed row-major strides, the reference walks characters, and the
+    /// two share no code.
+    #[test]
+    fn prop_unary_einsum_matches_naive_reference(data in finite_vec(3 * 3 * 4)) {
+        // 3×3×4 (square in the first two axes, so diagonal specs are legal).
+        let shape = [3usize, 3, 4];
+        let specs = [
+            "ijk->ijk", "ijk->kij", "ijk->jik", "ijk->kji", "ijk->ikj",
+            "ijk->ij", "ijk->k", "ijk->ki", "ijk->",
+            "iij->ij", "iij->ji", "iij->i", "iij->j", "iij->",
+        ];
+
+        for spec in specs {
+            let (expected, expected_shape) = naive_unary_einsum(spec, &data, &shape);
+            let actual = unary_einsum(spec, data.clone(), &shape);
+
+            prop_assert_eq!(
+                actual.shape(),
+                expected_shape.as_slice(),
+                "{}: shape mismatch",
+                spec
+            );
+            for (i, (got, want)) in actual.view().iter().zip(&expected).enumerate() {
+                let tol = 1e-8_f64.max(1e-10 * want.abs());
+                prop_assert!(
+                    (got - want).abs() <= tol,
+                    "{}: element {} = {} != {}",
+                    spec,
+                    i,
+                    got,
+                    want
+                );
+            }
+        }
+    }
+}
+
+// ─── property 10: unary einsum vs the transpose / reduce methods ────────────
+
+proptest! {
+    /// `einsum("ij->ji")` must agree with `CpuExecutor::transpose(A, [1, 0])`,
+    /// and `einsum("ij->i")` with `reduce(Sum, A, [1])`.  The two APIs are
+    /// documented to express the same operation; before the unary path existed
+    /// they disagreed, because einsum returned `A` itself.
+    #[test]
+    fn prop_unary_einsum_agrees_with_executor_methods(data in finite_vec(4 * 5)) {
+        let a = make_tensor(data.clone(), &[4, 5]);
+        let mut exec = CpuExecutor::new();
+
+        let transposed = exec.transpose(&a, &[1, 0]).unwrap();
+        let transposed = transposed.as_dense().unwrap();
+        let via_einsum = unary_einsum("ij->ji", data.clone(), &[4, 5]);
+        prop_assert_eq!(via_einsum.shape(), transposed.shape());
+        for (got, want) in via_einsum.view().iter().zip(transposed.view().iter()) {
+            prop_assert!((got - want).abs() < 1e-10, "transpose: {} != {}", got, want);
+        }
+
+        let reduced = exec
+            .reduce(tenrso_exec::executor::types::ReduceOp::Sum, &a, &[1])
+            .unwrap();
+        let reduced = reduced.as_dense().unwrap();
+        let via_einsum = unary_einsum("ij->i", data, &[4, 5]);
+        prop_assert_eq!(via_einsum.shape(), reduced.shape());
+        for (got, want) in via_einsum.view().iter().zip(reduced.view().iter()) {
+            let tol = 1e-8_f64.max(1e-10 * want.abs());
+            prop_assert!((got - want).abs() <= tol, "row-sum: {} != {}", got, want);
+        }
+    }
+}
+
+// ─── property 11: trace and diagonal ────────────────────────────────────────
+
+proptest! {
+    /// `einsum("ii->i")` is the diagonal and `einsum("ii->")` its sum.
+    #[test]
+    fn prop_unary_diagonal_and_trace(data in finite_vec(4 * 4)) {
+        let diag = unary_einsum("ii->i", data.clone(), &[4, 4]);
+        prop_assert_eq!(diag.shape(), &[4]);
+        let diag_view = diag.view();
+        for i in 0..4_usize {
+            prop_assert!(
+                (diag_view[[i]] - data[i * 4 + i]).abs() < 1e-12,
+                "diagonal[{}] = {} != {}",
+                i,
+                diag_view[[i]],
+                data[i * 4 + i]
+            );
+        }
+
+        let trace = unary_einsum("ii->", data.clone(), &[4, 4]);
+        prop_assert!(trace.shape().is_empty(), "trace must be rank-0");
+        let expected: f64 = (0..4).map(|i| data[i * 4 + i]).sum();
+        let actual = trace.view()[[]];
+        let tol = 1e-8_f64.max(1e-10 * expected.abs());
+        prop_assert!(
+            (actual - expected).abs() <= tol,
+            "trace = {} != {}",
+            actual,
+            expected
+        );
+    }
+}
+
+// ─── regression: single-input einsum used to be a passthrough ───────────────
+
+/// **Regression test for the silent single-input einsum bug.**
+///
+/// A one-operand spec emits zero pairwise contraction steps, so the executor's
+/// plan loop had nothing to run and handed the *input tensor* back as the
+/// "result": `einsum_ex("ij->ji")` on a 2×3 matrix returned that same 2×3 matrix
+/// with its values untouched — wrong shape, wrong values, no error.  Shipped in
+/// 0.1.0.
+///
+/// The assertions below are deliberately phrased as "the result is not the
+/// input": they fail loudly against the old behaviour instead of merely checking
+/// that the new behaviour is self-consistent.
+#[test]
+fn regression_single_input_einsum_is_not_a_passthrough() {
+    let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+
+    // "ij->ji" on a 2×3 matrix: the shape alone catches the passthrough.
+    let transposed = unary_einsum("ij->ji", data.clone(), &[2, 3]);
+    assert_ne!(
+        transposed.shape(),
+        &[2, 3],
+        "einsum_ex(\"ij->ji\") returned the input's shape — the passthrough bug is back"
+    );
+    assert_eq!(transposed.shape(), &[3, 2]);
+    assert_eq!(transposed.as_slice(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+
+    // A *square* operand hides the shape symptom, so check the values.
+    let square = vec![1.0, 2.0, 3.0, 4.0];
+    let transposed = unary_einsum("ij->ji", square.clone(), &[2, 2]);
+    assert_eq!(transposed.shape(), &[2, 2]);
+    assert_ne!(
+        transposed.as_slice(),
+        square.as_slice(),
+        "einsum_ex(\"ij->ji\") returned the input unchanged — the passthrough bug is back"
+    );
+    assert_eq!(transposed.as_slice(), &[1.0, 3.0, 2.0, 4.0]);
+
+    // The other unary classes: each used to return the full 2×2 input.
+    let diagonal = unary_einsum("ii->i", square.clone(), &[2, 2]);
+    assert_eq!(
+        diagonal.shape(),
+        &[2],
+        "\"ii->i\" must extract the diagonal"
+    );
+    assert_eq!(diagonal.as_slice(), &[1.0, 4.0]);
+
+    let trace = unary_einsum("ii->", square.clone(), &[2, 2]);
+    assert!(trace.shape().is_empty(), "\"ii->\" must produce a scalar");
+    assert_eq!(trace.as_slice(), &[5.0]);
+
+    let row_sums = unary_einsum("ij->i", square.clone(), &[2, 2]);
+    assert_eq!(row_sums.shape(), &[2], "\"ij->i\" must reduce an axis");
+    assert_eq!(row_sums.as_slice(), &[3.0, 7.0]);
+
+    // Identity is the one spec that *is* a passthrough — and must stay correct.
+    let identity = unary_einsum("ij->ij", square.clone(), &[2, 2]);
+    assert_eq!(identity.shape(), &[2, 2]);
+    assert_eq!(identity.as_slice(), square.as_slice());
 }

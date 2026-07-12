@@ -121,6 +121,17 @@ fn bench_hadamard(c: &mut Criterion) {
                 });
             },
         );
+
+        #[cfg(feature = "parallel")]
+        group.bench_with_input(
+            BenchmarkId::new("parallel", format!("{}x{}", size, size)),
+            &size,
+            |bencher, _| {
+                bencher.iter(|| {
+                    black_box(hadamard_parallel(&a.view(), &b.view()));
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -292,6 +303,109 @@ fn bench_mttkrp(c: &mut Criterion) {
     group.finish();
 }
 
+/// Dimension-tree (memoized) MTTKRP vs. N independent calls to the naive kernel.
+///
+/// This is the *whole CP-ALS sweep* comparison: for each configuration we time
+///
+/// * `naive_all_modes` — `for k in 0..N { mttkrp(X, A, k) }`, i.e. exactly what
+///   `cp_als` does today (full permuted tensor copy + full complement Khatri-Rao
+///   per mode): `N·nnz·R` multiply-adds plus `N·nnz` element copies;
+/// * `dimtree_all_modes` — [`mttkrp_all_modes`]: `≈ 2·nnz·R` multiply-adds, one
+///   tensor matricization (zero-copy here), no full Khatri-Rao;
+/// * `dimtree_all_modes_parallel` — the Rayon variant.
+///
+/// Throughput is reported against the *naive* FLOP count (`2·N·nnz·R`) for every
+/// variant, so the elements/s ratio is exactly the end-to-end speedup.
+fn bench_mttkrp_dimtree(c: &mut Criterion) {
+    use std::time::Duration;
+
+    let mut group = c.benchmark_group("mttkrp_dimtree");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(10));
+
+    // (label, shape, CP rank) — CP-ALS-relevant working points.
+    let configs: Vec<(&str, Vec<usize>, usize)> = vec![
+        ("128^3_r32", vec![128, 128, 128], 32),
+        ("256^3_r64", vec![256, 256, 256], 64),
+        ("48^4_r32", vec![48, 48, 48, 48], 32),
+        ("24^5_r16", vec![24, 24, 24, 24, 24], 16),
+    ];
+
+    for (label, shape, rank) in configs {
+        let nmodes = shape.len();
+        let nnz: usize = shape.iter().product();
+
+        // Deterministic, well-scaled data (values do not affect timing, but keep
+        // them bounded so nothing denormalizes).
+        let tensor = Array::from_shape_fn(shape.clone(), |idx| {
+            let s: usize = (0..nmodes).map(|axis| (axis + 1) * idx[axis]).sum();
+            ((s % 17) as f64) / 17.0 - 0.5
+        });
+        let factors: Vec<Array2<f64>> = shape
+            .iter()
+            .enumerate()
+            .map(|(mode, &dim)| {
+                Array2::<f64>::from_shape_fn((dim, rank), |(i, r)| {
+                    (((i * 7 + r * 13 + mode * 3) % 11) as f64) / 11.0 - 0.5
+                })
+            })
+            .collect();
+        let views: Vec<_> = factors.iter().map(|f| f.view()).collect();
+
+        // Reference FLOPs of one full naive ALS sweep: N MTTKRPs of 2·nnz·R each.
+        let reference_flops = 2 * nmodes * nnz * rank;
+        group.throughput(Throughput::Elements(reference_flops as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("naive_all_modes", label),
+            &label,
+            |bencher, _| {
+                bencher.iter(|| {
+                    for mode in 0..nmodes {
+                        black_box(mttkrp(&tensor.view(), &views, mode).unwrap());
+                    }
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("dimtree_all_modes", label),
+            &label,
+            |bencher, _| {
+                bencher.iter(|| {
+                    black_box(mttkrp_all_modes(&tensor.view(), &views).unwrap());
+                });
+            },
+        );
+
+        // Tree reused across iterations (what CP-ALS should do: build once).
+        let tree = DimTree::new(&shape).unwrap();
+        group.bench_with_input(
+            BenchmarkId::new("dimtree_all_modes_reused", label),
+            &label,
+            |bencher, _| {
+                bencher.iter(|| {
+                    black_box(tree.mttkrp_all(&tensor.view(), &views).unwrap());
+                });
+            },
+        );
+
+        #[cfg(feature = "parallel")]
+        group.bench_with_input(
+            BenchmarkId::new("dimtree_all_modes_parallel", label),
+            &label,
+            |bencher, _| {
+                bencher.iter(|| {
+                    black_box(mttkrp_all_modes_parallel(&tensor.view(), &views).unwrap());
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn bench_outer_product(c: &mut Criterion) {
     let mut group = c.benchmark_group("outer_product");
 
@@ -432,12 +546,12 @@ fn bench_utilities(c: &mut Criterion) {
         group.throughput(Throughput::Elements(ops as u64));
 
         group.bench_with_input(
-            BenchmarkId::new("mttkrp_all_modes", format!("{}^3_r{}", size, rank)),
+            BenchmarkId::new("mttkrp_all_modes_naive", format!("{}^3_r{}", size, rank)),
             &size,
             |bencher, _| {
                 bencher.iter(|| {
                     black_box(
-                        mttkrp_all_modes(&tensor.view(), &[u1.view(), u2.view(), u3.view()])
+                        mttkrp_all_modes_naive(&tensor.view(), &[u1.view(), u2.view(), u3.view()])
                             .unwrap(),
                     );
                 });
@@ -1166,6 +1280,7 @@ criterion_group!(
     bench_hadamard,
     bench_nmode_product,
     bench_mttkrp,
+    bench_mttkrp_dimtree,
     bench_outer_product,
     bench_tucker_operator,
     bench_utilities,

@@ -67,6 +67,10 @@ scirs2-core = { version = "0.6.0", features = ["array", "random", "parallel"] }
 scirs2-linalg = { version = "0.6.0" }
 scirs2-fft = { version = "0.6.0" }
 
+# Tensorlogic (optional, default-off; enabled by tenrso-ad's `tensorlogic` feature)
+tensorlogic-infer = { version = "0.1.1", default-features = false }
+tensorlogic-ir = { version = "0.1.1", default-features = false }
+
 # TenRSo internal crates
 tenrso = { version = "0.1.0", path = "crates/tenrso" }
 tenrso-core = { version = "0.1.0", path = "crates/tenrso-core" }

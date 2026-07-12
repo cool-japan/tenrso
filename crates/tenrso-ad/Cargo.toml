@@ -19,14 +19,20 @@ anyhow.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
 num-traits = "0.2"
+tensorlogic-infer = { workspace = true, optional = true }
+tensorlogic-ir = { workspace = true, optional = true }
 
 [features]
 default = []
-# Feature gate for Tensorlogic integration.
-# When enabled, the TensorlogicAdapter methods become available once
-# the tensorlogic crate API is wired in. For now this gate marks the
-# migration path; enabling it returns a more-specific error message.
-tensorlogic = []
+# Tensorlogic integration (default-OFF).
+#
+# Enables `tenrso_ad::tensorlogic_bridge`, which implements Tensorlogic's
+# `TlExecutor` / `TlAutodiff` traits on top of the TenRSo op registry, and the
+# `DenseND <-> ArrayD<f64>` conversions on `TensorlogicAdapter`.
+#
+# `tensorlogic-ir` is required in addition to `tensorlogic-infer` because
+# `TlAutodiff::forward`/`backward` take a `tensorlogic_ir::EinsumGraph`.
+tensorlogic = ["dep:tensorlogic-infer", "dep:tensorlogic-ir"]
 
 [dev-dependencies]
 proptest.workspace = true

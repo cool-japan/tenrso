@@ -239,10 +239,16 @@ where
     })
 }
 
-/// Compute MTTKRP for all modes and return a vector of factor matrices
+/// Compute MTTKRP for all modes by calling [`crate::mttkrp()`] once per mode (naive baseline)
 ///
-/// This is a convenience function that computes MTTKRP along each mode,
-/// which is useful in CP-ALS iterations where all factors need updating.
+/// This is the straightforward `for mode in 0..N { mttkrp(..., mode) }` loop: every
+/// mode redundantly re-materializes a full permuted copy of the tensor and a full
+/// complement Khatri-Rao product, sharing nothing between modes.
+///
+/// **Prefer [`crate::mttkrp_all_modes`]** (the memoized dimension-tree kernel), which
+/// computes the same `N` results in `≈ 2·nnz·R` multiply-adds instead of `N·nnz·R`,
+/// with no per-mode tensor copy. This function is retained as the reference baseline
+/// (it is what the dimension-tree kernel is validated and benchmarked against).
 ///
 /// # Arguments
 ///
@@ -255,7 +261,7 @@ where
 ///
 /// # Complexity
 ///
-/// Time: O(nmodes × MTTKRP_cost)
+/// Time: O(nmodes × MTTKRP_cost) = O(N · nnz · R)
 /// Space: O(nmodes × mode_size × rank)
 ///
 /// # Examples
@@ -263,7 +269,7 @@ where
 /// ```
 /// use scirs2_core::ndarray_ext::Array2;
 /// use tenrso_core::DenseND;
-/// use tenrso_kernels::mttkrp_all_modes;
+/// use tenrso_kernels::mttkrp_all_modes_naive;
 ///
 /// let tensor = DenseND::<f64>::ones(&[3, 4, 5]);
 /// let factors = vec![
@@ -273,13 +279,13 @@ where
 /// ];
 /// let factor_views: Vec<_> = factors.iter().map(|f| f.view()).collect();
 ///
-/// let updated = mttkrp_all_modes(&tensor.view(), &factor_views).unwrap();
+/// let updated = mttkrp_all_modes_naive(&tensor.view(), &factor_views).unwrap();
 /// assert_eq!(updated.len(), 3);
 /// assert_eq!(updated[0].shape(), &[3, 2]);
 /// assert_eq!(updated[1].shape(), &[4, 2]);
 /// assert_eq!(updated[2].shape(), &[5, 2]);
 /// ```
-pub fn mttkrp_all_modes<T>(
+pub fn mttkrp_all_modes_naive<T>(
     tensor: &ArrayView<T, IxDyn>,
     factors: &[ArrayView2<T>],
 ) -> KernelResult<Vec<Array2<T>>>
@@ -290,7 +296,7 @@ where
 
     if factors.len() != nmodes {
         return Err(KernelError::dimension_mismatch(
-            "mttkrp_all_modes",
+            "mttkrp_all_modes_naive",
             vec![nmodes],
             vec![factors.len()],
             "Number of factors must match number of modes",
@@ -300,11 +306,42 @@ where
     let mut result = Vec::with_capacity(nmodes);
     for mode in 0..nmodes {
         let factor_matrix = mttkrp(tensor, factors, mode)
-            .map_err(|e| KernelError::operation_error("mttkrp_all_modes", e.to_string()))?;
+            .map_err(|e| KernelError::operation_error("mttkrp_all_modes_naive", e.to_string()))?;
         result.push(factor_matrix);
     }
 
     Ok(result)
+}
+
+/// **Deprecated alias** for [`mttkrp_all_modes_naive`].
+///
+/// This function was the original public name for the naive per-mode MTTKRP
+/// loop. It was briefly renamed to `mttkrp_all_modes_naive` to free the name
+/// `mttkrp_all_modes` for the new, much faster dimension-tree implementation
+/// at [`crate::mttkrp_dimtree::mttkrp_all_modes`]. Since `tenrso-kernels` is a
+/// published crate, that rename was semver-breaking for anyone who imported
+/// `tenrso_kernels::utils::mttkrp_all_modes` directly — this alias restores
+/// that path.
+///
+/// * Same behavior, same signature: forwards straight to
+///   [`mttkrp_all_modes_naive`] (the honest name for this `O(N · nnz · R)`
+///   reference baseline).
+/// * For new code, prefer [`crate::mttkrp_dimtree::mttkrp_all_modes`], which
+///   computes the same `N` results in `≈ 2·nnz·R` multiply-adds via a shared
+///   dimension tree instead of `N` independent per-mode sweeps.
+#[deprecated(
+    since = "0.1.0",
+    note = "renamed to `mttkrp_all_modes_naive` (same behavior); for the fast \
+            path use `tenrso_kernels::mttkrp_dimtree::mttkrp_all_modes` instead"
+)]
+pub fn mttkrp_all_modes<T>(
+    tensor: &ArrayView<T, IxDyn>,
+    factors: &[ArrayView2<T>],
+) -> KernelResult<Vec<Array2<T>>>
+where
+    T: Clone + Num + Float + 'static,
+{
+    mttkrp_all_modes_naive(tensor, factors)
 }
 
 /// Compute multiple Khatri-Rao products in batch
@@ -661,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mttkrp_all_modes() {
+    fn test_mttkrp_all_modes_naive() {
         let tensor = DenseND::<f64>::ones(&[3, 4, 5]);
         let factors = [
             Array2::<f64>::ones((3, 2)),
@@ -670,7 +707,7 @@ mod tests {
         ];
         let factor_views: Vec<_> = factors.iter().map(|f| f.view()).collect();
 
-        let updated = mttkrp_all_modes(&tensor.view(), &factor_views).unwrap();
+        let updated = mttkrp_all_modes_naive(&tensor.view(), &factor_views).unwrap();
 
         assert_eq!(updated.len(), 3);
         assert_eq!(updated[0].shape(), &[3, 2]);
@@ -679,7 +716,33 @@ mod tests {
     }
 
     #[test]
-    fn test_mttkrp_all_modes_wrong_num_factors() {
+    #[allow(deprecated)]
+    fn test_mttkrp_all_modes_deprecated_alias_matches_naive() {
+        // The deprecated `mttkrp_all_modes` alias must forward to
+        // `mttkrp_all_modes_naive` with byte-for-byte identical behavior —
+        // this is what restores the pre-rename public API.
+        let tensor = DenseND::<f64>::ones(&[3, 4, 5]);
+        let factors = [
+            Array2::<f64>::ones((3, 2)),
+            Array2::<f64>::ones((4, 2)),
+            Array2::<f64>::ones((5, 2)),
+        ];
+        let factor_views: Vec<_> = factors.iter().map(|f| f.view()).collect();
+
+        let via_alias = mttkrp_all_modes(&tensor.view(), &factor_views).unwrap();
+        let via_naive = mttkrp_all_modes_naive(&tensor.view(), &factor_views).unwrap();
+
+        assert_eq!(via_alias.len(), via_naive.len());
+        for (a, b) in via_alias.iter().zip(via_naive.iter()) {
+            assert_eq!(a.shape(), b.shape());
+            for (x, y) in a.iter().zip(b.iter()) {
+                assert!((x - y).abs() < 1e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn test_mttkrp_all_modes_naive_wrong_num_factors() {
         let tensor = DenseND::<f64>::ones(&[3, 4, 5]);
         let factors = [
             Array2::<f64>::ones((3, 2)),
@@ -688,7 +751,7 @@ mod tests {
         ];
         let factor_views: Vec<_> = factors.iter().map(|f| f.view()).collect();
 
-        let result = mttkrp_all_modes(&tensor.view(), &factor_views);
+        let result = mttkrp_all_modes_naive(&tensor.view(), &factor_views);
         assert!(result.is_err());
     }
 

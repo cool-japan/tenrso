@@ -9,18 +9,32 @@
 //!
 //! # Architecture
 //!
-//! The abstraction is designed to be backend-agnostic, allowing future integration with:
-//! - CUDA (NVIDIA GPUs)
-//! - ROCm (AMD GPUs)
-//! - Vulkan Compute
-//! - Metal (Apple Silicon)
+//! The abstraction is backend-agnostic and, via `scirs2-core`'s GPU abstraction
+//! (`scirs2_core::gpu`), can enumerate real hardware for:
+//! - CUDA (NVIDIA GPUs), behind the optional `cuda` feature
+//! - ROCm (AMD GPUs), behind the optional `rocm` feature
+//! - Metal (Apple Silicon), behind the optional `metal` feature
+//! - Vulkan / cross-platform GPU compute (via `wgpu`), behind the optional `vulkan` feature
+//!
+//! All four are default-off: a plain `cargo build` never links a vendor SDK and
+//! never attempts hardware probing.
 //!
 //! # Current Implementation
 //!
-//! The current implementation uses a CPU fallback backend that:
-//! - Simulates GPU behavior using CPU operations
-//! - Supports async transfers using thread pools
-//! - Provides the same API as future GPU backends
+//! Buffer operations (`DeviceBuffer`, `Device::add`, `Device::mul`, ...) always
+//! execute on the CPU in this crate; GPU *devices* can be enumerated (see
+//! [`DeviceManager::available_backends`]) but tensor kernels are not yet
+//! dispatched to them. Device buffer/compute operations:
+//! - Run on the CPU regardless of which backends were detected
+//! - Support async transfers using thread pools
+//! - Provide the same API that future GPU-dispatching backends will use
+//!
+//! Device *enumeration* is honest: a device only appears in
+//! [`DeviceManager::list_devices`] if its backend's cargo feature was compiled
+//! in **and** `scirs2-core` actually queried real hardware for it. When a
+//! backend's feature is off, or the feature is on but no hardware is found,
+//! [`DeviceManager::available_backends`] reports that truthfully instead of
+//! silently looking identical to "we never checked".
 //!
 //! # Example
 //!
@@ -100,6 +114,52 @@ pub struct DeviceInfo {
     pub compute_capability: String,
     /// Number of compute units / streaming multiprocessors
     pub compute_units: usize,
+}
+
+/// Honest capability report for one GPU backend.
+///
+/// This is what makes the CPU-only case observable rather than a silent lie:
+/// callers can distinguish "this backend's cargo feature was never compiled
+/// in" from "the feature was compiled in but no hardware was found" from
+/// "the feature was compiled in and N real devices were found".
+///
+/// Every field is populated from an actual compile-time `cfg!` check and/or a
+/// real runtime hardware probe performed through `scirs2-core`'s GPU
+/// abstraction (`scirs2_core::gpu`) — never fabricated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendStatus {
+    /// Backend identifier: `"cuda"`, `"rocm"`, `"metal"`, or `"vulkan"`.
+    pub name: String,
+    /// Whether this backend's cargo feature was enabled for this build.
+    ///
+    /// `false` means the corresponding vendor SDK / detection code was not
+    /// even compiled in; no hardware probe was attempted.
+    pub compiled_in: bool,
+    /// Number of devices actually detected for this backend at runtime.
+    ///
+    /// Always `0` when `compiled_in` is `false`. When `compiled_in` is `true`
+    /// this reflects a real probe result (which may legitimately be `0` if
+    /// the vendor tool/runtime is missing or no matching hardware exists).
+    pub devices_found: usize,
+    /// Human-readable explanation of how detection was performed, or why it
+    /// reports zero devices.
+    pub detail: String,
+}
+
+impl BackendStatus {
+    /// Build the honest "not compiled in" status for a backend whose cargo
+    /// feature was disabled for this build. No detection was attempted.
+    fn not_compiled(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            compiled_in: false,
+            devices_found: 0,
+            detail: format!(
+                "the \"{name}\" cargo feature was not enabled for this build; \
+                 no hardware detection was attempted"
+            ),
+        }
+    }
 }
 
 /// Device buffer holding data on a specific device
@@ -501,12 +561,24 @@ pub struct DeviceManager {
     devices: Vec<Arc<Device>>,
     /// Default device index
     default_device: AtomicUsize,
+    /// Honest per-backend capability report, computed once at construction
+    /// time (see [`DeviceManager::available_backends`]).
+    backend_status: Vec<BackendStatus>,
 }
 
 impl DeviceManager {
     /// Create a new device manager
     ///
-    /// Enumerates all available devices (currently only CPU fallback)
+    /// Always contains the CPU fallback device. Additionally enumerates real
+    /// GPU hardware through `scirs2-core`'s GPU abstraction for every backend
+    /// whose cargo feature (`cuda`, `rocm`, `metal`, `vulkan`) is compiled
+    /// into this build; backends whose feature is off contribute no devices
+    /// and are reported as such by [`DeviceManager::available_backends`].
+    ///
+    /// This never fabricates a device: a GPU only appears in the device list
+    /// when its feature is compiled in *and* `scirs2-core` actually detected
+    /// real hardware for it (e.g. via `nvidia-smi`, `rocm-smi`, the macOS
+    /// Metal API, or a real `wgpu` adapter query).
     pub fn new() -> Result<Self> {
         let mut devices = Vec::new();
 
@@ -522,15 +594,12 @@ impl DeviceManager {
         };
         devices.push(Device::new(cpu_info));
 
-        // TODO: Add GPU device enumeration when backends are implemented
-        // - CUDA devices
-        // - ROCm devices
-        // - Vulkan devices
-        // - Metal devices
+        let backend_status = Self::enumerate_gpu_devices(&mut devices);
 
         Ok(Self {
             devices,
             default_device: AtomicUsize::new(0),
+            backend_status,
         })
     }
 
@@ -643,17 +712,224 @@ impl DeviceManager {
     pub fn list_devices(&self) -> Vec<DeviceInfo> {
         self.devices.iter().map(|d| d.info().clone()).collect()
     }
+
+    /// Report which GPU backends were compiled into this build and how many
+    /// real devices each one found.
+    ///
+    /// Always returns exactly 4 entries, one each for `"cuda"`, `"rocm"`,
+    /// `"metal"`, `"vulkan"`, in that order. This is the honest counterpart
+    /// to [`DeviceManager::list_devices`]: it makes "no GPU feature was
+    /// compiled in" and "the feature was compiled in but found nothing"
+    /// observably different from each other, instead of both silently
+    /// collapsing into a CPU-only device list.
+    pub fn available_backends(&self) -> Vec<BackendStatus> {
+        self.backend_status.clone()
+    }
+
+    /// Enumerate real GPU devices via `scirs2-core`'s GPU abstraction and
+    /// push them onto `devices`, returning an honest per-backend status
+    /// report. Compiled only when the `gpu` feature (implied by `cuda`,
+    /// `rocm`, `metal`, and `vulkan`) is enabled.
+    #[cfg(feature = "gpu")]
+    fn enumerate_gpu_devices(devices: &mut Vec<Arc<Device>>) -> Vec<BackendStatus> {
+        use scirs2_core::gpu::backends::detect_gpu_backends;
+        use scirs2_core::gpu::GpuBackend as ScirsGpuBackend;
+
+        // `detect_gpu_backends` shells out to `nvidia-smi` / `rocm-smi` /
+        // `system_profiler` (macOS) in a single pass; run it once (only if a
+        // backend that consumes it is actually compiled in) instead of once
+        // per backend.
+        let detection = if cfg!(any(feature = "cuda", feature = "rocm", feature = "metal")) {
+            Some(detect_gpu_backends())
+        } else {
+            None
+        };
+
+        vec![
+            Self::probe_backend(
+                "cuda",
+                cfg!(feature = "cuda"),
+                ScirsGpuBackend::Cuda,
+                DeviceType::Cuda,
+                detection.as_ref(),
+                devices,
+                "nvidia-smi",
+            ),
+            Self::probe_backend(
+                "rocm",
+                cfg!(feature = "rocm"),
+                ScirsGpuBackend::Rocm,
+                DeviceType::Rocm,
+                detection.as_ref(),
+                devices,
+                "rocm-smi",
+            ),
+            Self::probe_backend(
+                "metal",
+                cfg!(feature = "metal"),
+                ScirsGpuBackend::Metal,
+                DeviceType::Metal,
+                detection.as_ref(),
+                devices,
+                "the macOS Metal API (no-op on non-macOS hosts)",
+            ),
+            Self::detect_vulkan(devices),
+        ]
+    }
+
+    /// No-op enumeration used when the `gpu` feature (and therefore every
+    /// vendor-specific feature) is disabled: no hardware detection code is
+    /// even compiled in, so we report all four backends as not compiled
+    /// rather than attempting anything.
+    #[cfg(not(feature = "gpu"))]
+    fn enumerate_gpu_devices(_devices: &mut Vec<Arc<Device>>) -> Vec<BackendStatus> {
+        vec![
+            BackendStatus::not_compiled("cuda"),
+            BackendStatus::not_compiled("rocm"),
+            BackendStatus::not_compiled("metal"),
+            BackendStatus::not_compiled("vulkan"),
+        ]
+    }
+
+    /// Probe one `scirs2_core::gpu::backends::detect_gpu_backends` backed
+    /// backend (CUDA, ROCm, or Metal) and push any real devices it finds.
+    ///
+    /// `detection` is `None` only when `compiled_in` is `false` (no backend
+    /// that needs it was compiled in), in which case no probe was run and we
+    /// report the honest "not compiled" status without touching `devices`.
+    #[cfg(feature = "gpu")]
+    #[allow(clippy::too_many_arguments)]
+    fn probe_backend(
+        name: &str,
+        compiled_in: bool,
+        scirs_backend: scirs2_core::gpu::GpuBackend,
+        device_type: DeviceType,
+        detection: Option<&scirs2_core::gpu::backends::GpuDetectionResult>,
+        devices: &mut Vec<Arc<Device>>,
+        method: &str,
+    ) -> BackendStatus {
+        if !compiled_in {
+            return BackendStatus::not_compiled(name);
+        }
+
+        let Some(detection) = detection else {
+            // Unreachable in practice: `compiled_in` implies `detection` was
+            // computed by `enumerate_gpu_devices`. Report honestly instead of
+            // panicking or fabricating a device count.
+            return BackendStatus {
+                name: name.to_string(),
+                compiled_in: true,
+                devices_found: 0,
+                detail: format!(
+                    "internal error: \"{name}\" is compiled in but detection did not run"
+                ),
+            };
+        };
+
+        let mut found = 0usize;
+        for info in detection
+            .devices
+            .iter()
+            .filter(|candidate| candidate.backend == scirs_backend)
+        {
+            devices.push(Device::new(DeviceInfo {
+                device_type,
+                device_id: found,
+                name: info.device_name.clone(),
+                total_memory: info.memory_bytes.unwrap_or(0) as usize,
+                available_memory: info.memory_bytes.unwrap_or(0) as usize,
+                compute_capability: info
+                    .compute_capability
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                // scirs2-core's GpuInfo does not report a compute-unit /
+                // streaming-multiprocessor count; 0 means "unknown", matching
+                // the convention scirs2-core itself uses for unqueried fields.
+                compute_units: 0,
+            }));
+            found += 1;
+        }
+
+        BackendStatus {
+            name: name.to_string(),
+            compiled_in: true,
+            devices_found: found,
+            detail: if found > 0 {
+                format!(
+                    "detected {found} device(s) via {method} \
+                     (scirs2_core::gpu::backends::detect_gpu_backends)"
+                )
+            } else {
+                format!(
+                    "compiled in, but {method} reported no devices \
+                     (tool missing, failed, or no matching hardware present)"
+                )
+            },
+        }
+    }
+
+    /// Probe the cross-platform `wgpu` (Vulkan / DirectX12 / Metal / GL)
+    /// backend for a real compute adapter.
+    ///
+    /// `scirs2-core`'s public `WebGPUContext::is_available` performs a real
+    /// `wgpu::Instance::request_adapter` call, so a `true` result reflects
+    /// genuine hardware. `scirs2-core` does not expose the adapter's
+    /// name/backend/memory through its public API in this version, so those
+    /// fields are honestly reported as "unknown" rather than invented.
+    #[cfg(all(feature = "gpu", feature = "vulkan"))]
+    fn detect_vulkan(devices: &mut Vec<Arc<Device>>) -> BackendStatus {
+        use scirs2_core::gpu::backends::WebGPUContext;
+
+        if WebGPUContext::is_available() {
+            devices.push(Device::new(DeviceInfo {
+                device_type: DeviceType::Vulkan,
+                device_id: 0,
+                name: "wgpu compute adapter (vendor/model not exposed by scirs2-core)".to_string(),
+                total_memory: 0,
+                available_memory: 0,
+                compute_capability: "unknown".to_string(),
+                compute_units: 0,
+            }));
+            BackendStatus {
+                name: "vulkan".to_string(),
+                compiled_in: true,
+                devices_found: 1,
+                detail: "a wgpu-compatible compute adapter was found via \
+                         scirs2_core::gpu::backends::WebGPUContext::is_available \
+                         (a real wgpu::Instance::request_adapter query); scirs2-core's \
+                         public API does not expose per-adapter name/memory/native-backend \
+                         in this version, so those fields are reported as unknown rather \
+                         than fabricated"
+                    .to_string(),
+            }
+        } else {
+            BackendStatus {
+                name: "vulkan".to_string(),
+                compiled_in: true,
+                devices_found: 0,
+                detail: "compiled in, but no wgpu-compatible GPU adapter was found on this host"
+                    .to_string(),
+            }
+        }
+    }
+
+    /// `vulkan` feature disabled: no `wgpu` detection code is compiled in.
+    #[cfg(all(feature = "gpu", not(feature = "vulkan")))]
+    fn detect_vulkan(_devices: &mut Vec<Arc<Device>>) -> BackendStatus {
+        BackendStatus::not_compiled("vulkan")
+    }
 }
 
 impl Default for DeviceManager {
     fn default() -> Self {
-        // `DeviceManager::new()` only allocates a single CPU descriptor and an
+        // `DeviceManager::new()` only allocates device descriptors and an
         // `AtomicUsize`; neither operation can fail in practice. If the Result
         // is ever Err we fall back to an empty device list rather than panic,
         // keeping `Default::default()` panic-free.
         Self::new().unwrap_or(Self {
             devices: Vec::new(),
             default_device: AtomicUsize::new(0),
+            backend_status: Vec::new(),
         })
     }
 }
@@ -791,13 +1067,22 @@ mod tests {
     fn test_default_device() {
         let manager = DeviceManager::new().unwrap();
         let device = manager.default_device().unwrap();
+        // Index 0 in the manager is always the CPU fallback device.
+        assert_eq!(device.device_type(), DeviceType::Cpu);
         assert_eq!(device.device_id(), 0);
 
-        // Try setting different default
+        // Try setting a different default. Note that `device_id` is scoped
+        // per backend type (e.g. the first CUDA device also reports
+        // `device_id() == 0`), so a device at manager index 1 does not
+        // necessarily have `device_id() == 1` once GPU devices are present;
+        // compare against the manager's own listing instead of hardcoding
+        // that coincidence.
         if manager.device_count() > 1 {
             manager.set_default_device(1).unwrap();
-            let device = manager.default_device().unwrap();
-            assert_eq!(device.device_id(), 1);
+            let selected = manager.default_device().unwrap();
+            let expected = &manager.list_devices()[1];
+            assert_eq!(selected.device_type(), expected.device_type);
+            assert_eq!(selected.device_id(), expected.device_id);
         }
     }
 
@@ -806,8 +1091,103 @@ mod tests {
         let manager = DeviceManager::new().unwrap();
         let device = manager.best_device().unwrap();
 
-        // Should return CPU device when no GPU available
-        assert_eq!(device.device_type(), DeviceType::Cpu);
+        if cfg!(any(
+            feature = "cuda",
+            feature = "rocm",
+            feature = "metal",
+            feature = "vulkan"
+        )) {
+            // A GPU feature is compiled in: real hardware may or may not be
+            // present on the machine running the test (this sandbox, for
+            // instance, has a real NVIDIA GPU attached), so we can't assert a
+            // specific device type here. Just check we got a valid device.
+            assert!(manager.device_count() >= 1);
+            assert!(!manager.devices_by_type(device.device_type()).is_empty());
+        } else {
+            // No GPU backend compiled in: CPU is the only possible device.
+            assert_eq!(device.device_type(), DeviceType::Cpu);
+        }
+    }
+
+    /// With every GPU feature off, `DeviceManager` must be exactly CPU-only,
+    /// and `available_backends` must honestly report that none of the four
+    /// backends were even compiled in (not "compiled in but found nothing").
+    #[test]
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "rocm",
+        feature = "metal",
+        feature = "vulkan"
+    )))]
+    fn test_default_build_is_cpu_only_and_honest() {
+        let manager = DeviceManager::new().unwrap();
+
+        assert_eq!(manager.device_count(), 1);
+        assert_eq!(manager.list_devices()[0].device_type, DeviceType::Cpu);
+
+        let backends = manager.available_backends();
+        assert_eq!(backends.len(), 4);
+        let names: Vec<&str> = backends.iter().map(|b| b.name.as_str()).collect();
+        assert!(names.contains(&"cuda"));
+        assert!(names.contains(&"rocm"));
+        assert!(names.contains(&"metal"));
+        assert!(names.contains(&"vulkan"));
+
+        for backend in &backends {
+            assert!(
+                !backend.compiled_in,
+                "backend {} should not be compiled in without its feature",
+                backend.name
+            );
+            assert_eq!(
+                backend.devices_found, 0,
+                "backend {} must report 0 devices when not compiled in",
+                backend.name
+            );
+            assert!(
+                !backend.detail.is_empty(),
+                "backend {} must explain why it found nothing",
+                backend.name
+            );
+        }
+    }
+
+    /// Regardless of which GPU features are compiled in, `available_backends`
+    /// must always report exactly 4 entries whose `devices_found` count is
+    /// internally consistent with the actual device list — never a
+    /// fabricated number disconnected from what `list_devices` shows.
+    #[test]
+    fn test_available_backends_is_internally_consistent() {
+        let manager = DeviceManager::new().unwrap();
+        let backends = manager.available_backends();
+        assert_eq!(backends.len(), 4);
+
+        for backend in &backends {
+            if !backend.compiled_in {
+                assert_eq!(
+                    backend.devices_found, 0,
+                    "backend {} reports devices_found > 0 while not compiled in",
+                    backend.name
+                );
+            }
+
+            let expected_type = match backend.name.as_str() {
+                "cuda" => Some(DeviceType::Cuda),
+                "rocm" => Some(DeviceType::Rocm),
+                "metal" => Some(DeviceType::Metal),
+                "vulkan" => Some(DeviceType::Vulkan),
+                other => panic!("unexpected backend name: {other}"),
+            };
+
+            if let Some(device_type) = expected_type {
+                assert_eq!(
+                    manager.devices_by_type(device_type).len(),
+                    backend.devices_found,
+                    "devices_found for {} does not match the actual device list",
+                    backend.name
+                );
+            }
+        }
     }
 
     #[test]

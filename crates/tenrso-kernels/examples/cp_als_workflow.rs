@@ -8,8 +8,8 @@
 use scirs2_core::ndarray_ext::Array2;
 use tenrso_core::DenseND;
 use tenrso_kernels::{
-    cp_reconstruct, denormalize_factor, frobenius_norm_tensor, mttkrp_all_modes, normalize_factor,
-    validate_factor_shapes,
+    cp_reconstruct, denormalize_factor, frobenius_norm_tensor, mttkrp_all_modes_naive,
+    normalize_factor, validate_factor_shapes,
 };
 
 fn main() {
@@ -79,7 +79,7 @@ fn main() {
         // 2. Compute MTTKRP for all modes in one call
         let normalized_views: Vec<_> = normalized_factors.iter().map(|f| f.view()).collect();
 
-        let updated_factors = match mttkrp_all_modes(&tensor.view(), &normalized_views) {
+        let updated_factors = match mttkrp_all_modes_naive(&tensor.view(), &normalized_views) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("MTTKRP failed: {}", e);
@@ -150,7 +150,7 @@ fn main() {
     println!("\nKey features demonstrated:");
     println!("  ✓ validate_factor_shapes() - Pre-iteration validation");
     println!("  ✓ normalize_factor() - Numerical stability");
-    println!("  ✓ mttkrp_all_modes() - Batch MTTKRP computation");
+    println!("  ✓ mttkrp_all_modes_naive() - Batch MTTKRP computation");
     println!("  ✓ denormalize_factor() - Scale recovery");
     println!("  ✓ cp_reconstruct() - Tensor reconstruction");
     println!("  ✓ frobenius_norm_tensor() - Error computation");

@@ -14,6 +14,15 @@ tenrso-sparse = { workspace = true, optional = true }
 anyhow.workspace = true
 # SciRS2-core is MANDATORY (see SCIRS2_INTEGRATION_POLICY.md)
 # NEVER use ndarray, num-traits directly - always through scirs2-core
+#
+# NOTE: an earlier session added `features = ["simd"]` here to dispatch
+# through `scirs2_core::simd_ops::SimdUnifiedOps` (hadamard.rs, outer.rs, a
+# since-removed reductions_simd.rs). Every one of those `SimdUnifiedOps`-based
+# kernels measured *slower* than the plain scalar/`ndarray` implementation on
+# this crate's benchmark hardware (scirs2-core 0.6.0) and was removed or
+# folded back into its plain counterpart — see TODO.md's "SIMD variant
+# pruning" entry for the measurements. No code in this crate calls
+# `SimdUnifiedOps` anymore, so the extra feature flag was dropped too.
 scirs2-core.workspace = true
 scirs2-linalg.workspace = true
 

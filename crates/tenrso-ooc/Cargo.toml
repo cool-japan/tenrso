@@ -10,6 +10,9 @@ description = "Out-of-core processing with Arrow/Parquet for TenRSo"
 
 [dependencies]
 tenrso-core.workspace = true
+# Streaming MTTKRP delegates all per-chunk math to the in-core kernels.
+# (tenrso-kernels does NOT depend on tenrso-ooc: no cycle.)
+tenrso-kernels.workspace = true
 scirs2-core.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -50,11 +53,30 @@ default = ["arrow", "parquet", "mmap", "parallel", "compression", "lz4-compressi
 arrow = ["dep:arrow"]
 parquet = ["dep:parquet"]
 mmap = ["dep:memmap2"]
-parallel = ["scirs2-core/parallel"]
+parallel = ["scirs2-core/parallel", "tenrso-kernels/parallel"]
 compression = ["dep:oxiarc-lz4", "dep:oxiarc-zstd"]
 lz4-compression = ["compression", "dep:oxiarc-lz4"]
 zstd-compression = ["compression", "dep:oxiarc-zstd"]
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
+# GPU device enumeration (src/gpu.rs). All default-off: a plain build never
+# links a vendor SDK and never probes for hardware.
+#
+# `gpu` is the base switch that pulls in scirs2-core's GPU abstraction
+# (`scirs2_core::gpu`); it alone enables no vendor-specific detection.
+# Enable the vendor-specific features below to opt into real hardware
+# enumeration for that backend (see `DeviceManager::available_backends`).
+gpu = ["scirs2-core/gpu"]
+# NVIDIA CUDA device enumeration via `nvidia-smi` (scirs2-core has no
+# dedicated `cuda` feature in 0.6.x; the base `gpu` feature is sufficient).
+cuda = ["gpu"]
+# AMD ROCm device enumeration via `rocm-smi`.
+rocm = ["gpu", "scirs2-core/rocm"]
+# Apple Metal device enumeration via the real Metal API (macOS only; the
+# feature compiles everywhere else but finds nothing on non-macOS hosts).
+metal = ["gpu", "scirs2-core/metal"]
+# Cross-platform GPU compute adapter detection (Vulkan / DirectX12 / Metal /
+# GL) via scirs2-core's `wgpu` backend.
+vulkan = ["gpu", "scirs2-core/wgpu"]
 opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-semantic-conventions", "dep:tokio", "dep:parking_lot"]
 prometheus-metrics = ["dep:prometheus", "dep:parking_lot", "dep:lazy_static"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
@@ -66,7 +88,6 @@ distributed = ["dep:tonic", "dep:prost", "dep:oxicode", "dep:bytes", "dep:future
 criterion.workspace = true
 proptest.workspace = true
 tenrso-decomp.workspace = true
-tenrso-kernels.workspace = true
 tonic-build.workspace = true
 
 [[example]]
@@ -108,4 +129,8 @@ harness = false
 
 [[bench]]
 name = "micro"
+harness = false
+
+[[bench]]
+name = "mttkrp_stream"
 harness = false

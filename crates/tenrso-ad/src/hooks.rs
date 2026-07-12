@@ -33,6 +33,8 @@ use scirs2_core::numeric::Float;
 use std::fmt::Debug;
 use tenrso_core::DenseND;
 
+use crate::registry::{AdScalar, OpRegistry};
+
 /// Unique identifier for operations in the AD graph
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OperationId(pub u64);
@@ -223,90 +225,136 @@ where
     }
 }
 
-/// Placeholder for Tensorlogic integration
+/// Tensorlogic integration entry point.
 ///
-/// This will be implemented once Tensorlogic's API is finalized.
-/// For now, this demonstrates the expected interface.
+/// The adapter owns an [`OpRegistry`] holding every differentiable TenRSo
+/// operation (einsum, element-wise ops, reductions, CP/Tucker/TT
+/// reconstruction) together with its VJP rule. That registry is what an
+/// external engine consumes:
+///
+/// * [`TensorlogicAdapter::register_tenrso_ops`] populates it,
+/// * [`TensorlogicAdapter::registered_ops`] enumerates the op names,
+/// * [`TensorlogicAdapter::registry`] hands out the rules themselves.
+///
+/// With the (default-off) `tensorlogic` feature the adapter additionally builds
+/// a [`crate::tensorlogic_bridge::TenrsoTlExecutor`] — a real implementation of
+/// Tensorlogic's `TlExecutor` / `TlAutodiff` traits backed by this registry —
+/// and converts tensors to and from Tensorlogic's `ArrayD`-based tensor type.
+///
+/// # Example
+///
+/// ```rust
+/// use tenrso_ad::hooks::TensorlogicAdapter;
+///
+/// let mut adapter = TensorlogicAdapter::<f64>::new();
+/// adapter.register_tenrso_ops().expect("registration must succeed on a fresh adapter");
+///
+/// assert!(adapter.registered_ops().contains(&"einsum"));
+/// assert!(adapter.registered_ops().contains(&"cp_reconstruct"));
+/// ```
 #[derive(Debug)]
-pub struct TensorlogicAdapter {
-    _private: (),
+pub struct TensorlogicAdapter<T = f64>
+where
+    T: AdScalar,
+{
+    registry: OpRegistry<T>,
 }
 
-impl TensorlogicAdapter {
-    /// Create a new Tensorlogic adapter
-    ///
-    /// # Note
-    ///
-    /// This is a placeholder. Actual implementation pending Tensorlogic API.
+impl<T> TensorlogicAdapter<T>
+where
+    T: AdScalar,
+{
+    /// Create an adapter with an empty registry.
     pub fn new() -> Self {
-        Self { _private: () }
+        Self {
+            registry: OpRegistry::new(),
+        }
     }
 
-    /// Register TenRSo operations with Tensorlogic
-    ///
-    /// # Note
-    ///
-    /// This is a placeholder. Actual implementation pending Tensorlogic API.
-    pub fn register_tenrso_ops(&mut self) {
-        // TODO: Register einsum, decompositions, etc. with Tensorlogic
+    /// Create an adapter whose registry already holds every built-in op.
+    pub fn with_builtins() -> Self {
+        Self {
+            registry: OpRegistry::with_builtins(),
+        }
     }
 
-    /// Convert TenRSo tensor to Tensorlogic tensor
+    /// Register every TenRSo operation (forward + VJP) in this adapter's registry.
     ///
-    /// # Note
+    /// This is the real registration path: after it returns, the registry
+    /// contains `einsum`, the element-wise unary/binary ops, the reductions and
+    /// the CP/Tucker/TT reconstruction rules, each with a gradient rule that is
+    /// verified against finite differences in `tests/registry_gradcheck.rs`.
     ///
-    /// Requires the `tensorlogic` feature flag. Enable with:
-    /// `cargo build --features tensorlogic`
+    /// # Errors
     ///
-    /// The tensorlogic crate API is not yet available in this workspace;
-    /// enabling the feature gate marks the migration path once the dep lands.
-    pub fn to_tensorlogic<T>(&self, _tensor: &DenseND<T>) -> Result<()>
-    where
-        T: Float + 'static,
-    {
-        #[cfg(feature = "tensorlogic")]
-        anyhow::bail!(
-            "Tensorlogic integration: tensorlogic crate API not yet available; \
-             implementation pending — the 'tensorlogic' feature gate is present \
-             but the crate is not yet wired into the workspace"
-        );
-
-        #[cfg(not(feature = "tensorlogic"))]
-        anyhow::bail!(
-            "Tensorlogic integration requires the 'tensorlogic' feature: \
-             rebuild with --features tensorlogic"
-        );
+    /// Fails if one of the built-in names collides with an op the caller already
+    /// registered (registration never silently shadows).
+    pub fn register_tenrso_ops(&mut self) -> Result<()> {
+        self.registry.register_builtins()
     }
 
-    /// Convert Tensorlogic tensor to TenRSo tensor
-    ///
-    /// # Note
-    ///
-    /// Requires the `tensorlogic` feature flag. Enable with:
-    /// `cargo build --features tensorlogic`
-    ///
-    /// The tensorlogic crate API is not yet available in this workspace;
-    /// enabling the feature gate marks the migration path once the dep lands.
-    pub fn from_tensorlogic<T>(&self) -> Result<DenseND<T>>
-    where
-        T: Float + 'static,
-    {
-        #[cfg(feature = "tensorlogic")]
-        anyhow::bail!(
-            "Tensorlogic integration: tensorlogic crate API not yet available; \
-             implementation pending — the 'tensorlogic' feature gate is present \
-             but the crate is not yet wired into the workspace"
-        );
+    /// Borrow the registry.
+    pub fn registry(&self) -> &OpRegistry<T> {
+        &self.registry
+    }
 
-        #[cfg(not(feature = "tensorlogic"))]
-        anyhow::bail!(
-            "Tensorlogic integration requires the 'tensorlogic' feature: \
-             rebuild with --features tensorlogic"
-        );
+    /// Mutably borrow the registry (to add engine-specific ops).
+    pub fn registry_mut(&mut self) -> &mut OpRegistry<T> {
+        &mut self.registry
+    }
+
+    /// Names of every registered operation, sorted.
+    pub fn registered_ops(&self) -> Vec<&str> {
+        self.registry.names()
+    }
+
+    /// Build a Tensorlogic executor backed by this adapter's registry.
+    ///
+    /// Requires the `tensorlogic` feature.
+    #[cfg(feature = "tensorlogic")]
+    pub fn executor(&self) -> crate::tensorlogic_bridge::TenrsoTlExecutor<T> {
+        crate::tensorlogic_bridge::TenrsoTlExecutor::with_registry(self.registry.clone())
+    }
+
+    /// Convert a TenRSo tensor into Tensorlogic's dense tensor type.
+    ///
+    /// Tensorlogic's SciRS2 backend represents tensors as `ArrayD<f64>`
+    /// (`tensorlogic_scirs_backend::Scirs2Tensor`), so this is a genuine
+    /// conversion: the element type is cast to `f64` and the shape is preserved.
+    ///
+    /// Requires the `tensorlogic` feature.
+    ///
+    /// # Errors
+    ///
+    /// Fails if an element cannot be represented as `f64`.
+    #[cfg(feature = "tensorlogic")]
+    pub fn to_tensorlogic(
+        &self,
+        tensor: &DenseND<T>,
+    ) -> Result<scirs2_core::ndarray_ext::ArrayD<f64>> {
+        crate::tensorlogic_bridge::dense_to_tl(tensor)
+    }
+
+    /// Convert a Tensorlogic dense tensor (`ArrayD<f64>`) into a TenRSo tensor.
+    ///
+    /// Requires the `tensorlogic` feature.
+    ///
+    /// # Errors
+    ///
+    /// Fails if an element cannot be represented in `T`.
+    #[cfg(feature = "tensorlogic")]
+    pub fn from_tensorlogic(
+        &self,
+        tensor: &scirs2_core::ndarray_ext::ArrayD<f64>,
+    ) -> Result<DenseND<T>> {
+        crate::tensorlogic_bridge::tl_to_dense(tensor)
     }
 }
 
-impl Default for TensorlogicAdapter {
+impl<T> Default for TensorlogicAdapter<T>
+where
+    T: AdScalar,
+{
     fn default() -> Self {
         Self::new()
     }
@@ -343,8 +391,60 @@ mod tests {
     }
 
     #[test]
-    fn test_tensorlogic_adapter_creation() {
-        let _adapter = TensorlogicAdapter::new();
-        // Just verify it can be created
+    fn test_tensorlogic_adapter_starts_empty() {
+        let adapter = TensorlogicAdapter::<f64>::new();
+        assert!(adapter.registry().is_empty());
+        assert!(adapter.registered_ops().is_empty());
+    }
+
+    #[test]
+    fn test_tensorlogic_adapter_registers_real_ops() {
+        let mut adapter = TensorlogicAdapter::<f64>::new();
+        adapter
+            .register_tenrso_ops()
+            .expect("registering builtins into an empty registry must succeed");
+
+        let ops = adapter.registered_ops();
+        for expected in [
+            "einsum",
+            "relu",
+            "add",
+            "reduce_sum",
+            "reduce_max",
+            "cp_reconstruct",
+            "tucker_reconstruct",
+            "tt_reconstruct",
+        ] {
+            assert!(
+                ops.contains(&expected),
+                "missing registered op '{expected}'"
+            );
+        }
+
+        // The registered rules are real: run one forward + backward through the
+        // registry to prove the adapter is not just holding names.
+        let a = DenseND::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let b = DenseND::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+        let params = crate::registry::OpParams::einsum("ij,jk->ik");
+
+        let c = adapter
+            .registry()
+            .forward("einsum", &[a.clone(), b.clone()], &params)
+            .expect("einsum forward");
+        assert_eq!(c.as_slice(), &[19.0, 22.0, 43.0, 50.0]);
+
+        let grads = adapter
+            .registry()
+            .vjp("einsum", &[a, b], &DenseND::ones(&[2, 2]), &params)
+            .expect("einsum vjp");
+        assert_eq!(grads.len(), 2);
+        // grad_a = grad_c @ b^T = [[11, 15], [11, 15]]
+        assert_eq!(grads[0].as_slice(), &[11.0, 15.0, 11.0, 15.0]);
+    }
+
+    #[test]
+    fn test_tensorlogic_adapter_double_registration_fails() {
+        let mut adapter = TensorlogicAdapter::<f64>::with_builtins();
+        assert!(adapter.register_tenrso_ops().is_err());
     }
 }

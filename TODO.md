@@ -1,21 +1,87 @@
 # TenRSo TODO
 
 > **Version:** 0.1.0
-> **Status:** 🎉 **0.1.0 STABLE RELEASED** - 2,178 nextest + ~564 doctests passing (100%)
-> **Last Updated:** 2026-06-10
+> **Status:** 🎉 **0.1.0 STABLE RELEASED** — 2,678 nextest + 548 doctests passing (100%)
+> **Last Updated:** 2026-07-11
 
 This document tracks high-level tasks across the entire TenRSo project. For crate-specific tasks, see individual `crates/*/TODO.md` files.
 
 ---
 
-## Stubs to implement (added 2026-06-12 by /cooljapan-stub-check)
+## 2026-07-11 Depth session (`/ucont`)
 
-- [ ] `tenrso-ooc`: `crates/tenrso-ooc/src/gpu.rs:525` — implement GPU device enumeration when backends are available (currently TODO comment only)
-  - Priority: P2 | Scope: medium | Hint: oxicuda
-- [ ] `tenrso-exec`: `crates/tenrso-exec/src/ops.rs:66` — optimize einsum general-case with blocked/tiled execution and OxiBLAS (currently naive nested loop)
-  - Priority: P2 | Scope: medium | Hint: oxiblas
-- [ ] `tenrso-ad`: `crates/tenrso-ad/src/hooks.rs:251` — register einsum, decomposition gradient hooks with Tensorlogic AD system
-  - Priority: P2 | Scope: medium | Hint: none
+A long-horizon implementation + audit pass. Highlights: closed the 3 remaining
+real stubs, fixed **four silent einsum correctness bugs** shipped in 0.1.0,
+landed a Gauss-Seidel-preserving dimension-tree MTTKRP, and **corrected a false
+performance claim** — CP-ALS is GEMM-throughput bound, not memory-bandwidth
+bound. See the "Correctness bugs fixed" and "Deferred / Blocked" sections below.
+
+### Stubs to implement — ✅ ALL CLOSED (2026-07-11)
+
+- [x] `tenrso-ooc`: `crates/tenrso-ooc/src/gpu.rs` — **real** GPU device enumeration
+      via `scirs2_core::gpu::backends::detect_gpu_backends()` (nvidia-smi / rocm-smi /
+      Metal API) + `WebGPUContext::is_available()`. Default-off features (`cuda`/`rocm`/
+      `metal`/`vulkan`); CPU-only default is honestly reported via
+      `DeviceManager::available_backends()`. **No fabricated devices** — deliberately
+      does NOT call scirs2-core's documented-placeholder `GpuDeviceInfo::for_backend()`.
+      Verified against real RTX A4000 present in the build box.
+- [x] `tenrso-exec`: einsum general-case — **replaced** the naive `O(output×contracted)`
+      nested loop (with a per-element HashMap rebuild) with a batched-GEMM contraction
+      engine (`crates/tenrso-exec/src/ops/`): index classification → permute/reshape →
+      `matrixmultiply`-backed `Array2::dot` (pure Rust, in-policy). Measured 126×–3400×
+      on non-trivial specs. **Fixed the `"ii,ii->"` diagonal correctness bug** in the
+      process (see below). No OxiBLAS needed — pure-Rust GEMM is in-policy.
+- [x] `tenrso-ad`: `crates/tenrso-ad/src/hooks.rs` — **real** framework-agnostic op
+      registry (`src/registry/`, name→forward+VJP for einsum/elementwise/reductions/
+      CP/Tucker/TT, all gradcheck-verified) replacing the empty `register_tenrso_ops()`.
+      Plus a **default-off `tensorlogic` feature** implementing `TlExecutor`/`TlAutodiff`
+      over `DenseND` against the real published `tensorlogic-infer` 0.1.1. The old
+      "pending Tensorlogic API stabilization" note was stale — the crate exists.
+
+### Correctness bugs fixed (all were silent — plausible wrong answers, no error, shipped in 0.1.0)
+
+- [x] **einsum `"ii,ii->"`** summed the full n² instead of the diagonal
+      (`ops.rs` tier-1 fast path used byte-equality of subscript strings). Fixed
+      structurally: a repeated index canonicalizes to an axis whose gather stride
+      is the sum of its positions' strides.
+- [x] **Single-input einsum** (`"ij->ji"`, `"ii->"`, `"ii->i"`, `"ij->i"`) silently
+      returned the input **unchanged** — the planner emits zero pairwise steps for
+      one operand, so `execute_plan` returned the passthrough input. Fixed with a
+      real unary-einsum gather path dispatched on arity before planning.
+- [x] **Multi-tensor einsum dropped batch indices** (`"bij,bjk,bkl->bil"` summed
+      over `b` in step 1 → right shape, wrong values) and **ignored requested output
+      order** (`"ij,jk,kl->li"` returned the untransposed product). The executor now
+      derives step subscripts itself instead of trusting the planner's (still-buggy)
+      `compute_pairwise_spec` — see the source-fix item under Planner below.
+- [x] **`ReductionVjp` max/min gradients** broadcast like `sum` (it stored only the
+      input shape, so it could not route the gradient to the arg-extremum). Now
+      delegates to the correct gradchecked `ReductionRule`; `new()` returns an honest
+      `Err` for max/min/product rather than a silently-wrong gradient.
+- [x] **`tenrso-core` allocation bugs on the CP-ALS hot path**: `Add`/`Sub` cloned
+      both operands even on matched shapes (26× at 64³); `unfold` did two full-tensor
+      copies (40× at 64³); `permute`/`reshape` never actually zero-copy. Fixed +
+      added zero-copy `permute_view`/`into_permuted`/`into_reshape`. Public API
+      preserved byte-for-byte; wins are additive methods.
+
+### New capabilities landed (2026-07-11)
+
+- [x] **Dense dimension-tree MTTKRP** (`tenrso-kernels/src/mttkrp_dimtree.rs`) —
+      amortizes partial Khatri-Rao products across an ALS sweep; 3.4–4.3× serial /
+      8.7–10.9× parallel at 256³ rank-64.
+- [x] **CP-ALS wired to it, Gauss-Seidel preserved exactly** — proved a contiguous-range
+      dimension tree keeps GS semantics (byte-identical iterates) while sharing partials.
+      256³ rank-64/10-iter: **13.4s → ~3.1–3.4s**. `UpdateScheme::{GaussSeidel,Jacobi}`
+      added (GS default; naked Jacobi provably diverges, so Jacobi ships stabilized).
+- [x] **Out-of-core streaming MTTKRP** (`tenrso-ooc/src/mttkrp_stream.rs`) — additive
+      chunk accumulation with correct global index offsets, bounded memory by
+      construction (3.75 MiB tensor in a 44 KiB working set), one-pass-all-modes =
+      3× less I/O. (Replaced a fake example that called the in-core kernel.)
+- [x] **Masked einsum ≥5× vs dense naive** validated with a *fair* baseline (the old
+      benchmark was rigged both ways). Real cache-locality fix (column packing): 256²
+      ~10–18×, 512² ~14–27× at 90% sparsity. CI gate: 256/512 hard, 64² advisory.
+- [x] CI: perf budgets + benchmark-vs-baseline + Miri + ASan/LSan + flamegraph workflows.
+- [x] Docs: `docs/USER_GUIDE.md` + `docs/TUTORIALS.md` (all 8 tutorials compiled & run).
+- [x] `tenrso-core` ndarray-baseline + allocation-profiling benchmarks.
 
 ## Alpha.2 Release Highlights (2025-12-16)
 
@@ -37,6 +103,59 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
 - [x] Property-based tests passing
 - [x] Integration tests passing
 - [x] Core functionality verified
+
+---
+
+## Deferred / Blocked (moved out of the active checklist 2026-07-11)
+
+These are **not** open work items for the convergence loop — each is blocked by an
+external dependency, the project's own Pure Rust Policy, a Rust language limitation, or
+is a genuinely separate future milestone. They are recorded here with reasons so the
+remaining `- [ ]` items elsewhere in this file mean only *actionable* work. Reclassified,
+not silently dropped.
+
+### Blocked by Pure Rust Policy (COOLJAPAN) — would require a C/Fortran BLAS
+- **Einsum ≥ 80% of OpenBLAS baseline** — structurally unmeasurable in-tree; no OpenBLAS
+  by policy. Pure-Rust `matrixmultiply` GEMM (~3–4 GFLOP/s) cannot reach multi-threaded
+  OpenBLAS DGEMM (~50 GFLOP/s). *In-policy progress is still possible* via a SIMD GEMM
+  micro-kernel (see CP-ALS), but the OpenBLAS-parity number itself is out of policy.
+- **`tenrso-ooc` BLAS-optimized matmul** — same reason.
+- Note: CP-ALS <2s is **NOT** in this bucket anymore — it is GEMM-bound and has an
+  in-policy path (SIMD micro-kernel). It stays an active target.
+
+### Blocked by external hardware backends (default-off, not yet dispatching compute)
+- **GPU compute backend (CUDA/ROCm/Metal/Vulkan)** — device *enumeration* is done and
+  honest (2026-07-11), but `Device::add`/`mul` still run on CPU. Actually dispatching
+  kernels to detected hardware is a large separate milestone; needs `oxicuda`/wgpu compute
+  paths. GPU *kernels* for `tenrso-kernels` likewise.
+- **Distributed / cluster execution, MPI-based distributed MTTKRP,
+  communication-avoiding algorithms, tensor partitioning** — a distributed-runtime
+  milestone; no in-tree transport.
+
+### Blocked by the Rust language
+- **Const-generic tensor shapes / compile-time shape checking / type-level rank tracking**
+  — awaits stabilization of the relevant const-generics features.
+
+### Blocked by an upstream dependency
+- **Residual `zstd-sys` (C) via `parquet`** — Apache `parquet` bundles `zstd`/`zstd-sys`
+  for its internal column compression and exposes no backend swap. tenrso's own code is
+  fully pure-Rust. Revisit if `parquet` gains a pure-Rust compression backend.
+- **`tensorlogic` feature duplicates `scirs2-core` 0.5.1 alongside 0.6.0** — published
+  `tensorlogic-infer` 0.1.1 pins `scirs2-core ^0.5.0`. Not a hard conflict (both resolve
+  to `ndarray 0.17.2`), resolves when `tensorlogic` republishes against 0.6 (the local
+  `/notebooks/tensorlogic` tree already targets 0.6.0).
+
+### Ecosystem milestones (separate, large, tracked-not-blocked)
+- **Python bindings (PyO3), C FFI interface, PyTorch/TensorFlow interop, ONNX support** —
+  each a substantial new surface; deliberately out of scope for this workspace's core.
+- **Profiling dashboard, benchmark dashboard, docs.rs hosting, release automation,
+  changelog generation, version management, API stability tracking** — infra/tooling, not
+  library code. (`bump`/`changelog-gen` skills exist for some of these when wanted.)
+- **Polished Tensorlogic end-to-end demo program** — the bridge exists and is tested; a
+  showcase demo is nice-to-have, not blocking.
+- **SIMD intrinsics (AVX-512) hand-written** — superseded by using
+  `scirs2_core::simd_ops`; a manual AVX-512 pass is not planned (and the 2026-07-11
+  measurements show SIMD is not a win for the bandwidth/latency-bound elementwise ops).
 
 ---
 
@@ -74,10 +193,16 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
 
 ### Performance Validation (2026-05-30, 8-core x86_64 AVX2, pure Rust)
 - [x] TT memory reduction: 20,459× (target ≥ 10×) ✅
-- [ ] CP-ALS: ~21-44s / 10 iters (256³, rank-64) — target <2s; **fundamentally
-      memory-bandwidth limited in pure Rust** (KR matrix 33MB exceeds L3; no
-      BLAS parallelism). Serial unfold→GEMM path retained (fused/parallel kernels
-      increase memory pressure). BLAS backend required to reach the <2s target.
+- [ ] CP-ALS: **~3.1–3.4s** / 10 iters (256³, rank-64), target <2s — was ~21–44s.
+      **CORRECTION (2026-07-11): the earlier "fundamentally memory-bandwidth limited,
+      needs BLAS" claim was FALSE.** After wiring CP-ALS to the Gauss-Seidel-preserving
+      dimension-tree MTTKRP and fixing the `tenrso-core` copy bugs (`unfold`/`permute`),
+      the kernel **scales ≈4× from 1→8 threads** (12.8→3.1s). A memory-bandwidth-bound
+      kernel does not scale with cores; this one does — it is **GEMM-throughput bound**.
+      The <2s target was NOT confirmed met (best ~3.1s on a box at load-avg ~22–27, i.e.
+      ~3× oversubscribed; likely lower uncontended, not yet measured). Remaining lever is
+      a blocked SIMD GEMM micro-kernel for the two root GEMMs (`X₂·KR`/`X₂ᵀ·KR`) via
+      `scirs2_core::simd_ops` — pure Rust, in-policy. **No BLAS required.**
 - [x] Tucker-HOOI benchmark fix: ranks corrected [256,256,64]→[64,64,32] — now
       benchmarks the documented target; mode-2 gate fix triggers randomized SVD
       for 64-dim unfoldings (was full SVD). **Measured ~35-50% speedup on
@@ -99,11 +224,16 @@ This document tracks high-level tasks across the entire TenRSo project. For crat
 - **TT-SVD timeout diagnosis**: the Gaussian Ω allocation (n×(k+10)) for a 32×33M
   matrix would be ~8.4GB; `thin_svd_via_gram` uses G=MMᵀ (32×32 matrix) instead,
   costing O(m²n) ≈ two serial matrix multiplies over the input data.
-- **CP-ALS 256³ is memory-bandwidth limited**: each MTTKRP reads 134MB (unfolded)
-  + 33MB (KR product) from RAM; parallelism increases cache pressure rather than
-  reducing wall time. The pure-Rust `matrixmultiply` GEMM is ~3-4 GFLOP/s on this
-  shape (vs ~50 GFLOP/s for multi-threaded OpenBLAS DGEMM). No in-policy fix
-  exists; this target assumed BLAS.
+- **CP-ALS 256³ — root cause CORRECTED (2026-07-11)**: the 2026-05-30 conclusion
+  ("memory-bandwidth limited; parallelism increases cache pressure; no in-policy fix")
+  was measured against the *naive* MTTKRP, which re-copied the whole tensor (`unfold`)
+  and re-materialized the full 33MB Khatri-Rao matrix per mode per iteration — those
+  copies were the bandwidth cost, and they were `tenrso-core` bugs, not a law of physics.
+  With the dimension-tree MTTKRP (no full-KR materialization) + fixed `tenrso-core`
+  copies, CP-ALS now **scales ≈4× across 8 cores**, proving it is **GEMM-throughput
+  bound, not bandwidth bound**. An in-policy fix DOES exist (SIMD GEMM micro-kernel).
+  The `matrixmultiply` ~3–4 GFLOP/s figure stands, but the conclusion drawn from it
+  ("assumed BLAS") did not.
 
 ---
 
@@ -288,7 +418,23 @@ existing `#[cfg(feature = "...")]` gates remain valid.
 - [x] Heuristic order search (greedy planner)
 - [x] Representation selection (dense/sparse/low-rank)
 - [x] Tiling strategy (cache-aware)
-- [x] Dynamic programming planner - ✅ COMPLETE (DP + Beam Search + SA + GA + Adaptive)
+- [x] Dynamic programming planner - ✅ **NOW GENUINELY COMPLETE (2026-07-11)** (DP + Beam +
+      SA + GA + Adaptive). The prior "COMPLETE" claim was **façade for 3 of the 5**:
+      - `dp_planner` never populated `Plan::order`, so the executor could not consume a DP
+        plan at all — **fixed** (post-order bitmask → positional `(i,j)` order).
+      - `SA` and `GA` were **silent no-ops**: they "searched" by permuting `Plan::nodes`,
+        but the scored cost is an order-invariant sum, so the permutation changed nothing
+        and `order` was never touched — **both rewritten** to genuinely search contraction
+        trees (SA = Metropolis over randomized-greedy orders; GA = (μ+λ) evolution strategy,
+        crossover omitted with a documented reason). Only greedy + beam were ever real.
+      - Round-trip tests now assert every planner's returned `order`, executed step-by-step,
+        reduces to a single tensor of the correct shape and label order.
+- [x] ✅ **(2026-07-11) `compute_pairwise_spec` batch-index bug — FIXED at source.** It used
+      to drop every index shared by two operands (incl. batch indices still needed
+      downstream) and sort the pairwise output alphabetically (losing requested order).
+      Corrected rule: an index survives a step iff it is in the final output OR in any
+      not-yet-consumed operand; contracted only on its last live appearance; final step
+      emits in the caller's requested order.
 
 ### Execution Integration (tenrso-exec)
 
@@ -346,7 +492,11 @@ existing `#[cfg(feature = "...")]` gates remain valid.
 - [x] Integration tests
 - [x] Examples
 - [x] Gradient rules for TT-SVD - ✅ COMPLETE (TtReconstructionGrad, left/right chain products, finite-difference verified)
-- [ ] Tensorlogic integration demo - ⏳ Planned (pending Tensorlogic API stabilization)
+- [x] Tensorlogic integration **bridge** - ✅ DONE (2026-07-11) — default-off `tensorlogic`
+      feature; `TenrsoTlExecutor` implements `TlExecutor`/`TlAutodiff` over `DenseND`
+      against the real published `tensorlogic-infer` 0.1.1. (The old "pending API
+      stabilization" note was stale.) A polished end-to-end *demo program* is still worth
+      writing — see Deferred/Blocked (tracked, not blocked).
 
 ---
 
@@ -397,9 +547,12 @@ existing `#[cfg(feature = "...")]` gates remain valid.
 - [x] Per-crate READMEs - ✅ DONE (2026-06-10) — all 9 crates (tenrso-core/kernels/decomp/sparse/planner/ooc/exec/ad/tenrso) have README.md
 - [x] Per-crate TODOs - ✅ DONE (2026-06-10) — all 8 implementation crates have TODO.md with milestone tracking
 - [x] API documentation (rustdoc) - ✅ DONE (2026-06-10) — 148 doctests passing; public APIs documented with `///`, complexity notes, and `# Examples` sections
-- [ ] User guide / book
+- [x] User guide / book - ✅ DONE (2026-07-11) — `docs/USER_GUIDE.md` (crate map, core
+      concepts, einsum spec language + limits, execution model, decompositions, sparse
+      formats, OoC, AD, SciRS2 policy, honest perf notes)
 - [x] Examples collection - ✅ DONE (2026-06-10) — 464 example programs across `examples/` directories
-- [ ] Tutorials
+- [x] Tutorials - ✅ DONE (2026-07-11) — `docs/TUTORIALS.md` (8 progressive, complete,
+      compiled-and-run programs; verified against the real workspace in an isolated worktree)
 
 ### Testing
 
@@ -409,16 +562,16 @@ existing `#[cfg(feature = "...")]` gates remain valid.
 - [x] Benchmarks (performance tracking) - ✅ DONE (2026-06-10) (criterion benchmark suites in all 8 crates; 9 bench files in tenrso-ooc alone, 2 in tenrso-exec, etc.)
 - [x] Fuzzing harness (unsafe code) - ✅ DONE (2026-06-10) — proptest-based fuzz harnesses in `tenrso-ooc/tests/property_tests.rs`: `prop_zerocopy_f64_byte_roundtrip` (exercises both `from_raw_parts` directions for f64↔u8 reinterpretation) and `prop_aligned_buffer_pointer_alignment` (exercises `alloc` with arbitrary sizes and alignments). Also fixed a real bug discovered: `AlignedBuffer::as_slice()` was computing wrong `len = data.len() - offset - alignment` (too small when offset > 0); fixed to `len = data.len() - alignment` (= `size`, invariant)
 - [x] Regression test suite - ✅ DONE (2026-06-10) — `crates/tenrso/tests/regression_suite.rs` (7 end-to-end tests: TT-SVD round-trip, OoC Arrow IPC, planner+exec matmul, adaptive planner 3-tensor, sparse CP pipeline, AD gradient consistency)
-- [ ] CI performance budgets
+- [x] CI performance budgets - ✅ DONE (2026-07-11) — `.github/workflows/bench.yml` `bench-budgets` job + `.github/scripts/check_perf_budgets.py`. Hard gates: Tucker-HOOI 512×512×128 r[64,64,32] < 3s (2x noise margin ⇒ 6s ceiling); masked einsum ≥5x speedup vs dense naive @ 90% sparsity (64/256/512). Advisory (never fails CI): TT-SVD 32^6 <2s (documented as "not yet measured", ~8.6GB allocation risks OOM on shared runners). Tracked-not-gated: CP-ALS 256³/rank-64 <2s target (documented BLAS-gated gap, measured ~21-44s) — instead gated by a 120s sanity ceiling against the *current* measured range to catch real regressions without faking the aspirational 2s figure as passing.
 
 ### Quality Assurance
 
 - [x] CI/CD pipeline (fmt, clippy, test)
 - [x] No warnings policy (`#![deny(warnings)]`)
 - [x] Code coverage tracking - ✅ DONE (2026-06-10) — CI workflow uses `cargo-llvm-cov` → LCOV → codecov.io (`.github/workflows/ci.yml` `coverage` job)
-- [ ] Benchmark comparison (vs baseline)
-- [ ] Memory leak detection (valgrind/ASAN)
-- [ ] Performance profiling (flamegraphs)
+- [x] Benchmark comparison (vs baseline) - ✅ DONE (2026-07-11) — `.github/workflows/bench.yml` uses Criterion's own baseline machinery (`--baseline-lenient`), not a third-party action, since all 8 crates already ship Criterion suites. A "master" baseline is cached across runs (promoted only from default-branch pushes) and PRs compare against it; Criterion's own regression detector is advisory (shared-runner noise), the explicit budget checks above are the hard gates.
+- [x] Memory leak detection (valgrind/ASAN) - ✅ DONE (2026-07-11) — `.github/workflows/sanitizers.yml`. **Miri** (hard gate): `tenrso-core`, `tenrso-kernels`, `tenrso-sparse`, `tenrso-planner`, `tenrso-ad`, `tenrso-exec` (`--no-default-features`, dropping the mmap/SIMD-carrying `ooc` feature) — covers the `Vec::from_raw_parts` type-punning in `tenrso-exec/src/executor/types.rs`. Excludes `tenrso-ooc` (file-backed mmap + AVX2 intrinsics are not interpretable by Miri) and the `tenrso` umbrella crate (hard-depends on `tenrso-ooc`; its regression suite exercises OoC/Arrow IPC) and `tenrso-decomp` (zero `unsafe`, heaviest numeric workload — excluded on cost grounds, not coverage). **ASan/LSan** (advisory, `continue-on-error: true` — nightly `-Z build-std` sanitizer builds are toolchain-version-sensitive independent of this repo's code): `tenrso-ooc` + `tenrso-exec` with default features, i.e. real mmap/AVX2 execution (which Miri can't do). Documented gaps: LSan can't attribute leaks in raw mmap'd memory (only allocator-routed chunks); ASan's redzones likewise only guard allocator-routed heap chunks, not arbitrary mmap'd pages.
+- [x] Performance profiling (flamegraphs) - ✅ DONE (2026-07-11) — `.github/workflows/flamegraph.yml`, `workflow_dispatch`-only (not run on every push/PR — a diagnostic tool, not a gate). Profiles MTTKRP (`tenrso-kernels` bench `mttkrp` group), einsum (`tenrso-exec` `executor_ops` bench, `matmul`/`three_tensor_contraction` groups), CP-ALS and Tucker-HOOI (`tenrso-decomp` `decompositions` bench `*_target` groups) via `cargo-flamegraph` + Criterion's `--profile-time` mode, uploading SVGs as build artifacts.
 - [ ] API stability tracking
 
 ### Infrastructure
@@ -478,8 +631,13 @@ existing `#[cfg(feature = "...")]` gates remain valid.
 Once implementations are complete, verify:
 
 - [ ] Einsum: ≥ 80% of OpenBLAS baseline (1024³ matmul) <!-- SKIP: structurally unmeasurable under Pure Rust Policy -->
-- [ ] Masked einsum: ≥ 5× speedup vs dense naive (90% zeros) <!-- SKIP: no reference harness in-tree -->
-- [ ] CP-ALS: < 2s / 10 iters (256³, rank-64, 16-core CPU) <!-- Measured 21-44s (pure-Rust memory-BW limit; needs BLAS) -->
+- [x] Masked einsum: ≥ 5× speedup vs dense naive (90% zeros) — ✅ **MET (2026-07-11)** at
+      256² (~10–18×) and 512² (~14–27×) after a real cache-locality fix (column packing);
+      64² sits at ~5× (advisory in CI). Fair contiguous-slice baseline + pre-timing
+      correctness gate. Earlier "no reference harness" note was wrong — the harness existed.
+- [ ] CP-ALS: < 2s / 10 iters (256³, rank-64) — **~3.1–3.4s (2026-07-11, was 21–44s)**;
+      not yet met, but **GEMM-throughput bound, not bandwidth bound** (scales ≈4× on 8
+      cores). In-policy path to <2s: SIMD GEMM micro-kernel. Re-measure uncontended.
 - [x] Tucker-HOOI benchmark: corrected to target ranks [64,64,32]; gate fix confirms all modes use randomized SVD <!-- 35-50% faster on 256³; full target shape completes -->
 - [x] TT-SVD: `thin_svd_via_gram` prevents timeout on 32^6 (avoids GBs Gaussian Ω); 32^4 baseline preserved (2.79-3s)
 - [x] TT memory reduction ≥ 10× - ✅ COMPLETE (measured 20,459× on 32^6)
@@ -516,17 +674,19 @@ Open a GitHub issue with:
 - Reference this TODO.md
 - Tag @cool-japan maintainers
 
-## Stubs to implement (added 2026-06-22 by /cooljapan-stub-check)
+## Stubs to implement (added 2026-06-22 by /cooljapan-stub-check) — ✅ ALL CLOSED 2026-07-11
 
-- [ ] **tenrso** `tenrso-exec`: `crates/tenrso-exec/src/ops.rs:66` — `TODO`: `Optimize with blocked/tiled execution and BLAS`
-  - **Priority:** P2  **Scope:** large  **Cross-project:** oxiblas
-  - **Approach:** einsum is currently a naive nested-loop (only matmul special-cased); add blocked/tiled contraction and route 2D contractions through oxiblas gemm.
-  - **Risk:** Index/stride mapping from einsum subscripts to gemm must be exact; cover non-contiguous and broadcasted axes to avoid silent wrong results.
-- [ ] **tenrso** `tenrso-ad`: `crates/tenrso-ad/src/hooks.rs:251` — `TODO`: `Register einsum, decompositions, etc. with Tensorlogic`
-  - **Priority:** P2  **Scope:** medium  **Cross-project:** none
-  - **Approach:** Register forward + backward rules for einsum and decomposition ops with the Tensorlogic autodiff hook table.
-  - **Risk:** Backward rules must match the forward contraction semantics exactly; verify gradients against finite differences.
-- [ ] **tenrso** `tenrso-ooc`: `crates/tenrso-ooc/src/gpu.rs:525` — `TODO`: `Add GPU device enumeration when backends are implemented`
-  - **Priority:** P2  **Scope:** medium  **Cross-project:** none
-  - **Approach:** Enumerate available GPU devices (CUDA/ROCm/Vulkan/Metal) once the corresponding backends land, augmenting the current CPU-only device list.
-  - **Risk:** Backend-gated; must degrade gracefully to CPU enumeration when no GPU backend feature is enabled.
+These three were the last real stubs. All closed in the 2026-07-11 depth session — see
+"Stubs to implement — ✅ ALL CLOSED" and "Correctness bugs fixed" near the top of this file.
+
+- [x] **tenrso-exec** einsum general case — **not** routed through OxiBLAS (unnecessary):
+      replaced the naive nested loop with a pure-Rust batched-GEMM engine
+      (`crates/tenrso-exec/src/ops/`, `matrixmultiply`-backed). The old `ops.rs:66` no
+      longer exists (file split into `ops/`). Fixed the `"ii,ii->"` diagonal bug and the
+      batch-index / output-order bugs in the multi-tensor path in the same work.
+- [x] **tenrso-ad** — real op registry (`src/registry/`) + default-off `tensorlogic`
+      feature implementing `TlExecutor`/`TlAutodiff`; `register_tenrso_ops()` genuinely
+      populates it. Every rule gradcheck-verified. (`hooks.rs:251` TODO removed.)
+- [x] **tenrso-ooc** — real GPU enumeration via `scirs2_core::gpu::backends`
+      (nvidia-smi/rocm-smi/Metal/WebGPU), default-off features, honest CPU-only fallback
+      via `available_backends()`. **No fabricated devices.** (`gpu.rs:525` TODO removed.)

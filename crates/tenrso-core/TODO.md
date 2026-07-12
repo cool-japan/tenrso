@@ -133,8 +133,22 @@
 - [x] Benchmark unfold/fold (including CP-ALS and Tucker use cases)
 - [x] Benchmark reshape/permute (including common patterns)
 - [x] Criterion infrastructure set up
-- [ ] Compare against ndarray baseline - Future optimization
-- [ ] Profile memory allocations - Future optimization
+- [x] Compare against ndarray baseline — `benches/ndarray_baseline.rs` (2026-07-11). Pairs
+      `dense_nd/<op>` vs `ndarray/<op>` at 64³ and 256³. Wrapper overhead is ~0 for
+      construction/reshape/permute/hadamard/mul_scalar/view/index (same underlying call).
+      Found two genuine perf bugs: `Add`/`Sub` clone both operands even when shapes already
+      match (3x the needed allocation; 3.6x–33x slower in practice) and `unfold` performs two
+      full copies via generic `permute`+`reshape` composition where one suffices (2x bytes
+      moved; 1.3x–1.9x slower). Also confirmed `reshape`/`permute` are never actually
+      zero-copy despite docs (see allocation profiling below) — filed as follow-ups, not
+      fixed here (out of scope for this benchmark task).
+- [x] Profile memory allocations — `benches/alloc_profile.rs` (2026-07-11). Custom counting
+      `#[global_allocator]` wrapping `System`; reports allocation count + bytes per op.
+      Confirms: `reshape`/`permute` always allocate a full-tensor copy (never truly
+      zero-copy, unlike the raw consuming path which is 0 allocations); `Add` does 4 allocs
+      (~3x tensor size) vs raw's 1; `unfold` does 5 allocs (~2x tensor bytes) vs a hand-fused
+      single-pass raw unfold's 4 (~1x); `sum`/`mean`/`view`/`index_get` allocate nothing in
+      either implementation.
 
 ---
 

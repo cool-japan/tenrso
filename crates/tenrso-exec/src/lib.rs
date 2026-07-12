@@ -26,6 +26,14 @@ use scirs2_core::numeric::{Float, FromPrimitive, Num};
 
 /// Execute an einsum contraction with hints
 ///
+/// # Supported arities
+///
+/// | operands | examples | engine |
+/// |----------|----------|--------|
+/// | 1 | `"ij->ji"`, `"ii->i"`, `"ii->"`, `"ij->i"`, `"iij->j"` | [`ops::execute_unary_einsum`] — permute / diagonal / trace / reduce |
+/// | 2 | `"ij,jk->ik"`, `"bij,bjk->bik"`, `"i,j->ij"`, `"ij,ij->"` | batched GEMM |
+/// | ≥3 | `"ij,jk,kl->il"`, `"bij,bjk,bkl->bil"` | cost-based pairwise contraction order |
+///
 /// # Example
 /// ```ignore
 /// use tenrso_exec::{einsum_ex, ExecHints};
@@ -34,6 +42,9 @@ use scirs2_core::numeric::{Float, FromPrimitive, Num};
 ///     .inputs(&[A, B])
 ///     .hints(&ExecHints::default())
 ///     .run()?;
+///
+/// // Single-operand specs are supported too:
+/// let t = einsum_ex::<f32>("ij->ji").inputs(&[A]).run()?;
 /// ```
 pub fn einsum_ex<T>(spec: &str) -> EinsumBuilder<'_, T>
 where

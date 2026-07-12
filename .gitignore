@@ -30,3 +30,7 @@ lcov.info
 rustc-ice-*.txt
 
 target
+
+# Python bytecode from CI scripts
+__pycache__/
+*.pyc

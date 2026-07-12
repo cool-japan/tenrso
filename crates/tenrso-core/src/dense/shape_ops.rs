@@ -4,16 +4,67 @@
 //! unfold/fold (matricization/tensorization), squeeze/unsqueeze, and axis operations.
 
 use super::types::DenseND;
-use scirs2_core::ndarray_ext::{Array2, IxDyn};
+use scirs2_core::ndarray_ext::{Array2, ArrayView, IxDyn};
 use scirs2_core::numeric::Num;
+use smallvec::{smallvec, SmallVec};
 
 impl<T> DenseND<T>
 where
     T: Clone + Num,
 {
-    /// Reshape the tensor to a new shape
+    /// Validate that `axes` is a permutation of `0..rank`.
     ///
-    /// This operation is zero-copy when the tensor is contiguous.
+    /// Shared by [`DenseND::permute`], [`DenseND::permute_view`] and
+    /// [`DenseND::into_permuted`] so that all three reject exactly the same
+    /// inputs with exactly the same messages.
+    ///
+    /// The `seen` scratch buffer is a `SmallVec` with inline capacity 8: for the
+    /// tensor ranks that occur in practice this is stack-only, which is what
+    /// lets the zero-copy variants be *genuinely* allocation-free.
+    ///
+    /// # Complexity
+    ///
+    /// O(rank), no heap allocation for rank <= 8.
+    fn validate_permutation(&self, axes: &[usize]) -> anyhow::Result<()> {
+        let rank = self.rank();
+        if axes.len() != rank {
+            anyhow::bail!(
+                "Permutation axes length {} does not match tensor rank {}",
+                axes.len(),
+                rank
+            );
+        }
+        let mut seen: SmallVec<[bool; 8]> = smallvec![false; rank];
+        for &axis in axes {
+            if axis >= rank {
+                anyhow::bail!("Invalid axis {} for rank {}", axis, rank);
+            }
+            if seen[axis] {
+                anyhow::bail!("Duplicate axis {} in permutation", axis);
+            }
+            seen[axis] = true;
+        }
+        Ok(())
+    }
+
+    /// Reshape the tensor to a new shape, returning an independent owned tensor.
+    ///
+    /// # Copy behaviour
+    ///
+    /// This borrowing variant **always copies** the elements exactly once — it
+    /// has to, because the returned tensor owns its buffer and must stay valid
+    /// (and independent) after `self` is mutated or dropped. Concretely it costs
+    /// one allocation of `len() * size_of::<T>()` bytes on every call, whether
+    /// or not `self` is contiguous:
+    ///
+    /// * contiguous `self`: one linear `memcpy`;
+    /// * non-contiguous `self` (e.g. the result of [`DenseND::permute`]): the
+    ///   elements are gathered in row-major *logical* order, matching NumPy's
+    ///   `reshape` semantics.
+    ///
+    /// If you do not need `self` afterwards, prefer [`DenseND::into_reshape`],
+    /// which consumes the tensor and is genuinely zero-copy (**0 allocations**)
+    /// whenever the buffer is already contiguous.
     ///
     /// # Arguments
     ///
@@ -23,6 +74,15 @@ where
     ///
     /// A reshaped tensor, or an error if the total size doesn't match
     ///
+    /// # Errors
+    ///
+    /// Returns an error if the element count of `new_shape` differs from
+    /// `self.len()`.
+    ///
+    /// # Complexity
+    ///
+    /// O(n) time, O(n) extra space.
+    ///
     /// # Examples
     ///
     /// ```
@@ -31,6 +91,8 @@ where
     /// let tensor = DenseND::<f64>::zeros(&[2, 3, 4]);
     /// let reshaped = tensor.reshape(&[6, 4]).unwrap();
     /// assert_eq!(reshaped.shape(), &[6, 4]);
+    /// // `tensor` is still usable: `reshaped` owns a separate buffer.
+    /// assert_eq!(tensor.shape(), &[2, 3, 4]);
     /// ```
     pub fn reshape(&self, new_shape: &[usize]) -> anyhow::Result<Self> {
         let new_size: usize = new_shape.iter().product();
@@ -53,7 +115,87 @@ where
         }
     }
 
-    /// Permute (transpose) the axes of the tensor.
+    /// Reshape the tensor by value, reusing its buffer.
+    ///
+    /// This is the zero-copy counterpart of [`DenseND::reshape`]. Because it
+    /// consumes `self`, a contiguous tensor can simply have its shape/stride
+    /// metadata rewritten and its buffer moved into the result: **0 allocations,
+    /// no data movement, O(1)**.
+    ///
+    /// A non-contiguous tensor (e.g. one produced by [`DenseND::into_permuted`])
+    /// still has to gather its elements in row-major logical order, costing one
+    /// O(n) copy — exactly what [`DenseND::reshape`] would have done.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_shape` - The target shape
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the element count of `new_shape` differs from
+    /// `self.len()`.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) for a contiguous tensor, O(n) otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenrso_core::dense::DenseND;
+    ///
+    /// let tensor = DenseND::<f64>::from_vec((0..24).map(f64::from).collect(), &[2, 3, 4]).unwrap();
+    /// // Zero-copy: the buffer is moved, not duplicated.
+    /// let reshaped = tensor.into_reshape(&[6, 4]).unwrap();
+    /// assert_eq!(reshaped.shape(), &[6, 4]);
+    /// assert_eq!(reshaped[&[0, 0]], 0.0);
+    /// assert_eq!(reshaped[&[5, 3]], 23.0);
+    /// ```
+    pub fn into_reshape(self, new_shape: &[usize]) -> anyhow::Result<Self> {
+        let new_size: usize = new_shape.iter().product();
+        let old_size = self.len();
+        if new_size != old_size {
+            anyhow::bail!(
+                "Cannot reshape tensor of size {} into shape {:?} (size {})",
+                old_size,
+                new_shape,
+                new_size
+            );
+        }
+        if self.data.is_standard_layout() {
+            // Contiguous: `into_shape_with_order` rewrites shape/strides and
+            // moves the existing buffer. Nothing is copied or allocated.
+            let data = self
+                .data
+                .into_shape_with_order(IxDyn(new_shape))
+                .map_err(|e| anyhow::anyhow!("Failed to reshape contiguous tensor: {}", e))?;
+            Ok(Self { data })
+        } else {
+            // Non-contiguous: the logical row-major order does not match memory
+            // order, so the elements must be gathered. One copy, same result as
+            // `reshape`.
+            let flat: Vec<T> = self.data.iter().cloned().collect();
+            Self::from_vec(flat, new_shape)
+        }
+    }
+
+    /// Permute (transpose) the axes of the tensor, returning an owned tensor.
+    ///
+    /// # Copy behaviour
+    ///
+    /// The returned tensor is an independent owner of its data, so this costs
+    /// exactly one O(n) buffer copy; the axis permutation itself is pure
+    /// shape/stride metadata and moves no data. The result is **non-contiguous**
+    /// for any non-identity permutation (its strides are permuted), which means
+    /// a subsequent [`DenseND::reshape`] on it must gather elements rather than
+    /// take its metadata-only path.
+    ///
+    /// Two allocation-free alternatives exist when the copy is not wanted:
+    ///
+    /// * [`DenseND::permute_view`] — borrow `self` and get a zero-copy
+    ///   `ArrayView` with permuted axes (O(1)).
+    /// * [`DenseND::into_permuted`] — consume `self` and move its buffer into
+    ///   the permuted tensor (O(1), 0 allocations).
     ///
     /// # Arguments
     ///
@@ -67,6 +209,10 @@ where
     ///
     /// Returns an error if `axes` is not a valid permutation.
     ///
+    /// # Complexity
+    ///
+    /// O(n) time (the buffer copy), O(n) extra space.
+    ///
     /// # Examples
     ///
     /// ```
@@ -77,31 +223,106 @@ where
     /// assert_eq!(permuted.shape(), &[4, 2, 3]);
     /// ```
     pub fn permute(&self, axes: &[usize]) -> anyhow::Result<Self> {
-        if axes.len() != self.rank() {
-            anyhow::bail!(
-                "Permutation axes length {} does not match tensor rank {}",
-                axes.len(),
-                self.rank()
-            );
-        }
-        let mut seen = vec![false; self.rank()];
-        for &axis in axes {
-            if axis >= self.rank() {
-                anyhow::bail!("Invalid axis {} for rank {}", axis, self.rank());
-            }
-            if seen[axis] {
-                anyhow::bail!("Duplicate axis {} in permutation", axis);
-            }
-            seen[axis] = true;
-        }
+        self.validate_permutation(axes)?;
         let permuted = self.data.clone().permuted_axes(IxDyn(axes));
+        Ok(Self { data: permuted })
+    }
+
+    /// Borrow the tensor as a zero-copy view with permuted axes.
+    ///
+    /// `permuted_axes` only rewrites shape/stride metadata, so this is O(1) and
+    /// allocation-free — no element is touched. Use it whenever the permuted
+    /// tensor is only *read* (which is the case for every internal consumer,
+    /// e.g. [`DenseND::unfold`]); use [`DenseND::permute`] only when an owned,
+    /// independent tensor is genuinely required.
+    ///
+    /// # Arguments
+    ///
+    /// * `axes` - The new order of axes (must be a permutation of 0..rank)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `axes` is not a valid permutation.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) time, O(1) space, **0 allocations**.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenrso_core::dense::DenseND;
+    ///
+    /// let tensor = DenseND::<f64>::from_vec((0..24).map(f64::from).collect(), &[2, 3, 4]).unwrap();
+    /// let view = tensor.permute_view(&[2, 0, 1]).unwrap();
+    /// assert_eq!(view.shape(), &[4, 2, 3]);
+    /// // Same elements, no copy: view[k, i, j] == tensor[i, j, k]
+    /// assert_eq!(view[[3, 1, 2]], tensor[&[1, 2, 3]]);
+    /// ```
+    pub fn permute_view(&self, axes: &[usize]) -> anyhow::Result<ArrayView<'_, T, IxDyn>> {
+        self.validate_permutation(axes)?;
+        Ok(self.data.view().permuted_axes(IxDyn(axes)))
+    }
+
+    /// Permute the axes by value, reusing the tensor's buffer.
+    ///
+    /// The zero-copy, owning counterpart of [`DenseND::permute`]: `self` is
+    /// consumed, its buffer is moved into the result and only the shape/stride
+    /// metadata is rewritten. O(1), **0 allocations**.
+    ///
+    /// As with [`DenseND::permute`], the result is non-contiguous for any
+    /// non-identity permutation.
+    ///
+    /// # Arguments
+    ///
+    /// * `axes` - The new order of axes (must be a permutation of 0..rank)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `axes` is not a valid permutation.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) time, O(1) space, **0 allocations**.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenrso_core::dense::DenseND;
+    ///
+    /// let tensor = DenseND::<f64>::from_vec((0..24).map(f64::from).collect(), &[2, 3, 4]).unwrap();
+    /// let expected = tensor[&[1, 2, 3]];
+    /// let permuted = tensor.into_permuted(&[2, 0, 1]).unwrap();
+    /// assert_eq!(permuted.shape(), &[4, 2, 3]);
+    /// assert_eq!(permuted[&[3, 1, 2]], expected);
+    /// ```
+    pub fn into_permuted(self, axes: &[usize]) -> anyhow::Result<Self> {
+        self.validate_permutation(axes)?;
+        let permuted = self.data.permuted_axes(IxDyn(axes));
         Ok(Self { data: permuted })
     }
 
     /// Unfold (matricize) the tensor along a specific mode.
     ///
     /// Mode-n unfolding arranges the mode-n fibers as columns of a matrix.
-    /// This is critical for tensor decompositions (CP, Tucker, TT).
+    /// This is critical for tensor decompositions (CP, Tucker, TT) — it runs on
+    /// every mode of every CP-ALS / Tucker-HOOI iteration, so it is a hot path.
+    ///
+    /// # Copy behaviour
+    ///
+    /// Exactly **one** O(n) pass over the data. The mode-to-front permutation is
+    /// taken as a zero-copy view ([`DenseND::permute_view`], pure metadata) and
+    /// the elements are gathered straight into the output matrix's buffer.
+    ///
+    /// (The previous implementation went `permute` -> `reshape`, which cost
+    /// *two* full copies: `permute` cloned the buffer, and then `reshape`'s
+    /// metadata-only path could not fire — a permuted buffer is non-contiguous —
+    /// so it fell back to a second gather.)
+    ///
+    /// When the permuted view keeps a unit-stride innermost axis (always true
+    /// for a contiguous tensor with `mode != rank - 1`) each row of the gather is
+    /// a contiguous slice, so the copy is a sequence of `memcpy`s rather than an
+    /// element-at-a-time strided walk.
     ///
     /// # Arguments
     ///
@@ -114,6 +335,10 @@ where
     /// # Errors
     ///
     /// Returns an error if mode is out of bounds.
+    ///
+    /// # Complexity
+    ///
+    /// O(n) time, one allocation of `n * size_of::<T>()` bytes.
     ///
     /// # Examples
     ///
@@ -129,8 +354,9 @@ where
     /// assert_eq!(unfolded.shape(), &[2, 3]);
     /// ```
     pub fn unfold(&self, mode: usize) -> anyhow::Result<Array2<T>> {
-        if mode >= self.rank() {
-            anyhow::bail!("Mode {} out of bounds for rank {}", mode, self.rank());
+        let rank = self.rank();
+        if mode >= rank {
+            anyhow::bail!("Mode {} out of bounds for rank {}", mode, rank);
         }
 
         let shape = self.shape();
@@ -142,19 +368,40 @@ where
             .map(|(_, &s)| s)
             .product();
 
-        // Permute so that mode becomes the first axis
-        let mut perm: Vec<usize> = vec![mode];
-        perm.extend((0..mode).chain((mode + 1)..self.rank()));
+        // Permute so that `mode` becomes the leading axis. O(1): only the
+        // shape/stride metadata of the *view* is rewritten, no data is moved.
+        let mut perm: Vec<usize> = Vec::with_capacity(rank);
+        perm.push(mode);
+        perm.extend((0..mode).chain((mode + 1)..rank));
+        let permuted = self.data.view().permuted_axes(IxDyn(&perm));
 
-        let permuted = self.permute(&perm)?;
+        let total = rows * cols;
+        let mut flat: Vec<T> = Vec::with_capacity(total);
 
-        // Reshape to matrix
-        let reshaped = permuted.reshape(&[rows, cols])?;
+        // Fast path: the innermost axis of the permuted view still has unit
+        // stride, so every innermost lane is a contiguous slice and the gather
+        // becomes one `memcpy` per lane. `rows()` walks the lanes in row-major
+        // logical order, which is precisely the order `iter()` would produce.
+        if permuted.strides().last() == Some(&1) {
+            for lane in permuted.rows() {
+                match lane.as_slice() {
+                    Some(contiguous) => flat.extend_from_slice(contiguous),
+                    // A lane that is not a slice means the fast path does not
+                    // apply after all; fall through to the general gather below.
+                    None => break,
+                }
+            }
+        }
 
-        reshaped
-            .data
-            .into_dimensionality::<scirs2_core::ndarray_ext::Ix2>()
-            .map_err(|e| anyhow::anyhow!("Failed to convert to 2D: {}", e))
+        // General path (also the safety net if the fast path bailed out
+        // part-way): gather in row-major logical order. Byte-identical output.
+        if flat.len() != total {
+            flat.clear();
+            flat.extend(permuted.iter().cloned());
+        }
+
+        Array2::from_shape_vec((rows, cols), flat)
+            .map_err(|e| anyhow::anyhow!("Failed to build mode-{} unfolding: {}", mode, e))
     }
 
     /// Fold (tensorize) a matrix back into a tensor.
@@ -216,7 +463,7 @@ where
             }
         }
 
-        // Reshape matrix to intermediate tensor
+        // Reshape matrix to intermediate tensor (one copy out of the matrix).
         let flat: Vec<T> = matrix.iter().cloned().collect();
         let intermediate = Self::from_vec(flat, &intermediate_shape)?;
 
@@ -231,7 +478,11 @@ where
             }
         }
 
-        intermediate.permute(&inverse_perm)
+        // `intermediate` is a freshly-built temporary that nobody else can see,
+        // so move its buffer into the permuted result instead of cloning it.
+        // Identical output (same buffer contents, same permuted strides) for one
+        // fewer O(n) copy.
+        intermediate.into_permuted(&inverse_perm)
     }
 
     /// Remove all singleton dimensions (dimensions of size 1).
@@ -468,7 +719,10 @@ where
 
     /// Flatten tensor to 1D
     ///
-    /// Returns a 1D view of the tensor in row-major (C) order.
+    /// Returns a new owned 1-D tensor holding the elements in row-major (C)
+    /// order. Costs one O(n) copy (see [`DenseND::reshape`]); this also means it
+    /// works for non-contiguous tensors, such as the result of
+    /// [`DenseND::permute`], where the elements have to be gathered.
     ///
     /// # Examples
     ///
@@ -481,15 +735,19 @@ where
     /// assert_eq!(flat.shape(), &[6]);
     /// assert_eq!(flat[&[0]], 1.0);
     /// assert_eq!(flat[&[5]], 6.0);
+    ///
+    /// // Also correct for a non-contiguous (permuted) tensor: row-major order
+    /// // of the *logical* element layout.
+    /// let permuted = tensor.permute(&[1, 0]).unwrap();
+    /// assert_eq!(permuted.flatten().to_vec(), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
     /// ```
     pub fn flatten(&self) -> Self {
         let total = self.len();
-        let flat = self
-            .data
-            .clone()
-            .into_shape_with_order(IxDyn(&[total]))
-            .expect("Flatten should always succeed");
-        Self { data: flat }
+        // `reshape` handles both layouts: metadata-only view + copy when
+        // contiguous, logical-order gather when not. A 1-D shape always has the
+        // same element count as the source, so this cannot fail.
+        self.reshape(&[total])
+            .expect("flatten: [len] preserves the element count")
     }
 
     /// Alias for flatten (returns a 1D view in row-major order)
@@ -695,7 +953,252 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scirs2_core::ndarray_ext::array;
+    use scirs2_core::ndarray_ext::{array, Ix2};
+
+    /// Faithful reproduction of the *pre-optimization* `unfold`: permute (which
+    /// clones the whole buffer) and then reshape (which, on the now
+    /// non-contiguous buffer, gathers the elements a second time).
+    ///
+    /// It is written purely against the public API, so it is an independent
+    /// oracle: the fused single-pass `unfold` must agree with it bit-for-bit for
+    /// every shape/mode, contiguous input or not.
+    fn legacy_unfold(tensor: &DenseND<f64>, mode: usize) -> Array2<f64> {
+        let shape = tensor.shape().to_vec();
+        let rows = shape[mode];
+        let cols: usize = shape
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != mode)
+            .map(|(_, &s)| s)
+            .product();
+
+        let mut perm: Vec<usize> = vec![mode];
+        perm.extend((0..mode).chain((mode + 1)..shape.len()));
+
+        let permuted = tensor.permute(&perm).expect("valid permutation");
+        let reshaped = permuted.reshape(&[rows, cols]).expect("size preserved");
+        reshaped
+            .as_array()
+            .clone()
+            .into_dimensionality::<Ix2>()
+            .expect("2-D by construction")
+    }
+
+    fn iota(shape: &[usize]) -> DenseND<f64> {
+        let total: usize = shape.iter().product();
+        let data: Vec<f64> = (0..total).map(|i| i as f64).collect();
+        DenseND::from_vec(data, shape).expect("valid shape")
+    }
+
+    // -- unfold: byte-identical to the two-copy implementation ----------
+
+    #[test]
+    fn test_unfold_matches_legacy_implementation_all_shapes_and_modes() {
+        let shapes: &[&[usize]] = &[
+            &[7],
+            &[2, 3],
+            &[3, 2],
+            &[2, 3, 4],
+            &[4, 3, 2],
+            &[5, 1, 4],
+            &[1, 5, 1],
+            &[4, 3, 2, 5],
+            &[2, 2, 2, 2, 3],
+        ];
+
+        for shape in shapes {
+            let tensor = iota(shape);
+            for mode in 0..shape.len() {
+                let fused = tensor.unfold(mode).expect("mode in range");
+                let legacy = legacy_unfold(&tensor, mode);
+                assert_eq!(
+                    fused.shape(),
+                    legacy.shape(),
+                    "shape mismatch for shape {shape:?} mode {mode}"
+                );
+                assert_eq!(
+                    fused, legacy,
+                    "unfold output changed for shape {shape:?} mode {mode}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_unfold_matches_legacy_on_non_contiguous_input() {
+        // A permuted tensor is non-contiguous, which exercises the general
+        // gather path (its innermost stride is not 1 for every permutation).
+        let base = iota(&[4, 3, 2]);
+        for perm in [[2, 0, 1], [1, 2, 0], [2, 1, 0], [0, 2, 1]] {
+            let permuted = base.permute(&perm).expect("valid permutation");
+            assert!(
+                !permuted.is_contiguous(),
+                "test premise: permuting must yield a non-contiguous tensor"
+            );
+            for mode in 0..3 {
+                let fused = permuted.unfold(mode).expect("mode in range");
+                let legacy = legacy_unfold(&permuted, mode);
+                assert_eq!(fused, legacy, "perm {perm:?} mode {mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_unfold_known_values() {
+        // Textbook mode-1 unfolding of a 2x2x2 tensor (Kolda & Bader
+        // conventions with row-major fibers).
+        let tensor = iota(&[2, 2, 2]);
+        let unfolded = tensor.unfold(1).expect("mode 1");
+        assert_eq!(unfolded.shape(), &[2, 4]);
+        // Row j collects every element whose mode-1 index is j, in row-major
+        // order of the remaining (mode-0, mode-2) axes.
+        assert_eq!(unfolded[[0, 0]], tensor[&[0, 0, 0]]);
+        assert_eq!(unfolded[[0, 1]], tensor[&[0, 0, 1]]);
+        assert_eq!(unfolded[[0, 2]], tensor[&[1, 0, 0]]);
+        assert_eq!(unfolded[[0, 3]], tensor[&[1, 0, 1]]);
+        assert_eq!(unfolded[[1, 0]], tensor[&[0, 1, 0]]);
+        assert_eq!(unfolded[[1, 3]], tensor[&[1, 1, 1]]);
+    }
+
+    #[test]
+    fn test_unfold_last_mode_uses_strided_path() {
+        // mode == rank - 1 leaves the permuted view with a non-unit innermost
+        // stride, so the `memcpy`-per-lane fast path must bail out cleanly and
+        // the general gather must still produce the right answer.
+        let tensor = iota(&[3, 4, 5]);
+        let fused = tensor.unfold(2).expect("mode 2");
+        let legacy = legacy_unfold(&tensor, 2);
+        assert_eq!(fused, legacy);
+        assert_eq!(fused.shape(), &[5, 12]);
+    }
+
+    #[test]
+    fn test_unfold_fold_roundtrip_all_modes() {
+        let shape = [4, 3, 2];
+        let tensor = iota(&shape);
+        for mode in 0..3 {
+            let unfolded = tensor.unfold(mode).expect("mode in range");
+            let folded = DenseND::fold(&unfolded, &shape, mode).expect("compatible");
+            assert_eq!(folded.shape(), tensor.shape());
+            assert_eq!(
+                folded.to_vec(),
+                tensor.to_vec(),
+                "roundtrip failed at mode {mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unfold_mode_out_of_bounds() {
+        let tensor = iota(&[2, 3]);
+        assert!(tensor.unfold(2).is_err());
+    }
+
+    // -- into_reshape ---------------------------------------------------
+
+    #[test]
+    fn test_into_reshape_matches_reshape_contiguous() {
+        let tensor = iota(&[2, 3, 4]);
+        let borrowed = tensor.reshape(&[6, 4]).expect("size preserved");
+        let consumed = tensor.into_reshape(&[6, 4]).expect("size preserved");
+        assert_eq!(consumed.shape(), &[6, 4]);
+        assert_eq!(consumed.to_vec(), borrowed.to_vec());
+    }
+
+    #[test]
+    fn test_into_reshape_matches_reshape_non_contiguous() {
+        // A non-contiguous source must be gathered in row-major logical order,
+        // exactly like `reshape` does.
+        let permuted = iota(&[2, 3, 4]).permute(&[2, 0, 1]).expect("valid");
+        assert!(!permuted.is_contiguous());
+        let borrowed = permuted.reshape(&[4, 6]).expect("size preserved");
+        let consumed = permuted.into_reshape(&[4, 6]).expect("size preserved");
+        assert_eq!(consumed.to_vec(), borrowed.to_vec());
+    }
+
+    #[test]
+    fn test_into_reshape_rejects_size_mismatch() {
+        let tensor = iota(&[2, 3]);
+        let err = tensor
+            .into_reshape(&[4, 4])
+            .expect_err("element count differs");
+        assert!(format!("{err}").contains("Cannot reshape"));
+    }
+
+    #[test]
+    fn test_into_reshape_to_scalar_and_back() {
+        let scalar = DenseND::<f64>::from_elem(&[1, 1, 1], 42.0);
+        let zero_d = scalar.into_reshape(&[]).expect("1 element");
+        assert_eq!(zero_d.rank(), 0);
+        assert_eq!(zero_d.len(), 1);
+        let back = zero_d.into_reshape(&[1]).expect("1 element");
+        assert_eq!(back[&[0]], 42.0);
+    }
+
+    // -- permute_view / into_permuted -----------------------------------
+
+    #[test]
+    fn test_permute_view_matches_permute() {
+        let tensor = iota(&[2, 3, 4]);
+        let owned = tensor.permute(&[2, 0, 1]).expect("valid permutation");
+        let view = tensor.permute_view(&[2, 0, 1]).expect("valid permutation");
+        assert_eq!(view.shape(), owned.shape());
+        assert_eq!(view, owned.as_array().view());
+    }
+
+    #[test]
+    fn test_into_permuted_matches_permute() {
+        let tensor = iota(&[2, 3, 4]);
+        let owned = tensor.permute(&[1, 2, 0]).expect("valid permutation");
+        let consumed = tensor.into_permuted(&[1, 2, 0]).expect("valid permutation");
+        assert_eq!(consumed.shape(), owned.shape());
+        assert_eq!(consumed.to_vec(), owned.to_vec());
+        // Same (non-contiguous) layout, not just the same logical contents.
+        assert_eq!(consumed.as_array().strides(), owned.as_array().strides());
+    }
+
+    #[test]
+    fn test_permute_variants_reject_invalid_axes() {
+        let tensor = iota(&[2, 3, 4]);
+        // Wrong length
+        assert!(tensor.permute(&[0, 1]).is_err());
+        assert!(tensor.permute_view(&[0, 1]).is_err());
+        assert!(tensor.clone().into_permuted(&[0, 1]).is_err());
+        // Out of range
+        assert!(tensor.permute(&[0, 1, 3]).is_err());
+        assert!(tensor.permute_view(&[0, 1, 3]).is_err());
+        assert!(tensor.clone().into_permuted(&[0, 1, 3]).is_err());
+        // Duplicate
+        assert!(tensor.permute(&[0, 1, 1]).is_err());
+        assert!(tensor.permute_view(&[0, 1, 1]).is_err());
+        assert!(tensor.clone().into_permuted(&[0, 1, 1]).is_err());
+    }
+
+    #[test]
+    fn test_permute_validation_handles_rank_above_smallvec_inline_capacity() {
+        // The `seen` scratch buffer has inline capacity 8; rank 10 spills to the
+        // heap and must still validate correctly.
+        let shape = [1_usize; 10];
+        let tensor = DenseND::<f64>::ones(&shape);
+        let identity: Vec<usize> = (0..10).collect();
+        assert!(tensor.permute(&identity).is_ok());
+        let mut duplicated = identity.clone();
+        duplicated[9] = 0;
+        assert!(tensor.permute(&duplicated).is_err());
+    }
+
+    // -- flatten on a non-contiguous tensor ------------------------------
+
+    #[test]
+    fn test_flatten_of_permuted_tensor_gathers_logical_order() {
+        // Previously this panicked: `flatten` called `into_shape_with_order` on a
+        // non-contiguous clone, which fails. It must gather instead.
+        let tensor = iota(&[2, 3]);
+        let permuted = tensor.permute(&[1, 0]).expect("valid permutation");
+        let flat = permuted.flatten();
+        assert_eq!(flat.shape(), &[6]);
+        assert_eq!(flat.to_vec(), vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0]);
+    }
 
     // -- squeeze --------------------------------------------------------
 

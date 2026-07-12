@@ -58,6 +58,74 @@ pub enum InitStrategy {
     LeverageScore,
 }
 
+/// How an ALS sweep sequences its factor updates.
+///
+/// **This selects between two genuinely different algorithms**, not two
+/// implementations of one algorithm. They converge to the same class of stationary
+/// points but do *not* produce the same iterates, may need a different number of
+/// sweeps, and can land on different local optima from the same initialization.
+///
+/// [`cp_als`](crate::cp_als) is hard-wired to [`UpdateScheme::GaussSeidel`]; use
+/// [`cp_als_with_scheme`](crate::cp_als_with_scheme) to opt into anything else.
+///
+/// # Which should I use?
+///
+/// **`GaussSeidel` — the default, and almost certainly what you want.** It is
+/// classical ALS (Kolda & Bader 2009) and it is *not* the slow choice here: TenRSo
+/// runs it on a dimension tree whose partial contractions are shared across the
+/// whole sweep *without* breaking the sequential dependency (see
+/// `cp::dimtree`), so a sweep costs `2·nnz·R` — the same as Jacobi — and the fit
+/// comes for free out of the sweep's last MTTKRP.
+///
+/// **`Jacobi` — opt in only if you know why.** Its one structural advantage is that
+/// all `N` mode updates of a sweep are mutually independent, so they can be
+/// dispatched concurrently or onto separate devices. In a single process that buys
+/// nothing here, and it costs you on three fronts:
+///
+/// * **it needs stabilizing to converge at all** (see below);
+/// * an extra `nnz·R` MTTKRP per sweep, because after a Jacobi sweep every factor is
+///   new and no sweep intermediate can supply `⟨X, [[A]]⟩` for the fit;
+/// * fewer effective updates per sweep — every mode is solved against stale
+///   partners — so it needs *more* sweeps to reach a given fit.
+///
+/// # The stabilization, and why it is mandatory
+///
+/// The naked simultaneous update `A_k ← M_k G_k^{-1}` for every `k` at once — what
+/// you get by dropping an all-modes MTTKRP kernel straight into an ALS loop —
+/// **diverges**. In the rank-1 case with `A_k = α_k a_k` and `p = Π_k α_k`, the exact
+/// per-mode solve gives `α_k' = α_k / p`, so `p' = p^{1-N}`; linearizing about the
+/// correct fixed point `p = 1` gives `p' ≈ 1 - (N-1)ε`. **The reconstruction-scale
+/// error is amplified by `N-1` every sweep** and flips sign: 2× per sweep for a
+/// 3-way tensor, 3× for a 4-way one. Measured on an exact rank-3 `8×8×8` tensor, the
+/// naked iteration's fit collapses to 0 within four sweeps while Gauss-Seidel
+/// reaches 1.0.
+///
+/// `Jacobi` therefore ships *stabilized*: each sweep normalizes every factor column
+/// to unit norm and then **solves** for the `R` component weights
+/// (`λ = H⁻¹g`, the exact least-squares minimizer over the scale subspace) instead of
+/// letting them compound. That removes the unstable direction and the iteration
+/// converges. It is still a different algorithm from `GaussSeidel`, with a different
+/// iterate sequence, a different sweep count, and potentially a different local
+/// optimum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UpdateScheme {
+    /// Classical ALS: mode `k`'s update sees the factors `0..k` **already refreshed
+    /// by this same sweep**, and `k+1..N-1` as the previous sweep left them.
+    ///
+    /// TenRSo runs this on a dimension tree that shares partial contractions across
+    /// the whole sweep *without* breaking that sequential dependency, so it costs the
+    /// same `2·nnz·R` per sweep as Jacobi would.
+    #[default]
+    GaussSeidel,
+    /// Simultaneous ("all-at-once") updates: every mode of a sweep is solved against
+    /// the **frozen** factor set from the end of the previous sweep, and all `N` new
+    /// factors are installed together — with the column normalization and optimal
+    /// weight refit described in the type docs, without which it would diverge.
+    ///
+    /// A genuinely different algorithm. Read the type docs before choosing it.
+    Jacobi,
+}
+
 /// Regularization type for CP-ALS decomposition
 ///
 /// Controls the type and strength of regularization applied to factor matrices.

@@ -585,6 +585,44 @@ where
     Ok(fit.max(T::zero()).min(T::one()))
 }
 
+/// Compute the fit from a MTTKRP that is already consistent with `factors`.
+///
+/// `mttkrp_mode` must be a mode index and `mttkrp` the corresponding MTTKRP taken
+/// against *the very factors passed here* (i.e. `factors[j]` for all `j != mode`).
+/// Under that condition
+///
+/// ```text
+/// <X, [[A]]> = sum_{i, r} mttkrp[i, r] * factors[mode][i, r]
+/// ```
+///
+/// holds for **every** mode — the inner product does not care which mode you route
+/// it through. A Gauss-Seidel ALS sweep updates mode `N-1` last, so the sweep's
+/// final MTTKRP already satisfies the condition for `mode = N-1` and the fit costs
+/// no extra tensor pass.
+///
+/// This is the identical formula to [`compute_fit`] (which routes the inner product
+/// through a freshly recomputed mode-0 MTTKRP); the two agree to floating-point
+/// tolerance. See `cp::tests::cp_als_fit_reuse_matches_recomputed_fit`.
+pub(crate) fn compute_fit_from_mttkrp<T>(
+    factors: &[Array2<T>],
+    mttkrp: &Array2<T>,
+    mttkrp_mode: usize,
+    tensor_norm_sq: T,
+) -> T
+where
+    T: Float + NumCast + 'static,
+{
+    let recon_norm_sq = compute_reconstruction_norm_squared(factors);
+    let inner_product = compute_inner_product_from_mttkrp(mttkrp, &factors[mttkrp_mode]);
+
+    let error_sq = tensor_norm_sq + recon_norm_sq - cast_lit::<T, _>(2) * inner_product;
+    let error = error_sq.max(T::zero()).sqrt();
+
+    let fit = T::one() - error / tensor_norm_sq.sqrt();
+
+    fit.max(T::zero()).min(T::one())
+}
+
 /// Compute ||X_recon||^2 from factor matrices
 pub(crate) fn compute_reconstruction_norm_squared<T>(factors: &[Array2<T>]) -> T
 where

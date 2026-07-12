@@ -192,7 +192,7 @@ where
 #[allow(dead_code)]
 pub(crate) fn parallel_matmul<T>(a: &DenseND<T>, b: &DenseND<T>) -> Result<DenseND<T>>
 where
-    T: Clone + Num + Send + Sync + std::ops::AddAssign + std::default::Default,
+    T: Clone + Num + Send + Sync + std::ops::AddAssign + std::default::Default + 'static,
 {
     // Validate shapes
     if a.shape().len() != 2 || b.shape().len() != 2 {
@@ -215,10 +215,10 @@ where
 
     // For small matrices fall back to the serial contraction path.
     if !should_parallelize(&[m, n]) {
-        use crate::ops::execute_dense_contraction;
+        use crate::ops::execute_dense_contraction_accelerated;
         use tenrso_planner::EinsumSpec;
         let spec = EinsumSpec::parse("ij,jk->ik")?;
-        return execute_dense_contraction(&spec, a, b);
+        return execute_dense_contraction_accelerated(&spec, a, b);
     }
 
     // Choose a row-block size that gives ~4× the rayon thread count tiles,

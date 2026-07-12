@@ -4,6 +4,33 @@
 //!
 //! Tests `masked_einsum("ij,jk->ik", ...)` against a naive triple-loop matmul
 //! at various sparsity levels (50%, 90%, 99%) and matrix sizes (64, 256, 512).
+//!
+//! # Fairness of the comparison
+//!
+//! The point of the target is that *skipping masked-out output positions* buys real
+//! time. A ratio is evidence of that only if the two sides differ in the work they
+//! do and in nothing else. Concretely:
+//!
+//! * **Same computation.** Both sides compute `C = A @ B` over `f64`; the masked
+//!   side computes the subset of `C` selected by the mask, the dense side computes
+//!   all of `C`. `assert_masked_matches_dense` checks, before any timing is taken,
+//!   that the masked result equals the dense result at every mask position — a
+//!   masked path that "won" by silently skipping arithmetic would fail here rather
+//!   than post a fast time.
+//! * **Same element-access mechanism.** The baseline indexes raw contiguous
+//!   `&[f64]` slices, exactly as `masked_matmul` does. An earlier version of this
+//!   harness indexed through `ArrayView<_, IxDyn>` as `view[&[i, j][..]]`, which
+//!   costs a dynamic stride dot-product plus bounds checks *per element*. That made
+//!   the "dense naive" baseline several times slower than a real naive loop and
+//!   inflated the reported speedup by a factor that says nothing about masking.
+//! * **Same inner-loop shape.** Both sides accumulate a `K`-long dot product in a
+//!   plain scalar loop, in the same order, with no manual unrolling and no multiple
+//!   accumulators on either side. Vectorising only the masked side would inflate the
+//!   ratio for reasons unrelated to the mask.
+//! * **Nothing elided.** Inputs and results pass through `black_box`.
+//!
+//! The baseline remains *naive* in the sense the target intends: a plain `O(M*N*K)`
+//! triple loop — no blocking, no packing, no BLAS.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::hint::black_box;
@@ -70,18 +97,24 @@ fn make_mask(lcg: &mut Lcg, m: usize, n: usize, density: f64) -> Mask {
 // Dense naive triple-loop matmul (the baseline we want to beat)
 // ---------------------------------------------------------------------------
 
-/// Compute C = A * B via a straightforward triple loop.
+/// Compute `C = A * B` via a straightforward triple loop over contiguous slices.
 ///
-/// Uses `DenseND::view()` indexing, the same per-element work as
-/// `masked_matmul` — the only difference is that this computes *all*
-/// output positions while the masked path computes a subset.
+/// This is the "dense naive" reference: `O(M*N*K)`, no blocking, no packing, no
+/// BLAS, one scalar accumulator. It deliberately uses the *same* element-access
+/// mechanism (direct indexing into a contiguous `&[f64]`) and the *same* scalar
+/// inner-loop shape as `masked_matmul`, so that a measured difference reflects the
+/// number of output positions computed rather than indexing overhead.
 fn dense_matmul(a: &DenseND<f64>, b: &DenseND<f64>) -> DenseND<f64> {
     let m = a.shape()[0];
     let k = a.shape()[1];
     let n = b.shape()[1];
 
-    let a_view = a.view();
-    let b_view = b.view();
+    let a_slice = a
+        .try_as_slice()
+        .expect("dense_matmul: A must be contiguous");
+    let b_slice = b
+        .try_as_slice()
+        .expect("dense_matmul: B must be contiguous");
 
     let mut out = vec![0.0_f64; m * n];
 
@@ -89,13 +122,36 @@ fn dense_matmul(a: &DenseND<f64>, b: &DenseND<f64>) -> DenseND<f64> {
         for j in 0..n {
             let mut acc = 0.0_f64;
             for p in 0..k {
-                acc += a_view[&[i, p][..]] * b_view[&[p, j][..]];
+                acc += a_slice[i * k + p] * b_slice[p * n + j];
             }
             out[i * n + j] = acc;
         }
     }
 
     DenseND::from_vec(out, &[m, n]).expect("dense_matmul: output shape matches data length")
+}
+
+/// Verify the masked path computes the same values as the dense baseline at every
+/// mask position, before any timing is taken.
+///
+/// Guards against the failure mode where the masked kernel "wins" by not doing the
+/// arithmetic at all.
+fn assert_masked_matches_dense(a: &DenseND<f64>, b: &DenseND<f64>, mask: &Mask) {
+    let dense = dense_matmul(a, b);
+    let masked = masked_einsum("ij,jk->ik", &[a, b], mask).expect("masked_einsum failed");
+    let masked_dense = masked.to_dense().expect("masked result to_dense failed");
+
+    for idx in mask.iter() {
+        let expected = dense.as_array()[&idx[..]];
+        let actual = masked_dense.as_array()[&idx[..]];
+        assert!(
+            (expected - actual).abs() <= 1e-9 * expected.abs().max(1.0),
+            "masked/dense mismatch at {:?}: dense={}, masked={}",
+            idx,
+            expected,
+            actual
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -177,8 +233,10 @@ fn bench_masked_einsum(c: &mut Criterion) {
 /// Side-by-side comparison at each (size, sparsity) pair.
 ///
 /// This group interleaves "dense" and "masked" benchmarks under the same
-/// parameter label so `critcmp` / Criterion HTML reports can directly show
-/// the speedup ratio.
+/// parameter label so `critcmp` / Criterion HTML reports can directly show the
+/// speedup ratio. `.github/scripts/check_perf_budgets.py` reads the
+/// `matmul_comparison/{dense,masked}/<size>x<size>_sp90` estimates from this group
+/// to gate the ">= 5x at 90% sparsity" budget.
 fn bench_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("matmul/comparison");
 
@@ -189,6 +247,9 @@ fn bench_comparison(c: &mut Criterion) {
 
         let density = 1.0 - sparsity;
         let mask = make_mask(&mut lcg, size, size, density);
+
+        // Fairness precondition: both sides must agree on the values they produce.
+        assert_masked_matches_dense(&a, &b, &mask);
 
         let param_label = format!("{}x{}_sp{:.0}", size, size, sparsity * 100.0);
 

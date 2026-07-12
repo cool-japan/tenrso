@@ -58,7 +58,8 @@
 //! ## Performance
 //!
 //! All operations are highly optimized with:
-//! - **SIMD acceleration** via scirs2_core
+//! - **Auto-vectorized inner loops** (e.g. the fused MTTKRP kernel's
+//!   rank-innermost loop reorder — see [`mttkrp_fused_simd_f64`])
 //! - **Parallel execution** for large problems (feature-gated)
 //! - **Cache-efficient tiling** for MTTKRP
 //! - **Zero-copy views** to minimize allocations
@@ -111,6 +112,7 @@ pub mod hadamard;
 pub mod khatri_rao;
 pub mod kronecker;
 pub mod mttkrp;
+pub mod mttkrp_dimtree;
 pub mod mttkrp_fused_blocked;
 #[cfg(feature = "csf")]
 pub mod mttkrp_hicoo;
@@ -140,6 +142,7 @@ pub use hadamard::*;
 pub use khatri_rao::*;
 pub use kronecker::*;
 pub use mttkrp::*;
+pub use mttkrp_dimtree::*;
 pub use mttkrp_fused_blocked::*;
 #[cfg(feature = "csf")]
 pub use mttkrp_hicoo::*;
@@ -158,3 +161,12 @@ pub use tt_ops::*;
 pub use tt_orthog::*;
 pub use tt_round::*;
 pub use utils::*;
+
+// `utils::mttkrp_all_modes` (restored, `#[deprecated]`) and
+// `mttkrp_dimtree::mttkrp_all_modes` (the fast path) share a name, which
+// makes the glob re-exports above ambiguous at the crate root. Resolve the
+// ambiguity explicitly in favor of the fast dimension-tree path — this
+// matches the crate's pre-existing (pre-deprecation-restoration) root-level
+// behavior. The deprecated naive alias remains reachable via its qualified
+// path, `tenrso_kernels::utils::mttkrp_all_modes`.
+pub use mttkrp_dimtree::mttkrp_all_modes;

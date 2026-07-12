@@ -171,9 +171,49 @@ impl ArrowReader {
         Ok(Self { reader })
     }
 
+    /// Number of record batches stored in the file
+    ///
+    /// Each `ArrowWriter::write` call appends exactly one batch, so this is the number
+    /// of tensors (or tensor *chunks*) the file holds.
+    pub fn num_batches(&self) -> usize {
+        self.reader.num_batches()
+    }
+
+    /// Read the tensor stored in record batch `index` (random access)
+    ///
+    /// Arrow IPC *file* format carries a footer with the byte offset of every batch, so
+    /// this seeks directly to the requested batch and decodes only that batch — the rest
+    /// of the file is never touched. This is what makes an Arrow file usable as a
+    /// random-access, out-of-core chunk store: peak memory is one batch, not one file.
+    ///
+    /// The read cursor is left positioned just after `index`, so a subsequent
+    /// [`ArrowReader::read`] returns batch `index + 1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `index` is out of bounds, or if the batch is malformed.
+    ///
+    /// # Complexity
+    ///
+    /// O(size of batch `index`); independent of the number of batches in the file.
+    pub fn read_batch(&mut self, index: usize) -> Result<DenseND<f64>> {
+        let total = self.reader.num_batches();
+        if index >= total {
+            return Err(anyhow!(
+                "Batch index {} out of bounds (file has {} batches)",
+                index,
+                total
+            ));
+        }
+        self.reader.set_index(index)?;
+        self.read()
+    }
+
     /// Read a tensor from the Arrow IPC file
     ///
-    /// Reads the first record batch and reconstructs the tensor.
+    /// Reads the record batch at the current cursor position (the first batch for a
+    /// freshly-opened reader) and reconstructs the tensor. Successive calls walk the
+    /// file batch by batch.
     ///
     /// # Returns
     ///
@@ -312,6 +352,38 @@ mod tests {
         assert!(diff.abs() < 1e-10);
 
         // Cleanup
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_arrow_random_access_batches() {
+        let path = env::temp_dir().join("test_tensor_batches.arrow");
+
+        // Three tensors of different shapes, one per batch.
+        let batches = [
+            DenseND::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap(),
+            DenseND::<f64>::from_vec(vec![5.0, 6.0], &[1, 2]).unwrap(),
+            DenseND::<f64>::from_vec(vec![7.0], &[1, 1]).unwrap(),
+        ];
+
+        let mut writer = ArrowWriter::new(&path).unwrap();
+        for t in &batches {
+            writer.write(t).unwrap();
+        }
+        writer.finish().unwrap();
+
+        let mut reader = ArrowReader::open(&path).unwrap();
+        assert_eq!(reader.num_batches(), 3);
+
+        // Random access, out of order, repeated.
+        for &i in &[2usize, 0, 1, 0, 2] {
+            let got = reader.read_batch(i).unwrap();
+            assert_eq!(got.shape(), batches[i].shape(), "batch {} shape", i);
+            assert_eq!(got.as_slice(), batches[i].as_slice(), "batch {} data", i);
+        }
+
+        assert!(reader.read_batch(3).is_err(), "out-of-bounds batch");
+
         std::fs::remove_file(path).ok();
     }
 }

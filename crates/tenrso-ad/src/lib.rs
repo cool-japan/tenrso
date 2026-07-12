@@ -71,6 +71,16 @@
 //!
 //! See [`hooks`] module for details.
 //!
+//! ### 6. Operation Registry
+//!
+//! [`registry`] exposes every differentiable TenRSo op (einsum, element-wise,
+//! reductions, CP/Tucker/TT reconstruction) behind one name-addressed
+//! `OpRule` trait carrying both the forward pass and the VJP. External engines
+//! discover ops by name and can add their own with `OpRegistry::register`.
+//!
+//! With the (default-off) `tensorlogic` feature, [`tensorlogic_bridge`] backs
+//! Tensorlogic's `TlExecutor` / `TlAutodiff` traits with that registry.
+//!
 //! ## Quick Start
 //!
 //! ### Basic VJP Example
@@ -209,10 +219,24 @@
 //! - ✅ Performance benchmarks
 //! - ✅ Working examples for all features
 //!
+//! ## Tensorlogic Integration
+//!
+//! Enable the (default-off) `tensorlogic` feature:
+//!
+//! ```bash
+//! cargo build -p tenrso-ad --features tensorlogic
+//! ```
+//!
+//! [`tensorlogic_bridge::TenrsoTlExecutor`] then implements
+//! `tensorlogic_infer::TlExecutor` and `tensorlogic_infer::TlAutodiff` over
+//! [`tenrso_core::DenseND`], executing `tensorlogic_ir::EinsumGraph` forward and
+//! backward with the gradient rules held in the [`registry`]. See the module docs
+//! for the exact coverage and the (explicitly errored) gaps.
+//!
 //! ## Future Work
 //!
 //! Planned enhancements (see `TODO.md`):
-//! - Tensorlogic integration (awaiting API stabilization)
+//! - Tensorlogic temporal operators (`next`, `until`) in the bridge
 //! - Distributed gradients with AllReduce
 //! - Graph-based AD with dynamic control flow
 //! - GPU kernel integration via scirs2-gpu
@@ -232,8 +256,11 @@ pub mod mixed_precision;
 pub mod monitoring;
 pub mod optimizers;
 pub mod parallel;
+pub mod registry;
 pub mod sparse_grad;
 pub mod storage;
+#[cfg(feature = "tensorlogic")]
+pub mod tensorlogic_bridge;
 pub mod utils;
 pub mod vjp;
 

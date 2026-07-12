@@ -399,34 +399,132 @@ pub fn masked_einsum<T: Float>(
 
 /// Masked matrix multiplication: C[i,k] = sum_j A[i,j] * B[j,k]  for (i,k) in mask.
 ///
+/// # Algorithm
+///
+/// The naive formulation walks `B[j, k]` down a *column* for each masked output
+/// position `(i, k)`. With row-major storage that is a stride-`N` walk: every one
+/// of the `K` loads touches a distinct cache line and consumes only one of the
+/// `64 / size_of::<T>()` values that line carries. A dense triple loop does not
+/// pay this, because it visits `k = 0..N` consecutively and therefore re-uses each
+/// fetched line for the next `64 / size_of::<T>() - 1` values of `k`. A masked
+/// kernel visits a *scattered* subset of `k`, so it loses that reuse entirely and
+/// ends up moving ~8x more memory per multiply-add than the dense loop it is
+/// supposed to beat — which cancels most of the work it saves.
+///
+/// The fix is to pay a single linear pass over `B` up front and *pack* the columns
+/// the mask actually touches into contiguous buffers (a partial transpose). Each
+/// masked dot product then reads two contiguous runs (`A`'s row `i` and the packed
+/// column `k`), restoring the memory-access parity the dense loop gets for free,
+/// so the mask's work saving shows up as an actual speedup.
+///
 /// # Complexity
 ///
-/// O(mask.nnz() * K) where K is the contraction dimension.
+/// O(K * C + nnz * K) where `K` is the contraction dimension, `C` is the number of
+/// *distinct* columns touched by the mask (`C <= min(N, nnz)`) and `nnz` is
+/// `mask.nnz()`. The packing term never dominates the dot-product term, since
+/// `C <= nnz`. Extra memory: `K * C` elements, bounded by the size of `B`.
 fn masked_matmul<T: Float>(
     a: &DenseND<T>,
     b: &DenseND<T>,
     mask: &Mask,
     output_shape: &[usize],
 ) -> Result<CooTensor<T>, MaskedEinsumError> {
+    let k_dim = a.shape()[1]; // contraction dimension
+    let n_cols = b.shape()[1]; // output column count
+
+    // Mask positions in row-major order. Sorting on the packed flat index avoids
+    // cloning/comparing one heap-allocated `Vec<usize>` per mask entry.
+    let mut positions: Vec<(usize, usize)> = mask.iter().map(|idx| (idx[0], idx[1])).collect();
+    positions.sort_unstable_by_key(|&(i, k)| (i, k));
+
+    // Fast path: both operands are contiguous row-major, so we can pack columns.
+    if let (Some(a_slice), Some(b_slice)) = (a.try_as_slice(), b.try_as_slice()) {
+        return masked_matmul_packed(a_slice, b_slice, k_dim, n_cols, &positions, output_shape);
+    }
+
+    // Fallback: non-contiguous inputs (e.g. a permuted view). Use strided view
+    // indexing directly; correctness is identical, only the constant factor differs.
     let a_view = a.view();
     let b_view = b.view();
-    let k_dim = a.shape()[1]; // contraction dimension
 
-    let sorted = mask.to_sorted_indices();
-    let mut result_indices = Vec::with_capacity(sorted.len());
-    let mut result_values = Vec::with_capacity(sorted.len());
+    let mut result_indices = Vec::with_capacity(positions.len());
+    let mut result_values = Vec::with_capacity(positions.len());
 
-    for idx in &sorted {
-        let i = idx[0];
-        let k = idx[1];
-
+    for &(i, k) in &positions {
         let mut acc = T::zero();
         for j in 0..k_dim {
             acc = acc + a_view[&[i, j][..]] * b_view[&[j, k][..]];
         }
 
         if acc.abs() > T::epsilon() {
-            result_indices.push(idx.clone());
+            result_indices.push(vec![i, k]);
+            result_values.push(acc);
+        }
+    }
+
+    Ok(CooTensor::new(
+        result_indices,
+        result_values,
+        output_shape.to_vec(),
+    )?)
+}
+
+/// Column-packed masked matmul over contiguous row-major operands.
+///
+/// `positions` must already be sorted in row-major order; the resulting COO keeps
+/// that ordering.
+fn masked_matmul_packed<T: Float>(
+    a_slice: &[T],
+    b_slice: &[T],
+    k_dim: usize,
+    n_cols: usize,
+    positions: &[(usize, usize)],
+    output_shape: &[usize],
+) -> Result<CooTensor<T>, MaskedEinsumError> {
+    // ---- 1. Identify the distinct columns of B the mask actually touches. ----
+    //
+    // `slot_of[k]` maps a column of B to its slot in the packed buffer, or
+    // `usize::MAX` when the mask never asks for that column.
+    let mut slot_of = vec![usize::MAX; n_cols];
+    let mut packed_cols: Vec<usize> = Vec::new();
+    for &(_, k) in positions {
+        if slot_of[k] == usize::MAX {
+            slot_of[k] = packed_cols.len();
+            packed_cols.push(k);
+        }
+    }
+
+    // ---- 2. Pack those columns contiguously (partial transpose of B). ----
+    //
+    // Read order is one sequential sweep over B's rows; write order keeps the
+    // `packed_cols.len()` destination lines resident, so this costs a single
+    // linear pass over the touched part of B.
+    let n_packed = packed_cols.len();
+    let mut packed = vec![T::zero(); n_packed * k_dim];
+    for j in 0..k_dim {
+        let row_start = j * n_cols;
+        let row = &b_slice[row_start..row_start + n_cols];
+        for (slot, &k) in packed_cols.iter().enumerate() {
+            packed[slot * k_dim + j] = row[k];
+        }
+    }
+
+    // ---- 3. One contiguous-vs-contiguous dot product per masked position. ----
+    let mut result_indices = Vec::with_capacity(positions.len());
+    let mut result_values = Vec::with_capacity(positions.len());
+
+    for &(i, k) in positions {
+        let a_row = &a_slice[i * k_dim..i * k_dim + k_dim];
+        let slot = slot_of[k];
+        let b_col = &packed[slot * k_dim..slot * k_dim + k_dim];
+
+        let mut acc = T::zero();
+        for (&av, &bv) in a_row.iter().zip(b_col.iter()) {
+            acc = acc + av * bv;
+        }
+
+        if acc.abs() > T::epsilon() {
+            result_indices.push(vec![i, k]);
             result_values.push(acc);
         }
     }

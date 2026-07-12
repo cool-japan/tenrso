@@ -1,0 +1,140 @@
+name: Flamegraph Profiling
+
+# ---------------------------------------------------------------------------
+# Closes the TODO.md item:
+#   - [ ] Performance profiling (flamegraphs)
+#
+# Manual-dispatch only (per task requirements): flamegraph runs use `perf`
+# under the hood, produce large SVG artifacts, and add no correctness/
+# regression signal beyond what bench.yml already provides -- they are a
+# human-driven diagnostic tool, not a gate. Running them on every push/PR
+# would burn CI minutes for no automated benefit.
+#
+# Hot paths covered (as named in TODO.md / CLAUDE.md):
+#   - MTTKRP      : tenrso-kernels `kernel_benchmarks` bench, group "mttkrp"
+#   - einsum      : tenrso-exec `executor_ops` bench, groups "matmul" and
+#                    "three_tensor_contraction" (both go through `einsum_ex`)
+#   - CP-ALS      : tenrso-decomp `decompositions` bench, group "cp_als_target"
+#   - Tucker-HOOI : tenrso-decomp `decompositions` bench, group "tucker_hooi_target"
+#
+# Each is profiled via Criterion's `--profile-time <secs>` mode, which is
+# built exactly for pairing with an external sampling profiler: it repeats
+# the benchmarked closure for approximately the given duration without doing
+# any statistical analysis or writing results, so `perf` has a long-enough,
+# steady-state window to sample.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Hot path to profile"
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - mttkrp
+          - einsum
+          - cp_als
+          - tucker_hooi
+      profile_seconds:
+        description: "Approximate seconds to sample each target (Criterion --profile-time)"
+        required: false
+        default: "15"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  flamegraph:
+    name: Generate flamegraphs
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-flamegraph-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-flamegraph-
+
+      # cargo-flamegraph shells out to `perf` (Linux) which needs both the
+      # `perf` binary itself and relaxed `perf_event_paranoid` to read
+      # hardware performance counters without CAP_SYS_ADMIN. GitHub-hosted
+      # runners ship a custom kernel, so the exact-version
+      # `linux-tools-$(uname -r)` package frequently is NOT in Ubuntu's repo
+      # (this is a well-known rough edge of profiling on hosted runners, not
+      # specific to this project) -- the `|| true` acknowledges that and
+      # falls back to whatever `linux-tools-generic` provides.
+      - name: Install perf and relax perf_event_paranoid
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common linux-tools-generic "linux-tools-$(uname -r)" || true
+          sudo sysctl -w kernel.perf_event_paranoid=-1
+          perf version || echo "::warning::'perf' did not install cleanly; flamegraph steps below may fail. This is a known limitation of hosted-runner kernels lacking a matching linux-tools package."
+
+      # Note: the crates.io package is named `flamegraph` (it provides the
+      # `cargo-flamegraph` binary/subcommand) -- `taiki-e/install-action`,
+      # used elsewhere in this repo's CI for cargo-llvm-cov, does NOT list
+      # `flamegraph` among its supported tools (checked against its
+      # manifests/ directory), so a plain `cargo install` is used instead.
+      - name: Install cargo-flamegraph
+        run: cargo install flamegraph --locked
+
+      - name: Create output directory
+        run: mkdir -p flamegraphs
+
+      - name: "Flamegraph: MTTKRP"
+        if: ${{ github.event.inputs.target == 'all' || github.event.inputs.target == 'mttkrp' }}
+        run: |
+          cargo flamegraph --root --deterministic \
+            -p tenrso-kernels --bench kernel_benchmarks \
+            -o flamegraphs/mttkrp.svg \
+            -- --bench mttkrp --profile-time "${{ github.event.inputs.profile_seconds }}"
+
+      - name: "Flamegraph: einsum (matmul contraction)"
+        if: ${{ github.event.inputs.target == 'all' || github.event.inputs.target == 'einsum' }}
+        run: |
+          cargo flamegraph --root --deterministic \
+            -p tenrso-exec --bench executor_ops \
+            -o flamegraphs/einsum_matmul.svg \
+            -- --bench matmul --profile-time "${{ github.event.inputs.profile_seconds }}"
+          cargo flamegraph --root --deterministic \
+            -p tenrso-exec --bench executor_ops \
+            -o flamegraphs/einsum_three_tensor_contraction.svg \
+            -- --bench three_tensor_contraction --profile-time "${{ github.event.inputs.profile_seconds }}"
+
+      - name: "Flamegraph: CP-ALS (256^3, rank-64)"
+        if: ${{ github.event.inputs.target == 'all' || github.event.inputs.target == 'cp_als' }}
+        run: |
+          cargo flamegraph --root --deterministic \
+            -p tenrso-decomp --bench decompositions \
+            -o flamegraphs/cp_als_target.svg \
+            -- --bench cp_als_target --profile-time "${{ github.event.inputs.profile_seconds }}"
+
+      - name: "Flamegraph: Tucker-HOOI (512x512x128, r[64,64,32])"
+        if: ${{ github.event.inputs.target == 'all' || github.event.inputs.target == 'tucker_hooi' }}
+        run: |
+          cargo flamegraph --root --deterministic \
+            -p tenrso-decomp --bench decompositions \
+            -o flamegraphs/tucker_hooi_target.svg \
+            -- --bench tucker_hooi_target --profile-time "${{ github.event.inputs.profile_seconds }}"
+
+      - name: Upload flamegraphs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flamegraphs-${{ github.event.inputs.target }}-${{ github.run_id }}
+          path: flamegraphs/*.svg
+          if-no-files-found: warn
+          retention-days: 30

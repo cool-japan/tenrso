@@ -110,7 +110,7 @@ where
 ///
 /// # Errors
 ///
-/// Returns error on shape mismatches (same validation as [`mttkrp`]).
+/// Returns error on shape mismatches (same validation as [`crate::mttkrp()`]).
 ///
 /// # Complexity
 ///
@@ -227,7 +227,7 @@ where
 ///
 /// # Errors
 ///
-/// Returns error on shape mismatches (same validation as [`mttkrp`]).
+/// Returns error on shape mismatches (same validation as [`crate::mttkrp()`]).
 ///
 /// # Examples
 ///

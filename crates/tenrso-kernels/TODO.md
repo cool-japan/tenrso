@@ -101,13 +101,38 @@
 - [x] Optimizations
   - [x] Use scirs2_core SIMD ops (via ndarray)
   - [x] In-place variant - `hadamard_inplace`
-  - [ ] Parallel iteration - Future (small benefit for this op)
+  - [x] Parallel iteration — Done (2026-07-11, `hadamard_parallel`). Measured:
+        a genuine ~2.4x speedup at 2000x2000 (8-core Xeon), but ~30x
+        *slower* than serial at 100x100 (Rayon overhead dominates below
+        roughly 500x500). Confirms the original "small benefit" prediction
+        was too pessimistic for large matrices but too optimistic for
+        small ones — use it selectively. **Kept.**
+  - [x] `SimdUnifiedOps` element ops — Added 2026-07-11
+        (`hadamard_simd_f64`/`_f32`, `hadamard_nd_simd_f64`/`_f32`,
+        `hadamard_parallel_simd_f64`/`_f32`), **removed 2026-07-11 (pruning
+        pass)**. Honest result: measured slower than the existing
+        scalar/`ndarray` implementation at every size tested
+        (500x500..2000x2000) — Hadamard is memory-bandwidth-bound and
+        `ndarray`'s own `Mul` is already close to this hardware's ceiling;
+        routing through `scirs2_core::simd_ops` (scirs2-core 0.6.0) added
+        ~1.5-2x overhead instead of a speedup (both `SimdUnifiedOps` entry
+        points tried). A `*_simd` function that is *slower* than the plain
+        version is an API trap (a caller reaching for it expecting a
+        speedup silently gets a regression), so instead of keeping a
+        known-slower public API around, these were deleted outright along
+        with their tests and benchmark entries. Nothing else in the
+        workspace referenced them. `hadamard`/`hadamard_inplace` remain the
+        recommended entry points; `hadamard_parallel` remains for the
+        large-matrix case documented above.
 
 - [x] Testing
   - [x] Correctness tests (various shapes) - 8 tests
   - [x] Property tests (commutativity, identity)
   - [x] Edge cases (zeros, large arrays)
-  - [ ] Benchmarks - Optional future work
+  - [x] Benchmarks — `benches/kernel_benchmarks.rs` `hadamard` group:
+        allocating/inplace/parallel (the `simd_f64`/`simd_f32`/
+        `parallel_simd_f64` entries were removed alongside the functions
+        they benchmarked, see above)
 
 ### N-Mode Product (TTM/TTT) - COMPLETE
 
@@ -204,7 +229,31 @@
   - [x] Weighted reconstruction
   - [x] Edge cases (single vector, empty)
 
-- [ ] SIMD element operations - Future
+- [x] SIMD element operations — Added 2026-07-11 (`outer_product_2_simd_f64`/
+      `_f32`, `outer_product_simd_f64`/`_f32`, `outer_product_weighted_simd_f64`/
+      `_f32`, via `scirs2_core::simd_ops::SimdUnifiedOps::simd_scalar_mul`
+      broadcast-fold). **Nuanced honest result**: for N-D (3+ vectors) and
+      weighted outer products, measured **~6-14x faster** than the naive
+      `flat_to_multi_index`-based baseline — but this win is mostly
+      *algorithmic* (O(1) index math per element vs. the baseline's O(ndim)
+      div/mod decode per element), with vectorization a secondary
+      contributor. For the plain 2-vector case (`outer_product_2_simd_f64`),
+      where the naive baseline is *already* O(1)-per-element with no
+      inefficiency to remove, the SIMD variant measured **~5-13x slower**.
+  - **2026-07-11 pruning pass — folded, not kept as a separate API.** Since
+    the win for the N-D/weighted cases was mostly algorithmic (not the SIMD
+    substrate itself), the broadcast-fold algorithm was folded directly into
+    `outer_product`/`outer_product_weighted` (generic `T: Clone + Num`, no
+    `SimdUnifiedOps` bound — this keeps the trait bounds identical to before,
+    so no downstream caller needed to change) and the `_simd`-suffixed
+    functions were deleted, along with `flat_to_multi_index` (now dead) and
+    the old per-element-decode implementation. All callers of
+    `outer_product`/`outer_product_weighted`/`cp_reconstruct` now get the
+    faster algorithm automatically. `outer_product_2_simd_f64`/`_f32` were
+    deleted outright (no algorithmic win to fold in, and the measured
+    slowdown makes a `_simd`-named API a trap) — `outer_product_2` is
+    unchanged. See doc comments in `src/outer.rs` (`outer_product`'s
+    "Algorithm note") for the full writeup.
 
 ### Tucker Operator - COMPLETE
 
@@ -240,6 +289,26 @@
 - [x] variance, std
 - [x] norm_l1, norm_l2, norm_frobenius
 - [x] skewness, kurtosis
+- [x] Whole-tensor `SimdUnifiedOps` variants — Added 2026-07-11,
+      `src/reductions_simd.rs`: `sum_tensor_simd_f64`/`_f32`,
+      `mean_tensor_simd_f64`/`_f32`, `frobenius_norm_tensor_simd_f64`/`_f32`,
+      `norm_l1_tensor_simd_f64`/`_f32`, `variance_tensor_simd_f64`/`_f32`,
+      `std_tensor_simd_f64`/`_f32`. **Honest result: measured ~2-4x
+      *slower*** than the equivalent scalar reduction at every size tested
+      (1K-8M elements) — scirs2-core 0.6.0's AVX2 reduction kernels
+      accumulate into a single vector register reused across loop
+      iterations, which is latency-bound rather than throughput-bound.
+  - **2026-07-11 pruning pass — removed entirely.** Unlike the outer-product
+    case, there was no algorithmic inefficiency in the scalar reductions to
+    fold a fix into — the scalar `*_along_modes` reductions (and a plain
+    `.iter().sum()`) were already the right implementation, and the
+    `SimdUnifiedOps` path was strictly worse at every measured size with no
+    redeeming special case. A `*_simd` name that is 2-4x *slower* than the
+    non-`_simd` alternative is exactly the API trap this pruning pass exists
+    to remove, so `src/reductions_simd.rs` (module, all 12 functions, and
+    their tests/benchmarks) was deleted outright rather than kept or
+    renamed. **Use the reductions in `src/reductions.rs`** (`sum_along_modes`
+    and friends) for production use.
 
 ### Multivariate Analysis
 
@@ -418,6 +487,102 @@
 ---
 
 ## Recent Updates
+
+### SIMD variant pruning + rustdoc link fixes (2026-07-11)
+
+Follow-up to the `SimdUnifiedOps` pass below in this same file: once the
+honest benchmark numbers were in, a public `*_simd` function that is
+*slower* than the plain version is an API trap (a caller reaching for
+`hadamard_simd_f64` expecting a speedup silently gets a 1.5-2x slowdown), so
+every strictly-slower variant was removed rather than kept as a "for
+completeness" curiosity, and the one genuine algorithmic win was folded into
+the primary function instead of living behind a separate `_simd` name.
+
+- **Removed outright** (functions, tests, and benchmark entries — nothing
+  else in the workspace referenced them): `hadamard_simd_f64`/`_f32`,
+  `hadamard_nd_simd_f64`/`_f32`, `hadamard_parallel_simd_f64`/`_f32`
+  (`src/hadamard.rs`); the entire `src/reductions_simd.rs` module
+  (`sum_tensor_simd_f64`/`_f32`, `mean_tensor_simd_f64`/`_f32`,
+  `frobenius_norm_tensor_simd_f64`/`_f32`, `norm_l1_tensor_simd_f64`/`_f32`,
+  `variance_tensor_simd_f64`/`_f32`, `std_tensor_simd_f64`/`_f32`);
+  `outer_product_2_simd_f64`/`_f32` (`src/outer.rs`). All measured slower
+  than their non-`_simd` counterparts (see the dated entries below for the
+  original numbers).
+- **Folded into the primary function** (dropped the `_simd` suffix entirely
+  rather than keeping two APIs): `outer_product`/`outer_product_weighted`
+  now use the `broadcast_fold` axis-by-axis algorithm directly (generic over
+  `T: Clone + Num`, no `SimdUnifiedOps` bound — trait bounds are unchanged
+  from before, so no downstream crate needed to change). The old
+  `flat_to_multi_index`-based per-element decode and its test were removed
+  as dead code. `outer_product_simd_f64`/`_f32` and
+  `outer_product_weighted_simd_f64`/`_f32` no longer exist as separate
+  functions; every caller of `outer_product`/`outer_product_weighted`/
+  `cp_reconstruct` gets the faster algorithm automatically.
+- **Kept unchanged**: `hadamard_parallel` (genuine ~2.4x win at 2000x2000,
+  with the crossover documented in its doc comment) and the auto-vectorized
+  `mttkrp_fused_simd_f32`/`_f64` family (4-12x genuine win, unrelated to
+  `SimdUnifiedOps` — see the 2026-04-14 entry below) — both are out of scope
+  for this pruning pass since they were never the slower kind.
+- Dropped the `features = ["simd"]` override on the `scirs2-core` dependency
+  in `Cargo.toml`: after the removals above, no code in this crate calls
+  `scirs2_core::simd_ops::SimdUnifiedOps` anymore.
+- Fixed all `cargo doc -p tenrso-kernels --no-deps --all-features` errors
+  (some pre-existing, some introduced by the `SimdUnifiedOps` pass):
+  a private-item link (`PARALLEL_WORK_THRESHOLD` in `mttkrp_dimtree.rs`,
+  reworded out of link form since the item can't be public), several
+  unresolved links (`nmode_product`, `nmode_products_seq`, `tucker_operator`
+  in `nmode_tucker_ext.rs`; `mttkrp` in `mttkrp_fused_blocked.rs`/`utils.rs`)
+  fixed by qualifying with `crate::` and, where the linked item is a
+  function that shares its name with a module (`mttkrp`, `mttkrp_sparse_csf`
+  are each both a function and a `pub mod`), disambiguating with the
+  `[`crate::name()`]` function-call syntax.
+- Verified clean: `cargo clippy -p tenrso-kernels --all-features --all-targets
+  -- -D warnings`, `cargo nextest run -p tenrso-kernels --all-features` (449
+  tests passed), `cargo test --doc -p tenrso-kernels --all-features` (90
+  passed, 3 ignored), `cargo doc -p tenrso-kernels --no-deps --all-features`,
+  and a full `cargo build --workspace --all-features`.
+
+### `mttkrp_all_modes` deprecation restored + `SimdUnifiedOps` pass (2026-07-11)
+
+- **Semver fix:** restored `utils::mttkrp_all_modes` as a `#[deprecated]`
+  alias forwarding to `mttkrp_all_modes_naive` (a prior rename had removed
+  this published-crate public path outright). Root-level
+  `tenrso_kernels::mttkrp_all_modes` still resolves to the fast
+  `mttkrp_dimtree::mttkrp_all_modes` (disambiguated explicitly in `lib.rs`
+  to fix the resulting `ambiguous_glob_reexports` error).
+- **Hadamard:** added `hadamard_simd_f64`/`_f32`, `hadamard_nd_simd_f64`/
+  `_f32` (via `SimdUnifiedOps::simd_mul_into`), `hadamard_parallel`
+  (row-parallel Rayon), `hadamard_parallel_simd_f64`/`_f32`. Honest result:
+  the `SimdUnifiedOps` paths measured **slower** than the existing
+  `ndarray`-based `hadamard` (~1.5-2x); `hadamard_parallel` measured a real
+  ~2.4x win at 2000x2000 but ~30x loss at 100x100. See `src/hadamard.rs`
+  doc comments for the full writeup (both `SimdUnifiedOps` entry points
+  were tried).
+- **Outer products:** added `outer_product_2_simd_f64`/`_f32`,
+  `outer_product_simd_f64`/`_f32`, `outer_product_weighted_simd_f64`/`_f32`
+  via a broadcast-fold algorithm built on `SimdUnifiedOps::simd_scalar_mul`.
+  Honest result: **~6-14x faster** for N-D (3+ vectors) and weighted
+  products (beats the naive `flat_to_multi_index`-based baseline mostly on
+  algorithm, not just SIMD); **~5-13x slower** for the already-efficient
+  2-vector case (`outer_product_2_simd_f64`).
+- **Reductions:** new `src/reductions_simd.rs` module: `sum_tensor_simd_f64`/
+  `_f32`, `mean_tensor_simd_f64`/`_f32`, `frobenius_norm_tensor_simd_f64`/
+  `_f32`, `norm_l1_tensor_simd_f64`/`_f32`, `variance_tensor_simd_f64`/`_f32`,
+  `std_tensor_simd_f64`/`_f32` (whole-tensor reductions, since per-mode
+  reductions can't offer one contiguous slice). Honest result: measured
+  **~2-4x slower** than scalar equivalents at every size (1K-8M elements) —
+  root cause is a single-accumulator (latency-bound) reduction loop in
+  scirs2-core 0.6.0's AVX2 kernels.
+- Added `features = ["simd"]` to `tenrso-kernels`'s `scirs2-core` dependency
+  (on top of the workspace-inherited version) so `SimdUnifiedOps` actually
+  dispatches to real AVX2/NEON code instead of silently falling back to
+  scalar.
+- 57 new tests (correctness vs. scalar/naive references, including
+  non-lane-multiple sizes: 0,1,2,3,5,7,9,13,17,31,33,65,129), all passing;
+  13 new doc tests; new `hadamard`/`outer_product`/`reductions_simd`
+  criterion benchmark groups in `benches/kernel_benchmarks.rs`.
+- 0 warnings, 0 new `unsafe`, clippy-clean with `-D warnings`, `cargo fmt`
+  clean.
 
 ### SIMD Fused MTTKRP (2026-04-14)
 

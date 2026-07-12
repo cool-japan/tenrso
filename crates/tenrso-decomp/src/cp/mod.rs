@@ -20,11 +20,14 @@
 
 mod advanced;
 mod core;
+mod dimtree;
 pub(crate) mod helpers;
 #[cfg(feature = "sparse")]
 mod sparse;
 mod types;
 
+#[cfg(test)]
+mod dimtree_tests;
 #[cfg(test)]
 mod tests;
 

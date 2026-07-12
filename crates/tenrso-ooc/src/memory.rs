@@ -97,6 +97,8 @@ pub struct MemoryManager {
     max_memory_bytes: usize,
     /// Current memory usage in bytes
     current_memory_bytes: usize,
+    /// High-water mark of `current_memory_bytes` over the manager's lifetime
+    peak_memory_bytes: usize,
     /// Memory pressure threshold (0.0 to 1.0)
     pressure_threshold: f64,
     /// Spill policy
@@ -122,6 +124,7 @@ impl MemoryManager {
         Self {
             max_memory_bytes: 1024 * 1024 * 1024, // 1GB default
             current_memory_bytes: 0,
+            peak_memory_bytes: 0,
             pressure_threshold: 0.8,
             spill_policy: SpillPolicy::LRU,
             temp_dir: std::env::temp_dir(),
@@ -180,6 +183,79 @@ impl MemoryManager {
     /// Get current memory usage
     pub fn current_memory(&self) -> usize {
         self.current_memory_bytes
+    }
+
+    /// Get the configured memory limit in bytes
+    pub fn max_memory(&self) -> usize {
+        self.max_memory_bytes
+    }
+
+    /// Get the high-water mark of resident chunk bytes over this manager's lifetime
+    ///
+    /// This is the quantity to assert against when proving a bounded-memory claim:
+    /// it never decreases, and it counts every byte that was ever simultaneously
+    /// registered as resident.
+    pub fn peak_memory(&self) -> usize {
+        self.peak_memory_bytes
+    }
+
+    /// Check whether `bytes` additional resident bytes would stay within the limit
+    ///
+    /// This is the back-pressure predicate: a streaming producer calls this before
+    /// materializing the next chunk and stalls (drains its consumer) when it returns
+    /// `false`.
+    pub fn can_fit(&self, bytes: usize) -> bool {
+        self.current_memory_bytes + bytes <= self.max_memory_bytes
+    }
+
+    /// Borrow a resident chunk without mutating access metadata
+    ///
+    /// Unlike [`MemoryManager::access_chunk`] this takes `&self`, so several chunks
+    /// can be borrowed simultaneously (needed to hand a whole window of chunks to a
+    /// parallel consumer). It never faults a spilled chunk back in — spilled chunks
+    /// simply return `None`.
+    pub fn get_chunk(&self, chunk_id: &str) -> Option<&DenseND<f64>> {
+        self.in_memory.get(chunk_id)
+    }
+
+    /// Drop a chunk permanently: free its resident bytes and forget its metadata
+    ///
+    /// This is the counterpart of [`MemoryManager::register_chunk`] for *consume-once*
+    /// data (streaming chunks that will never be revisited). Unlike `decref`, which may
+    /// spill the chunk to disk for later reuse, `release_chunk` discards it outright, so
+    /// a streaming pass performs no spill I/O at all.
+    ///
+    /// Any file the chunk had previously been spilled to is removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the chunk is unknown, or if removing its spill file fails.
+    pub fn release_chunk(&mut self, chunk_id: &str) -> Result<()> {
+        let meta = self
+            .chunks
+            .remove(chunk_id)
+            .ok_or_else(|| anyhow!("Chunk {} not found", chunk_id))?;
+
+        if self.in_memory.remove(chunk_id).is_some() {
+            self.current_memory_bytes = self.current_memory_bytes.saturating_sub(meta.size_bytes);
+        }
+        self.lru_queue.retain(|id| id != chunk_id);
+
+        if let Some(path) = &meta.spill_path {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Account `size` newly-resident bytes and update the high-water mark
+    fn charge_memory(&mut self, size: usize) {
+        self.current_memory_bytes += size;
+        if self.current_memory_bytes > self.peak_memory_bytes {
+            self.peak_memory_bytes = self.current_memory_bytes;
+        }
     }
 
     /// Get memory usage ratio (0.0 to 1.0)
@@ -246,7 +322,7 @@ impl MemoryManager {
         self.chunks.insert(chunk_id.to_string(), metadata);
         self.in_memory.insert(chunk_id.to_string(), tensor);
         self.lru_queue.push_back(chunk_id.to_string());
-        self.current_memory_bytes += size;
+        self.charge_memory(size);
 
         Ok(())
     }
@@ -455,7 +531,7 @@ impl MemoryManager {
         }
 
         self.in_memory.insert(chunk_id.to_string(), tensor);
-        self.current_memory_bytes += size;
+        self.charge_memory(size);
 
         if let Some(meta) = self.chunks.get_mut(chunk_id) {
             meta.spilled = false;
@@ -496,7 +572,7 @@ impl MemoryManager {
         }
 
         self.in_memory.insert(chunk_id.to_string(), tensor);
-        self.current_memory_bytes += size;
+        self.charge_memory(size);
 
         if let Some(meta) = self.chunks.get_mut(chunk_id) {
             meta.spilled = false;
@@ -683,6 +759,65 @@ mod tests {
         // Depending on exact sizes, this may or may not trigger pressure
         // Just verify the calculation works
         assert!(manager.memory_ratio() >= 0.0);
+    }
+
+    #[test]
+    fn test_release_chunk_frees_bytes() {
+        let mut manager = MemoryManager::new().max_memory_mb(1).auto_spill(false);
+
+        let tensor = DenseND::<f64>::zeros(&[10, 10]); // 800 bytes
+        manager
+            .register_chunk("chunk_0", tensor, AccessPattern::ReadOnce)
+            .unwrap();
+        assert_eq!(manager.current_memory(), 800);
+        assert!(manager.get_chunk("chunk_0").is_some());
+
+        manager.release_chunk("chunk_0").unwrap();
+
+        assert_eq!(manager.current_memory(), 0);
+        assert!(manager.get_chunk("chunk_0").is_none());
+        assert_eq!(manager.stats().total_chunks, 0);
+        // Releasing twice is an error, not a silent underflow.
+        assert!(manager.release_chunk("chunk_0").is_err());
+        // The high-water mark survives the release: that is the point of it.
+        assert_eq!(manager.peak_memory(), 800);
+    }
+
+    #[test]
+    fn test_can_fit_and_peak_tracking() {
+        let limit = 2400;
+        let mut manager = MemoryManager::new()
+            .max_memory_bytes(limit)
+            .auto_spill(false);
+
+        assert!(manager.can_fit(limit));
+        assert!(!manager.can_fit(limit + 1));
+
+        // Two 800-byte chunks resident at once, then released one at a time.
+        manager
+            .register_chunk(
+                "a",
+                DenseND::<f64>::zeros(&[10, 10]),
+                AccessPattern::ReadOnce,
+            )
+            .unwrap();
+        manager
+            .register_chunk(
+                "b",
+                DenseND::<f64>::zeros(&[10, 10]),
+                AccessPattern::ReadOnce,
+            )
+            .unwrap();
+        assert_eq!(manager.current_memory(), 1600);
+        assert_eq!(manager.peak_memory(), 1600);
+        assert!(manager.can_fit(800));
+        assert!(!manager.can_fit(801));
+
+        manager.release_chunk("a").unwrap();
+        manager.release_chunk("b").unwrap();
+        assert_eq!(manager.current_memory(), 0);
+        assert_eq!(manager.peak_memory(), 1600, "peak must not decay");
+        assert_eq!(manager.max_memory(), limit);
     }
 
     #[test]

@@ -123,7 +123,7 @@ where
     ///
     /// For CP gradient computation, we need: V = U1 odot U2 odot ... odot U(n-1) odot U(n+1) odot ... odot Um
     /// where mode n is excluded.
-    fn khatri_rao_except(&self, except_mode: usize) -> Result<Array2<T>> {
+    pub(crate) fn khatri_rao_except(&self, except_mode: usize) -> Result<Array2<T>> {
         // Collect all factors except the specified mode
         let factors_to_multiply: Vec<_> = self
             .factors
@@ -162,7 +162,7 @@ where
 /// # Returns
 ///
 /// Khatri-Rao product (m*n x r)
-fn khatri_rao<T>(
+pub(crate) fn khatri_rao<T>(
     a: &scirs2_core::ndarray_ext::ArrayView2<T>,
     b: &scirs2_core::ndarray_ext::ArrayView2<T>,
 ) -> Result<Array2<T>>
@@ -277,7 +277,15 @@ where
 ///
 /// Computes `X xn U` where X is a tensor and U is a matrix.
 /// This contracts mode n of X with the rows of U.
-fn mode_n_product<T>(tensor: &DenseND<T>, matrix: &Array2<T>, mode: usize) -> Result<DenseND<T>>
+///
+/// The implementation is convention-independent: it only relies on `unfold` and
+/// `fold` being mutual inverses, so the same helper is used by the forward
+/// (Tucker reconstruction) and backward (core/factor gradient) paths.
+pub(crate) fn mode_n_product<T>(
+    tensor: &DenseND<T>,
+    matrix: &Array2<T>,
+    mode: usize,
+) -> Result<DenseND<T>>
 where
     T: Float + 'static,
 {

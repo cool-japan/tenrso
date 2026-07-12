@@ -80,7 +80,8 @@
 ### Integration Examples
 
 - [x] CP-ALS decomposition with out-of-core data (`examples/cp_als_ooc.rs`)
-- [x] MTTKRP operations with streaming (`examples/mttkrp_streaming.rs`)
+- [x] MTTKRP operations with streaming (`examples/mttkrp_streaming.rs`) — drives the real
+      out-of-core implementation in `mttkrp_stream.rs` (see "Streaming MTTKRP" below)
 - [x] Tucker decomposition on large tensors (`examples/tucker_ooc.rs`)
 - [x] Tensor network contraction workflows (`examples/tensor_network_ooc.rs`)
 
@@ -221,6 +222,44 @@
   - [x] Consistent hashing tests
   - [x] Registry operations tests
   - [x] Network client/server tests
+
+---
+
+## Streaming MTTKRP - COMPLETE
+
+Closes `crates/tenrso-kernels/TODO.md` "Out-of-core MTTKRP (future M5)". The kernel math
+lives in `tenrso-kernels`; the chunking, streaming and memory bound live here.
+
+- [x] `chunk_source.rs`: `ChunkSource` trait + row-major sub-box extraction (`copy_subbox`)
+  - [x] `DenseChunkSource` (RAM), `MmapChunkSource` (mmap'd file), `ArrowChunkStore`
+        (Arrow IPC, one record batch per chunk, random access via the file footer)
+  - [x] `ArrowReader::num_batches` / `read_batch` (random-access batch decode)
+- [x] `mttkrp_stream.rs`: `StreamingMttkrp`, `MttkrpAccumulator`, `MttkrpStreamPlan`
+  - [x] Single-mode streaming MTTKRP
+  - [x] **All modes in one disk pass** (a full CP-ALS sweep costs 1 pass, not N),
+        using the dimension-tree kernel per chunk (~2·nnz·R vs N·nnz·R multiply-adds)
+  - [x] Global index offsets on both sides: factor rows sliced to `A_k[s_k..e_k, :]`,
+        partials accumulated into `M_n[s_n..e_n, :]`
+  - [x] Hard, configurable memory bound; the window size is *derived* from the budget,
+        and a budget that cannot hold one chunk is a loud error
+  - [x] Back-pressure + peak accounting via `MemoryManager`
+        (`can_fit` / `get_chunk` / `release_chunk` / `peak_memory`)
+  - [x] Deterministic accumulation: ascending chunk-linear order, never completion order;
+        bit-identical across thread count, window size, and budget
+- [x] Tests: 16 integration (`tests/mttkrp_streaming.rs`) + 12 unit
+  - [x] 3rd/4th order, non-cubic, ranks 1..12, every mode
+  - [x] Ragged final chunks; chunk size 1; chunk size == whole tensor; chunk > dim
+  - [x] Real on-disk paths (mmap binary + Arrow chunk store) in `std::env::temp_dir()`
+  - [x] Bitwise determinism across execution schedules; bounded-memory assertions
+- [x] Benchmarks: `benches/mttkrp_stream.rs`; example: `examples/mttkrp_streaming.rs`
+
+### Follow-ups
+
+- Double-buffered prefetch (fetch window `w+1` while computing window `w`) — the current
+  loop serializes I/O and compute per window.
+- Sparse out-of-core MTTKRP (stream COO/CSF blocks; the accumulation math is unchanged).
+- A `ChunkSource` over Parquet row groups (needs row-group-aligned writes; the Arrow IPC
+  store already gives the columnar on-disk path).
 
 ---
 

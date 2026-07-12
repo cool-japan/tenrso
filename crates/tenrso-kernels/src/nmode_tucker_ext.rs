@@ -18,7 +18,7 @@ use crate::nmode::{fold_matrix, unfold_tensor};
 
 /// Parallel N-mode product using Rayon row-parallelism
 ///
-/// Computes Y = X ×ₖ M identically to [`nmode_product`], but parallelises the
+/// Computes Y = X ×ₖ M identically to [`crate::nmode_product()`], but parallelises the
 /// matrix-matrix multiplication over output rows.  Each row of `M` is assigned
 /// to its own Rayon task, giving near-linear speedup when
 /// `matrix.nrows() ≥ available_threads`.
@@ -109,7 +109,7 @@ where
 /// Each individual mode application is parallelised; the applications are still
 /// sequential because each step's output is the next step's input.
 ///
-/// Prefer this over [`nmode_products_seq`] when matrices are large.
+/// Prefer this over [`crate::nmode_products_seq()`] when matrices are large.
 ///
 /// # Examples
 ///
@@ -149,7 +149,7 @@ where
 
 /// Parallel Tucker operator
 ///
-/// Like [`tucker_operator`] (applies each mode in cost-minimising order), but
+/// Like [`crate::tucker_operator()`] (applies each mode in cost-minimising order), but
 /// delegates each mode application to [`nmode_product_parallel`].
 ///
 /// # Examples

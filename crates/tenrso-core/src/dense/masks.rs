@@ -26,7 +26,7 @@ where
     /// Element `mask[i]` is `true` when `abs(self[i]) > threshold`.
     ///
     /// Useful for converting a dense tensor to a sparse representation:
-    /// the nonzero pattern can then be passed to [`apply_bool_mask`].
+    /// the nonzero pattern can then be passed to [`Self::apply_bool_mask`].
     ///
     /// # Example
     ///

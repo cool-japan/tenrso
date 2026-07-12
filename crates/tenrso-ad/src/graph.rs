@@ -659,7 +659,7 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
         )
     }
 
-    /// Slice: z = x[ranges]
+    /// Slice: z = x\[ranges\]
     ///
     /// Extracts a sub-tensor using per-axis half-open `(start, end)` ranges.
     /// All axes must satisfy `0 ≤ start ≤ end ≤ dim_size`. The backward pass

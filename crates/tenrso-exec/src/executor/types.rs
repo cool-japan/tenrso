@@ -3,12 +3,12 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use crate::hints::ExecHints;
-use crate::ops::execute_dense_contraction;
+use crate::ops::{execute_dense_contraction_accelerated, execute_unary_einsum};
 use anyhow::{anyhow, Result};
 use scirs2_core::numeric::{Float, FromPrimitive, Num};
 use std::collections::HashMap;
 use tenrso_core::{DenseND, TensorHandle};
-use tenrso_planner::{greedy_planner, EinsumSpec, Plan, PlanHints};
+use tenrso_planner::{greedy_planner, EinsumSpec, PlanHints};
 
 // Re-export ScatterMode from advanced_indexing
 pub use super::advanced_indexing::ScatterMode;
@@ -651,7 +651,26 @@ impl CpuExecutor {
     // End Generic Pooling Helpers
     // ========================================================================
 
-    /// Execute einsum with planner integration
+    /// Execute einsum with planner integration.
+    ///
+    /// # Arity dispatch
+    ///
+    /// | operands | path |
+    /// |----------|------|
+    /// | 1 | [`execute_unary_einsum`] — permute / diagonal / trace / reduce |
+    /// | 2 | [`execute_dense_contraction_accelerated`] — one batched GEMM |
+    /// | ≥3 | [`greedy_planner`] chooses the *order*; [`Self::execute_plan`] executes it |
+    ///
+    /// The single-operand case is short-circuited **before** planning, and
+    /// deliberately so: a [`Plan`] models a sequence of *pairwise* contractions
+    /// (`order: Vec<(usize, usize)>`, `ContractionSpec` with two input
+    /// subscripts).  A one-operand einsum has no pair to schedule and no order
+    /// to search over — the planner correctly returns an empty plan, and an
+    /// empty plan executed over one input is a passthrough.  Routing `"ij->ji"`
+    /// through the planner therefore *cannot* be made correct without changing
+    /// the planner's data model to something it does not mean; the operation is
+    /// a gather, so it belongs in the kernel layer next to the contraction
+    /// kernel, which is where [`crate::ops::execute_unary_einsum`] lives.
     pub(crate) fn execute_einsum_with_planner<T>(
         &mut self,
         spec: &EinsumSpec,
@@ -659,15 +678,32 @@ impl CpuExecutor {
         _hints: &ExecHints,
     ) -> Result<DenseND<T>>
     where
-        T: Clone + Num + std::ops::AddAssign + std::default::Default + Float + FromPrimitive,
+        T: Clone
+            + Num
+            + std::ops::AddAssign
+            + std::default::Default
+            + Float
+            + FromPrimitive
+            + 'static,
     {
-        let shapes: Vec<Vec<usize>> = inputs.iter().map(|t| t.shape().to_vec()).collect();
-        let plan_hints = PlanHints::default();
-        let plan = greedy_planner(spec, &shapes, &plan_hints)?;
-        if inputs.len() == 2 {
-            return execute_dense_contraction(spec, &inputs[0], &inputs[1]);
+        if spec.num_inputs() != inputs.len() {
+            return Err(anyhow!(
+                "Spec expects {} inputs, got {}",
+                spec.num_inputs(),
+                inputs.len()
+            ));
         }
-        self.execute_plan(&plan, inputs)
+
+        match inputs {
+            [] => Err(anyhow!("einsum requires at least one input tensor")),
+            [a] => execute_unary_einsum(spec, a),
+            [a, b] => execute_dense_contraction_accelerated(spec, a, b),
+            _ => {
+                let shapes: Vec<Vec<usize>> = inputs.iter().map(|t| t.shape().to_vec()).collect();
+                let order = contraction_order(spec, &shapes);
+                self.execute_plan(spec, &order, inputs)
+            }
+        }
     }
     /// Execute binary operation with full NumPy-style broadcasting support
     pub(crate) fn binary_op_with_broadcast<T>(
@@ -850,53 +886,106 @@ impl CpuExecutor {
         result_shape.reverse();
         Ok(result_shape)
     }
-    /// Execute a multi-step contraction plan
-    fn execute_plan<T>(&mut self, plan: &Plan, inputs: &[DenseND<T>]) -> Result<DenseND<T>>
+    /// Execute a multi-operand contraction in the given pairwise `order`.
+    ///
+    /// # Why the plan's step specs are re-derived here
+    ///
+    /// The planner's job is to choose the *order* — which pair to contract next,
+    /// by cost.  The *semantics* of each step (which indices survive it) are not
+    /// a free choice: an index must survive a step iff it is still needed, i.e.
+    /// it appears in the final output **or** in an operand that has not been
+    /// consumed yet.  `greedy_planner`'s `compute_pairwise_spec` decides this
+    /// from the two operands alone: it drops every index the pair *shares*.
+    /// That is wrong for a shared index which is also needed later — most
+    /// visibly a batch index, so `"bij,bjk,bkl->bil"` would sum over `b` in the
+    /// first step and silently return a wrong-valued (but right-shaped!) tensor.
+    /// It also emits its output indices in alphabetical order, which need not be
+    /// the caller's requested order.
+    ///
+    /// So the executor takes only `order` from the plan and derives each step's
+    /// subscripts itself, then fixes up the final index order with a unary
+    /// einsum.  This keeps the fix inside the layer that owns correctness while
+    /// leaving cost-based ordering to the planner.
+    fn execute_plan<T>(
+        &mut self,
+        spec: &EinsumSpec,
+        order: &[(usize, usize)],
+        inputs: &[DenseND<T>],
+    ) -> Result<DenseND<T>>
     where
-        T: Clone + Num + std::ops::AddAssign + std::default::Default + Float + FromPrimitive,
+        T: Clone
+            + Num
+            + std::ops::AddAssign
+            + std::default::Default
+            + Float
+            + FromPrimitive
+            + 'static,
     {
-        let mut intermediates: Vec<DenseND<T>> = inputs.to_vec();
-        for (step_idx, &(i, j)) in plan.order.iter().enumerate() {
-            if i >= intermediates.len() || j >= intermediates.len() {
+        let mut labels: Vec<String> = spec.inputs.clone();
+        let mut tensors: Vec<DenseND<T>> = inputs.to_vec();
+
+        for (step_idx, &(i, j)) in order.iter().enumerate() {
+            if i == j || i >= tensors.len() || j >= tensors.len() {
                 return Err(anyhow!(
-                    "Step {}: Invalid indices ({}, {}) for {} intermediates",
+                    "Step {}: invalid contraction pair ({}, {}) for {} operands",
                     step_idx,
                     i,
                     j,
-                    intermediates.len()
+                    tensors.len()
                 ));
             }
-            let node = &plan.nodes[step_idx];
-            let (tensor_a, tensor_b) = if i < j {
-                let b = intermediates.remove(j);
-                let a = intermediates.remove(i);
-                (a, b)
+
+            // Remove the higher index first so the lower one stays valid.
+            let (hi, lo) = if i > j { (i, j) } else { (j, i) };
+            let tensor_hi = tensors.remove(hi);
+            let labels_hi = labels.remove(hi);
+            let tensor_lo = tensors.remove(lo);
+            let labels_lo = labels.remove(lo);
+
+            // `i` is always operand A and `j` operand B, whichever came first.
+            let (labels_a, tensor_a, labels_b, tensor_b) = if i == hi {
+                (labels_hi, tensor_hi, labels_lo, tensor_lo)
             } else {
-                let a = intermediates.remove(i);
-                let b = intermediates.remove(j);
-                (a, b)
+                (labels_lo, tensor_lo, labels_hi, tensor_hi)
             };
-            let spec_str = format!(
-                "{},{}->{}",
-                node.output_spec.input_specs[0],
-                node.output_spec.input_specs[1],
-                node.output_spec.output_spec
-            );
-            let step_spec = EinsumSpec::parse(&spec_str)?;
-            let result = execute_dense_contraction(&step_spec, &tensor_a, &tensor_b)?;
-            intermediates.push(result);
+
+            let out_labels = step_output_labels(&labels_a, &labels_b, &labels, &spec.output);
+            let result = contract_pair(&labels_a, &tensor_a, &labels_b, &tensor_b, &out_labels)?;
+
+            labels.push(out_labels);
+            tensors.push(result);
         }
-        if intermediates.len() != 1 {
+
+        if tensors.len() != 1 || labels.len() != 1 {
             return Err(anyhow!(
-                "Expected 1 final tensor, got {}",
-                intermediates.len()
+                "Expected 1 final tensor, got {} (the contraction order left the network \
+                 unreduced)",
+                tensors.len()
             ));
         }
-        intermediates
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("BUG: expected exactly 1 intermediate after guard check"))
+        let result = tensors
+            .pop()
+            .ok_or_else(|| anyhow!("BUG: expected exactly 1 intermediate after guard check"))?;
+        let final_labels = labels
+            .pop()
+            .ok_or_else(|| anyhow!("BUG: expected exactly 1 label set after guard check"))?;
+
+        if final_labels == spec.output {
+            return Ok(result);
+        }
+        if final_labels.is_empty() {
+            return Err(anyhow!(
+                "BUG: the contraction reduced to a scalar but the spec requests output '{}'",
+                spec.output
+            ));
+        }
+
+        // The steps kept exactly the output's index set, but not necessarily in
+        // the requested order (`"ij,jk,kl->li"`).  One unary gather fixes it.
+        let reorder = EinsumSpec::parse(&format!("{}->{}", final_labels, spec.output))?;
+        execute_unary_einsum(&reorder, &result)
     }
+
     /// Helper: Compute determinant of a 2D matrix using LU decomposition
     pub(crate) fn compute_determinant_2d<T2>(
         &self,
@@ -1081,6 +1170,127 @@ impl CpuExecutor {
         Ok(x)
     }
 }
+// ────────────────────────── multi-operand contraction ───────────────────────
+
+/// Choose the pairwise contraction order for a ≥3-operand einsum.
+///
+/// Asks [`greedy_planner`] for a cost-based order and validates it against the
+/// remove-two-push-one discipline [`CpuExecutor::execute_plan`] uses.  If the
+/// planner fails (it rejects a few valid specs — e.g. any pairwise step whose
+/// operands share *all* their indices, which makes its intermediate subscript
+/// empty and unparseable) or returns an order that is not executable, fall back
+/// to a left-to-right chain, which is always a valid order.  Order only affects
+/// cost, never the result, so a fallback can never make an answer wrong — it can
+/// only make it slower than the planner would have.
+fn contraction_order(spec: &EinsumSpec, shapes: &[Vec<usize>]) -> Vec<(usize, usize)> {
+    let n = shapes.len();
+    let sequential =
+        || -> Vec<(usize, usize)> { (0..n.saturating_sub(1)).map(|_| (0, 1)).collect() };
+
+    match greedy_planner(spec, shapes, &PlanHints::default()) {
+        Ok(plan) if is_executable_order(&plan.order, n) => plan.order,
+        _ => sequential(),
+    }
+}
+
+/// Is `order` a valid sequence of pairwise contractions over `n` operands?
+///
+/// Each step removes two tensors and pushes one, so the operand count drops by
+/// one per step and there must be exactly `n - 1` steps, each naming two
+/// distinct in-range positions.
+fn is_executable_order(order: &[(usize, usize)], n: usize) -> bool {
+    if n == 0 || order.len() != n - 1 {
+        return false;
+    }
+    let mut remaining = n;
+    for &(i, j) in order {
+        if i == j || i >= remaining || j >= remaining {
+            return false;
+        }
+        remaining -= 1;
+    }
+    remaining == 1
+}
+
+/// The index subscript of one contraction step's output.
+///
+/// An index survives the step iff it is still needed afterwards: it appears in
+/// the final output, or in an operand that has not been consumed yet.  Every
+/// other index of the pair is contracted (shared) or summed out (unshared) by
+/// this step — which is exactly what the pairwise engine does with them.
+///
+/// Emitted in order of first appearance in `labels_a` then `labels_b`, with
+/// duplicates dropped (a repeated index inside one operand is its diagonal, and
+/// contributes a single output axis).
+fn step_output_labels(
+    labels_a: &str,
+    labels_b: &str,
+    remaining: &[String],
+    final_output: &str,
+) -> String {
+    let mut out = String::new();
+    for c in labels_a.chars().chain(labels_b.chars()) {
+        if out.contains(c) {
+            continue;
+        }
+        let needed_later = final_output.contains(c) || remaining.iter().any(|l| l.contains(c));
+        if needed_later {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Contract one pair of labelled tensors into `out_labels`.
+///
+/// Delegates to the pairwise engine, except when an operand is a rank-0 scalar —
+/// which a previous step can legitimately produce (`"ij,ij,kl->kl"` contracts
+/// the first pair to a scalar).  `EinsumSpec` cannot express an empty subscript,
+/// so that degenerate case is handled directly: scale, then reduce.
+fn contract_pair<T>(
+    labels_a: &str,
+    tensor_a: &DenseND<T>,
+    labels_b: &str,
+    tensor_b: &DenseND<T>,
+    out_labels: &str,
+) -> Result<DenseND<T>>
+where
+    T: Clone + Num + std::ops::AddAssign + std::default::Default + Float + FromPrimitive + 'static,
+{
+    if !labels_a.is_empty() && !labels_b.is_empty() {
+        let spec = EinsumSpec::parse(&format!("{},{}->{}", labels_a, labels_b, out_labels))?;
+        return execute_dense_contraction_accelerated(&spec, tensor_a, tensor_b);
+    }
+
+    // At least one operand is a scalar: the contraction degenerates to a scaling
+    // (plus whatever reduction `out_labels` still asks for).
+    let (scalar, other, other_labels) = if labels_a.is_empty() {
+        (tensor_a, tensor_b, labels_b)
+    } else {
+        (tensor_b, tensor_a, labels_a)
+    };
+    let scale = first_element(scalar, "scalar einsum operand")?;
+
+    if other_labels.is_empty() {
+        let value = first_element(other, "scalar einsum operand")?;
+        return DenseND::from_vec(vec![scale * value], &[]);
+    }
+
+    let scaled = DenseND::from_array(other.as_array().mapv(|v| v * scale));
+    let spec = EinsumSpec::parse(&format!("{}->{}", other_labels, out_labels))?;
+    execute_unary_einsum(&spec, &scaled)
+}
+
+/// The single element of a rank-0 tensor.
+fn first_element<T: Copy + Num>(tensor: &DenseND<T>, context: &str) -> Result<T> {
+    tensor
+        .as_array()
+        .iter()
+        .next()
+        .copied()
+        .ok_or_else(|| anyhow!("{} is empty", context))
+}
+
 /// Element-wise operation types
 #[derive(Clone, Debug)]
 pub enum ElemOp {

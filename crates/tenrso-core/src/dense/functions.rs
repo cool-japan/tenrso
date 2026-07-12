@@ -5,6 +5,7 @@
 use super::types::DenseND;
 use scirs2_core::ndarray_ext::{Array, IxDyn};
 use scirs2_core::numeric::Num;
+use std::borrow::Cow;
 
 pub(crate) fn shapes_broadcastable(shape1: &[usize], shape2: &[usize]) -> bool {
     let len1 = shape1.len();
@@ -35,6 +36,14 @@ fn broadcast_shape(shape1: &[usize], shape2: &[usize]) -> Option<Vec<usize>> {
     result.reverse();
     Some(result)
 }
+/// Copy `src` into `dst`, replicating along every axis where `src` has extent 1
+/// (NumPy broadcasting semantics, right-aligned).
+///
+/// The two index buffers are allocated **once** and reused across elements. They
+/// used to be allocated *inside* the element loop — two `Vec`s per element, plus
+/// an `insert(0, ..)` that shifted the whole index vector on every axis — which
+/// made a single broadcasting `&a + &b` responsible for `2 * n` heap
+/// allocations. The traversal order and the resulting values are unchanged.
 pub(crate) fn broadcast_copy<T>(
     src: &Array<T, IxDyn>,
     dst: &mut Array<T, IxDyn>,
@@ -47,25 +56,27 @@ where
     let src_rank = src_shape.len();
     let dst_rank = dst_shape.len();
     let rank_diff = dst_rank.saturating_sub(src_rank);
-    let map_index = |dst_idx: &[usize]| -> Vec<usize> {
-        let mut src_idx = Vec::with_capacity(src_rank);
-        for (i, &src_dim) in src_shape.iter().enumerate() {
-            let dst_dim_idx = rank_diff + i;
-            let dst_val = dst_idx[dst_dim_idx];
-            src_idx.push(if src_dim == 1 { 0 } else { dst_val });
-        }
-        src_idx
-    };
+
     let total_elements: usize = dst_shape.iter().product();
+    let mut dst_idx = vec![0_usize; dst_rank];
+    let mut src_idx = vec![0_usize; src_rank];
+
     for flat_idx in 0..total_elements {
-        let mut dst_idx = Vec::with_capacity(dst_rank);
+        // Unravel the flat index into a row-major multi-index (last axis fastest).
         let mut remaining = flat_idx;
         for i in (0..dst_rank).rev() {
             let dim_size = dst_shape[i];
-            dst_idx.insert(0, remaining % dim_size);
+            dst_idx[i] = remaining % dim_size;
             remaining /= dim_size;
         }
-        let src_idx = map_index(&dst_idx);
+        // Map it back onto `src`, collapsing every broadcast (extent-1) axis.
+        for (i, &src_dim) in src_shape.iter().enumerate() {
+            src_idx[i] = if src_dim == 1 {
+                0
+            } else {
+                dst_idx[rank_diff + i]
+            };
+        }
         dst[IxDyn(&dst_idx)] = src[IxDyn(&src_idx)].clone();
     }
     Ok(())
@@ -97,27 +108,48 @@ pub(crate) fn generate_indices(shape: &[usize], axis: usize, axis_value: usize) 
     recurse(shape, axis, &mut indices, 0, &mut result);
     result
 }
+/// Materialize an operand at `target_shape` for a binary elementwise op.
+///
+/// Returns a *borrow* of the operand's buffer when it already has the target
+/// shape — the common case, and the one that must not copy. Only an operand
+/// that genuinely needs broadcasting is materialized into a new buffer.
+///
+/// This is what keeps `&a + &b` at ndarray parity (exactly one allocation: the
+/// output). The previous implementation cloned *both* operands unconditionally,
+/// costing 3 full-tensor allocations and 3 extra memory passes per op.
+fn broadcast_operand<'a, T>(
+    tensor: &'a DenseND<T>,
+    target_shape: &[usize],
+    failure_msg: &str,
+) -> Cow<'a, Array<T, IxDyn>>
+where
+    T: Clone + Num,
+{
+    if tensor.shape() == target_shape {
+        Cow::Borrowed(&tensor.data)
+    } else {
+        Cow::Owned(tensor.broadcast_to(target_shape).expect(failure_msg).data)
+    }
+}
 impl<'b, T> std::ops::Sub<&'b DenseND<T>> for &DenseND<T>
 where
     T: Clone + Num,
 {
     type Output = DenseND<T>;
     fn sub(self, rhs: &'b DenseND<T>) -> Self::Output {
+        // Fast path: shapes already agree, so there is nothing to broadcast.
+        // Operate directly on the two buffers; ndarray allocates exactly one
+        // output buffer and makes exactly one pass over each input.
+        if self.shape() == rhs.shape() {
+            return DenseND {
+                data: &self.data - &rhs.data,
+            };
+        }
         let target_shape = broadcast_shape(self.shape(), rhs.shape())
             .expect("Shapes are not broadcastable for subtraction");
-        let lhs_broadcast = if self.shape() != target_shape.as_slice() {
-            self.broadcast_to(&target_shape)
-                .expect("Failed to broadcast left operand")
-        } else {
-            self.clone()
-        };
-        let rhs_broadcast = if rhs.shape() != target_shape.as_slice() {
-            rhs.broadcast_to(&target_shape)
-                .expect("Failed to broadcast right operand")
-        } else {
-            rhs.clone()
-        };
-        let result = &lhs_broadcast.data - &rhs_broadcast.data;
+        let lhs = broadcast_operand(self, &target_shape, "Failed to broadcast left operand");
+        let rhs = broadcast_operand(rhs, &target_shape, "Failed to broadcast right operand");
+        let result = &*lhs - &*rhs;
         DenseND { data: result }
     }
 }
@@ -127,21 +159,18 @@ where
 {
     type Output = DenseND<T>;
     fn add(self, rhs: &'b DenseND<T>) -> Self::Output {
+        // Fast path: see `Sub` above. Same-shape addition is the hot case on the
+        // CP-ALS / MTTKRP path and must not clone its operands.
+        if self.shape() == rhs.shape() {
+            return DenseND {
+                data: &self.data + &rhs.data,
+            };
+        }
         let target_shape = broadcast_shape(self.shape(), rhs.shape())
             .expect("Shapes are not broadcastable for addition");
-        let lhs_broadcast = if self.shape() != target_shape.as_slice() {
-            self.broadcast_to(&target_shape)
-                .expect("Failed to broadcast left operand")
-        } else {
-            self.clone()
-        };
-        let rhs_broadcast = if rhs.shape() != target_shape.as_slice() {
-            rhs.broadcast_to(&target_shape)
-                .expect("Failed to broadcast right operand")
-        } else {
-            rhs.clone()
-        };
-        let result = &lhs_broadcast.data + &rhs_broadcast.data;
+        let lhs = broadcast_operand(self, &target_shape, "Failed to broadcast left operand");
+        let rhs = broadcast_operand(rhs, &target_shape, "Failed to broadcast right operand");
+        let result = &*lhs + &*rhs;
         DenseND { data: result }
     }
 }

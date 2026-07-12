@@ -38,6 +38,7 @@ pub mod prometheus_metrics;
 pub mod allocators;
 pub mod batch_io;
 pub mod chunk_graph;
+pub mod chunk_source;
 pub mod chunking;
 pub mod contraction;
 pub mod dashboard;
@@ -46,6 +47,7 @@ pub mod gpu;
 pub mod memory;
 pub mod memory_tiers;
 pub mod ml_eviction;
+pub mod mttkrp_stream;
 pub mod numa;
 pub mod prefetch;
 pub mod profiling;
@@ -97,8 +99,16 @@ pub use allocators::{
 };
 pub use batch_io::{BatchConfig, BatchReadResult, BatchReader, BatchWriteResult, BatchWriter};
 pub use chunk_graph::{ChunkGraph, ChunkNode, ChunkOp};
+pub use chunk_source::{copy_subbox, validate_subbox, ChunkSource, DenseChunkSource};
 pub use chunking::{ChunkIndex, ChunkIterator, ChunkSpec};
 pub use contraction::{ContractionConfig, StreamingContractionExecutor};
+
+#[cfg(feature = "mmap")]
+pub use chunk_source::MmapChunkSource;
+
+#[cfg(feature = "arrow")]
+pub use chunk_source::ArrowChunkStore;
+
 pub use dashboard::{
     Anomaly, Dashboard, DashboardConfig, DashboardSnapshot, IoSnapshot, MemorySnapshot,
     OperationStats, Recommendation,
@@ -117,6 +127,10 @@ pub use memory_tiers::{
     TieredMemoryManager,
 };
 pub use ml_eviction::{EvictionScore, MLConfig, MLEvictionPolicy, MLPolicyStats};
+pub use mttkrp_stream::{
+    chunk_partials, streaming_mttkrp, streaming_mttkrp_all_modes, MttkrpAccumulator,
+    MttkrpStreamConfig, MttkrpStreamPlan, MttkrpStreamStats, StreamingMttkrp,
+};
 pub use numa::{NumaAllocator, NumaNode, NumaPolicy, NumaStats, NumaTopology};
 pub use prefetch::{PrefetchStats, PrefetchStrategy, Prefetcher};
 pub use profiling::{OperationStats as ProfilingOpStats, ProfileScope, ProfileSummary, Profiler};

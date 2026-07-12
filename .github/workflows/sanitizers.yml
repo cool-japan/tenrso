@@ -1,0 +1,248 @@
+name: Memory Safety (Miri + Sanitizers)
+
+# ---------------------------------------------------------------------------
+# Closes the TODO.md item:
+#   - [ ] Memory leak detection (valgrind/ASAN)
+#
+# Two complementary, non-overlapping techniques, because neither one alone
+# covers this workspace's `unsafe` code:
+#
+#   1. Miri interprets MIR directly and catches a broad class of UB (invalid
+#      provenance, out-of-bounds/misaligned access, invalid transmutes, data
+#      races) with excellent precision, but it is a *software interpreter*:
+#      it cannot execute mmap()/munmap() (a real syscall backed by
+#      `memmap2`), FFI, or x86 target_feature intrinsics (AVX2). Anything
+#      exercising those is unsupported and must be excluded, not silently
+#      skipped -- see the job below for exactly what is excluded and why.
+#
+#   2. AddressSanitizer/LeakSanitizer instrument and run *real, natively
+#      compiled* code, so -- unlike Miri -- they DO execute mmap-backed
+#      slices and AVX2 intrinsics; this is precisely the coverage Miri is
+#      missing. Their own gaps are different (see the sanitizers job below):
+#      LSan cannot attribute leaks in memory obtained via raw mmap/munmap
+#      (only allocator-routed heap chunks), and ASan's redzones likewise only
+#      protect allocator-routed chunks, not arbitrary mmap'd pages.
+#
+# Real `unsafe` blocks in this workspace (verified by grep, 2026-07):
+#   - crates/tenrso-exec/src/executor/types.rs: `Vec::from_raw_parts` type-
+#     punning gated by runtime `TypeId` checks (memory-pool buffer reuse).
+#   - crates/tenrso-ooc/src/allocators.rs: raw `std::alloc::alloc`/`dealloc`
+#     for a custom aligned allocator.
+#   - crates/tenrso-ooc/src/compression.rs: `&[f64] <-> &[u8]` pointer
+#     reinterpretation via `slice::from_raw_parts`.
+#   - crates/tenrso-ooc/src/mmap_io.rs, src/zerocopy_io.rs: file-backed
+#     `Mmap`/`MmapMut` plus `slice::from_raw_parts[_mut]` over the mapped
+#     region.
+#   - crates/tenrso-ooc/src/simd_ops.rs: `#[target_feature(enable = "avx2")]`
+#     intrinsics.
+#   - crates/tenrso-ooc/src/lockfree_prefetch.rs: `unsafe impl Send/Sync`.
+# (tenrso-core, tenrso-kernels, tenrso-decomp, tenrso-planner, tenrso-sparse,
+# tenrso-ad contain no `unsafe` keyword at all -- confirmed by grep -- so they
+# add no *unsafe-code* coverage value to either job below; tenrso-core is
+# still included in the Miri job because it is fast and exercises the
+# workspace's heaviest use of scirs2-core's `ndarray_ext`, which does use
+# `unsafe` internally.)
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [ master, main, "0.*" ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch: {}
+
+concurrency:
+  group: sanitizers-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  miri:
+    name: Miri (hard gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Environment explanation (both settings were derived empirically by
+    # actually running `cargo +nightly miri test -p tenrso-core --lib`
+    # against this workspace while writing this workflow, not guessed):
+    #
+    #  - MIRIFLAGS=-Zmiri-disable-isolation is required, not optional:
+    #    proptest's `FileFailurePersistence` (used by every `proptest! {..}`
+    #    block in this workspace) calls `std::env::current_dir()` to resolve
+    #    where to persist regression seeds. Under Miri's default isolation,
+    #    `getcwd` is blocked and every property test aborts with
+    #    "unsupported operation: `getcwd` not available when isolation is
+    #    enabled". Disabling isolation only relaxes host env/fs/clock access
+    #    for the interpreter; it does not weaken Miri's UB checks
+    #    (Stacked/Tree Borrows, bounds/alignment, provenance) in any way.
+    #  - PROPTEST_CASES=8 caps how many random cases each `proptest! {..}`
+    #    block runs (proptest's default is 256). With isolation disabled the
+    #    property tests actually execute under interpretation, and 256 cases
+    #    of interpreted execution per property measurably dominates the
+    #    job's wall-clock time. Full 256-case fuzz coverage already runs
+    #    natively in ci.yml's `test` job on every PR; this job's purpose is
+    #    to catch UB/aliasing violations, for which a handful of interpreted
+    #    cases per property is enough to exercise the memory-safety-relevant
+    #    code paths without re-doing full fuzz coverage at 10-50x the cost.
+    env:
+      MIRIFLAGS: -Zmiri-disable-isolation
+      PROPTEST_CASES: "8"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+
+      - name: Cache cargo registry and Miri sysroot
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/miri
+            target/miri
+          key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-miri-
+
+      - name: cargo miri setup
+        run: cargo miri setup
+
+      # --------------------------------------------------------------------
+      # Included (real unsafe, or fast + exercises scirs2-core internals):
+      #   tenrso-core, tenrso-kernels, tenrso-sparse, tenrso-planner,
+      #   tenrso-ad, tenrso-exec (--no-default-features).
+      #
+      # Excluded, and why:
+      #   - tenrso-ooc: real, load-bearing use of file-backed mmap
+      #     (mmap_io.rs, zerocopy_io.rs) and AVX2 target_feature intrinsics
+      #     (simd_ops.rs). Both are fundamentally outside what an
+      #     interpreter can execute -- there is no MIRIFLAGS escape hatch for
+      #     "interpret a real page-fault-backed mmap region" or "interpret a
+      #     hardware AVX2 instruction". This is exactly the gap the ASan/LSan
+      #     job below is designed to cover instead (real hardware execution).
+      #   - tenrso-exec is built with `--no-default-features` specifically to
+      #     drop its default "ooc" feature and therefore avoid pulling
+      #     tenrso-ooc (and its mmap/SIMD code) into the Miri build graph at
+      #     all; the raw_parts memory-pool code under test lives entirely in
+      #     tenrso-exec itself and does not require the "ooc" feature.
+      #   - tenrso (the umbrella crate): unconditionally depends on
+      #     tenrso-ooc (not optional in its Cargo.toml) and its own
+      #     `tests/regression_suite.rs` explicitly exercises OoC/Arrow IPC
+      #     round-trips, so it cannot be meaningfully scoped away from mmap.
+      #   - tenrso-decomp: contains zero `unsafe` code (verified by grep), so
+      #     it adds no unsafe-code coverage; its unit tests are the
+      #     heaviest numeric workloads in the workspace (CP-ALS/Tucker-HOOI/
+      #     TT-SVD iterative loops -- the same code this repo's own
+      #     benchmarks show takes tens of seconds natively even at
+      #     benchmark-reduced sizes). Miri's interpretation overhead
+      #     (commonly 1-2 orders of magnitude versus native) would make a
+      #     full run here the single biggest source of flaky timeouts for
+      #     close to zero incremental safety signal. This is a deliberate
+      #     scope cut, not a silent gap.
+      # --------------------------------------------------------------------
+
+      - name: "Miri: tenrso-core"
+        run: cargo miri test -p tenrso-core --lib
+
+      - name: "Miri: tenrso-kernels"
+        run: cargo miri test -p tenrso-kernels --lib
+
+      - name: "Miri: tenrso-sparse"
+        run: cargo miri test -p tenrso-sparse --lib
+
+      - name: "Miri: tenrso-planner"
+        run: cargo miri test -p tenrso-planner --lib
+
+      - name: "Miri: tenrso-ad"
+        run: cargo miri test -p tenrso-ad --lib
+
+      - name: "Miri: tenrso-exec (no-default-features, excludes tenrso-ooc)"
+        run: cargo miri test -p tenrso-exec --lib --no-default-features
+
+  sanitizers:
+    name: AddressSanitizer / LeakSanitizer (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # ------------------------------------------------------------------
+    # Advisory, not a hard gate -- documented trade-off:
+    #   `-Z build-std` sanitizer builds recompile the standard library from
+    #   source with instrumentation on every run (needed for ASan's
+    #   allocator-hooked redzones to actually work; without it the global
+    #   allocator itself is uninstrumented and heap redzone checks are
+    #   unreliable). This is one of the most toolchain-version-sensitive
+    #   corners of nightly Rust: it routinely breaks across nightly releases
+    #   independently of anything in this repository. Failing the whole PR
+    #   pipeline on a nightly-std-sanitizer regression that has nothing to do
+    #   with the change under review would be exactly the kind of noisy,
+    #   not-actually-actionable red X this task was asked to avoid. The job
+    #   still runs on every push/PR and reports real findings via the
+    #   annotations below; it just does not block merges.
+    # ------------------------------------------------------------------
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, leak]
+    env:
+      RUSTFLAGS: -Z sanitizer=${{ matrix.sanitizer }}
+      # ASan on Linux x86_64 runs LeakSanitizer at process exit by default;
+      # this is intentional overlap with the `leak` matrix entry below, kept
+      # for two reasons: (1) `-Zsanitizer=leak` alone is lighter-weight (no
+      # heap-redzone instrumentation) and faster, giving a quicker signal;
+      # (2) if the heavier ASan build cannot be completed on a given nightly
+      # (see the trade-off note above), the leak-only pass may still succeed.
+      ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+      LSAN_OPTIONS: suppressions=
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Cache cargo registry and sanitizer std build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-sanitizer-${{ matrix.sanitizer }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-sanitizer-${{ matrix.sanitizer }}-
+
+      # ------------------------------------------------------------------
+      # Scope: tenrso-ooc and tenrso-exec, the two crates with real `unsafe`
+      # (see the workflow header comment for the exact list). Both are built
+      # with their DEFAULT features -- unlike the Miri job above, ASan/LSan
+      # run real native code, so mmap (tenrso-ooc's `mmap` feature) and AVX2
+      # intrinsics (simd_ops.rs, unconditionally compiled) are exactly the
+      # code paths we want instrumented here, not ones to avoid.
+      #
+      # Coverage caveats (documented, not silently assumed away):
+      #   - LeakSanitizer's interceptors track the standard malloc/free
+      #     family; memory obtained via a raw `mmap`/`munmap` syscall
+      #     (mmap_io.rs, zerocopy_io.rs) is outside its allocation table, so
+      #     "leaked" mmap regions will NOT be flagged by the `leak` matrix
+      #     entry. This is a fundamental LSan limitation, not a
+      #     configuration gap.
+      #   - ASan's heap-buffer-overflow redzones are likewise inserted only
+      #     around allocator-routed heap chunks; an out-of-bounds read inside
+      #     an mmap'd region that stays within the mapped pages (but past the
+      #     logical slice length) may not trip a redzone. ASan will still
+      #     catch a true wild access that crosses into an unmapped page (as
+      #     a reported SEGV), and it fully covers the allocator-routed
+      #     buffers in allocators.rs and tenrso-exec's memory pool.
+      #   - AVX2 intrinsics in simd_ops.rs run as real hardware instructions
+      #     here (unlike Miri, which cannot execute them at all); ASan
+      #     instruments the surrounding slice accesses that feed those
+      #     intrinsics.
+      # ------------------------------------------------------------------
+      - name: "Sanitize (${{ matrix.sanitizer }}): tenrso-ooc + tenrso-exec"
+        run: |
+          cargo test -Z build-std --target x86_64-unknown-linux-gnu \
+            -p tenrso-ooc -p tenrso-exec --lib

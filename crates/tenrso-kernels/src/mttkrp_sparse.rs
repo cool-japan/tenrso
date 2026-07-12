@@ -34,7 +34,7 @@
 //!   `tenrso-sparse` is 2D-only (rows × cols), whereas MTTKRP needs an
 //!   N-dimensional sparse format. Converting COO → matricized CSR and then
 //!   doing SpMM would materialize the full Khatri-Rao product and defeat
-//!   the sparse win. CSF-based MTTKRP is now implemented in [`crate::mttkrp_sparse_csf`].
+//!   the sparse win. CSF-based MTTKRP is now implemented in [`crate::mttkrp_sparse_csf()`].
 //!
 //! # Correctness invariant
 //!
