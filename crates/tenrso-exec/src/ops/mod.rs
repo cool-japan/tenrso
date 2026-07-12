@@ -101,7 +101,7 @@ use tenrso_core::DenseND;
 use tenrso_planner::EinsumSpec;
 
 use gather::{flatten_row_major, gather, prepare_operand};
-use gemm::{BatchedGemm, BlockedBackend, DispatchBackend};
+use gemm::{BatchedGemm, BlockedBackend, DispatchBackend, ParallelBlockedBackend};
 use plan::{ContractionPlan, UnaryPlan};
 
 /// Execute a **single-operand** dense einsum.
@@ -185,9 +185,16 @@ where
 /// indices, free indices, indices repeated within an operand (diagonals), and
 /// indices that appear in one operand only and not in the output (summed out).
 ///
-/// Uses the portable cache-oblivious blocked kernel.  Callers that can satisfy
-/// `T: 'static` should prefer [`execute_dense_contraction_accelerated`], which
-/// additionally routes `f32`/`f64` through a native `matrixmultiply` GEMM.
+/// Uses the portable cache-oblivious blocked kernel, **serially**: the bound on
+/// `T` here is the weakest of the three entry points, and rayon needs
+/// `T: Send + Sync`.  Prefer, in order:
+///
+/// * [`execute_dense_contraction_accelerated`] (`T: 'static`) — native
+///   `matrixmultiply` GEMM for `f32`/`f64`, and the *parallel* blocked kernel
+///   for every other standard scalar (integers, `Complex32`, `Complex64`);
+/// * [`execute_dense_contraction_parallel`] (`T: Send + Sync`) — the parallel
+///   blocked kernel for a user-defined element type;
+/// * this function — for an element type that is genuinely `!Send`/`!Sync`.
 ///
 /// # Arguments
 ///
@@ -230,14 +237,89 @@ where
     contract::<T, BlockedBackend>(spec, a, b)
 }
 
+/// Execute a pairwise dense tensor contraction with a **row-block-parallel**
+/// blocked kernel.
+///
+/// Bit-for-bit identical results to [`execute_dense_contraction`] — not merely
+/// "identical up to rounding".  The output is cut into `(batch element, row
+/// block)` tiles and each tile is written by exactly one rayon task, which walks
+/// the *whole* cache-oblivious block schedule in the same order as the serial
+/// kernel and clips each block to its own rows.  Every output element therefore
+/// accumulates its `k`-terms in one fixed order, independent of the thread count
+/// and of the tiling, so this is a drop-in replacement even for code that
+/// compares floating-point results exactly.
+///
+/// Small problems (fewer than 64 Ki fused multiply–adds) run serially: the
+/// fork/join would cost more than the work.
+///
+/// Use this when the element type is *not* one of the standard scalars —
+/// [`execute_dense_contraction_accelerated`] already parallelises those (and
+/// sends `f32`/`f64` to a native GEMM, which is faster still).  A dual number, a
+/// fixed-point type or an interval arithmetic type is exactly the case this
+/// entry point exists for.
+///
+/// # Arguments
+///
+/// * `spec` — einsum specification with exactly two inputs, e.g. `"bij,bjk->bik"`
+/// * `a` — first input tensor
+/// * `b` — second input tensor
+///
+/// # Errors
+///
+/// Same as [`execute_dense_contraction`].
+///
+/// # Complexity
+///
+/// `O(|A| + |B| + batch · m · k · n)` work, `O(batch · m · k · n / p)` span on
+/// `p` threads.
+///
+/// # Examples
+///
+/// ```
+/// use tenrso_core::DenseND;
+/// use tenrso_exec::ops::{execute_dense_contraction, execute_dense_contraction_parallel};
+/// use tenrso_planner::EinsumSpec;
+///
+/// let a = DenseND::from_vec((0..64 * 64).map(|i| i as f64).collect(), &[64, 64])?;
+/// let b = DenseND::from_vec((0..64 * 64).map(|i| (i % 7) as f64).collect(), &[64, 64])?;
+/// let spec = EinsumSpec::parse("ij,jk->ik")?;
+///
+/// let parallel = execute_dense_contraction_parallel(&spec, &a, &b)?;
+/// let serial = execute_dense_contraction(&spec, &a, &b)?;
+/// assert_eq!(parallel.as_slice(), serial.as_slice()); // bit-identical
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn execute_dense_contraction_parallel<T>(
+    spec: &EinsumSpec,
+    a: &DenseND<T>,
+    b: &DenseND<T>,
+) -> Result<DenseND<T>>
+where
+    T: Clone + Num + std::ops::AddAssign + std::default::Default + Send + Sync,
+{
+    contract::<T, ParallelBlockedBackend>(spec, a, b)
+}
+
 /// Execute a pairwise dense tensor contraction, using a native GEMM when the
 /// element type is `f32` or `f64`.
 ///
 /// Semantically identical to [`execute_dense_contraction`] — same specs, same
 /// results — but dispatches the inner product to `ndarray`'s `Array2::dot`,
 /// which is backed by the pure-Rust `matrixmultiply` crate (packed,
-/// register-blocked micro-kernels).  Any other element type transparently falls
-/// back to the portable blocked kernel.
+/// register-blocked micro-kernels).
+///
+/// `matrixmultiply` is single-threaded, so the **batch loop** around it runs over
+/// rayon: a batched spec such as `"bij,bjk->bik"` uses every core, not one.  Each
+/// batch element writes a disjoint slice of the output and no dot product is
+/// split across tasks, so the result is bit-identical to a serial batch loop at
+/// any thread count.  A batch whose total work is under ~256 Ki FMA stays serial,
+/// where the fork/join would cost more than it saves.
+///
+/// Any other element type falls back to the portable blocked kernel, which runs
+/// **in parallel** whenever the downcast identifies a standard scalar
+/// (`i8`…`i128`, `u8`…`u128`, `isize`, `usize`, `Complex32`, `Complex64`) and
+/// serially otherwise.  Results do not depend on which of those happens: the
+/// blocked kernel is bit-identical serial or parallel.
 ///
 /// The extra `'static` bound is what makes the dispatch possible: type identity
 /// in stable Rust goes through `std::any::Any`.  It is kept off

@@ -56,16 +56,19 @@ let c = einsum_ex::<f32>("ij,jk->ik")
 
 ### With Hints
 
+`ExecHints` selects *which output cells to compute*. Either spelling — a dense
+`mask` or a sparse `subset` of flat indices — routes the einsum through the
+masked engine, which computes only the selected cells.
+
 ```rust
-// Tensor contraction with optimization hints
-let result = einsum_ex::<f32>("bij,bjk->bik")
+// Compute only the diagonal of the 3x3 output.
+let result = einsum_ex::<f32>("ij,jk->ik")
     .inputs(&[a, b])
-    .hints(&ExecHints {
-        prefer_lowrank: true,
-        prefer_sparse: true,
-        tile_kb: Some(512),
-        ..Default::default()
-    })
+    .hints(
+        &ExecHints::new()
+            .with_sparse(true)
+            .with_subset(vec![0, 4, 8], vec![3, 3]),
+    )
     .run()?;
 ```
 
@@ -101,38 +104,67 @@ let result = exec.conv2d(
 ```rust
 use tenrso_exec::CpuExecutor;
 
-// Default: all optimizations enabled
+// Default: all optimizations enabled, parallel regions on rayon's ambient pool
 let mut exec = CpuExecutor::new();
 
-// Custom configuration with selective optimizations
+// Selective configuration
 let mut exec = CpuExecutor::new()
-    .with_simd(true)                    // SIMD-accelerated operations
-    .with_tiled_reductions(true)        // Cache-friendly blocked reductions
-    .with_vectorized_broadcast(true);   // Optimized broadcasting patterns
+    .with_simd(true)                 // AVX2 kernels for the exp/log family
+    .with_blocked_reductions(true);  // multi-accumulator reductions
+
+// Bound the executor's parallelism to a private pool of 4 threads
+let mut exec = CpuExecutor::with_threads(4)?;
 
 // Disable all optimizations (for debugging or baseline comparison)
 let mut exec = CpuExecutor::unoptimized();
 ```
 
+These knobs apply to the inherent methods that read executor configuration
+(`parallel_elem_op`, `scalar_op`, `parallel_binary_op`, `full_reduce`). The
+`TenrsoExecutor` *trait* methods are a simpler path that deliberately does not
+consult executor configuration.
+
 ### Optimization Features
 
-- **SIMD Operations** (`enable_simd`):
-  - Vectorized element-wise operations (neg, abs, exp, log, sin, cos, etc.)
-  - Vectorized binary operations (add, sub, mul, div, etc.)
-  - Automatically activated for tensors >= 1024 elements
-  - Typical speedup: 2-4x for simple ops, up to 8x for expensive ops (exp, sin)
+All figures below were measured on a Xeon Gold 5315Y, medians over repeated runs
+on a contended machine. They are the numbers the current code actually produces,
+not targets.
 
-- **Tiled Reductions** (`enable_tiled_reductions`):
-  - Cache-friendly blocked reductions using 4KB tiles
-  - Optimizes sum, mean, max, min operations
-  - Automatically activated for tensors >= 100K elements
-  - Typical speedup: 1.5-3x for large tensors (reduces cache misses)
+- **SIMD element-wise** (`enable_simd`):
+  - Real AVX2 + FMA kernels for `exp`, `log`, and the six activations built on
+    them (`sigmoid`, `tanh`, `gelu`, `elu`, `selu`, `softplus`).
+  - Measured **~2-5x** vs scalar libm for `exp` (1M f64: 7.44 ms -> 1.98 ms).
+    Accurate to ~1 ULP; NaN/inf/out-of-range lanes fall back to scalar libm and
+    are bit-identical to it.
+  - **No SIMD path for bandwidth-bound ops** (`neg`, `abs`, `relu`, `sqrt`,
+    `sqr`, `recip`, `sign`, `sin`, `cos`). These are already at memory speed, and
+    an intrinsic `relu` measured *slower* than `mapv` (8M f64: 20.5 ms -> 35.0 ms),
+    so no kernel is provided and none is claimed.
+  - Requires x86_64 with AVX2 + FMA, a contiguous tensor of `f32`/`f64`, and
+    >= 256 elements; otherwise the ordinary path runs.
 
-- **Vectorized Broadcasting** (`enable_vectorized_broadcast`):
-  - Pattern-aware broadcasting with specialized kernels
-  - Detects common patterns (scalar, same-shape, axis-specific)
-  - Parallel execution for large operations
-  - Typical speedup: 1.5-2x for broadcast-heavy workloads
+- **Blocked reductions** (`enable_blocked_reductions`):
+  - Keeps 8 independent accumulators so float addition's latency chain stops
+    being the bottleneck; blocks are then spread over rayon.
+  - `sum`, `mean`, `prod`, `max`, `min` over >= 1024 contiguous elements.
+  - Measured **~9x** on 4M f64 (11.5 ms -> 1.35 ms).
+  - Deterministic: the result does not depend on the thread count. It is *not*
+    bit-identical to naive left-to-right accumulation (a different summation
+    order rounds differently); set `enable_blocked_reductions = false` for the
+    exact naive order.
+
+- **Thread count** (`CpuExecutor::with_threads(n)`):
+  - Builds a private rayon pool of exactly `n` threads and installs the parallel
+    element-wise, scalar, binary and reduction regions into it, so `n` is a real
+    bound. `n = 0` uses rayon's ambient global pool.
+  - `effective_num_threads()` reports the count that will actually be used.
+  - The einsum/GEMM contraction path is not routed through this pool and still
+    uses the ambient one.
+
+- **Broadcasting**: binary ops broadcast via stride-0 views rather than
+  reconstructing subscripts per element (measured 1010 ms -> 55 ms, **18x**, on an
+  8.4M-element `(512,1,64) + (512,256,64)` add). This is unconditional — there is
+  no knob to turn it off, because there is no reason to.
 
 ## Memory Pooling
 
@@ -176,13 +208,23 @@ impl<T> EinsumBuilder<T> {
 
 ```rust
 pub struct ExecHints {
+    /// Compute only the output cells this boolean mask selects.
     pub mask: Option<MaskPack>,
+    /// The same, by flat index — O(selected) memory instead of O(output).
     pub subset: Option<SubsetSpec>,
+    /// Route through the sparse (masked) engine. Required by `mask`/`subset`.
     pub prefer_sparse: bool,
-    pub prefer_lowrank: bool,
-    pub tile_kb: Option<usize>,
 }
 ```
+
+Every field is read by the executor. `mask` and `subset` are two spellings of
+one selection, so supplying both is an error rather than a silent precedence
+rule.
+
+The dense GEMM engine has no tunable tile size to expose: `f32`/`f64` are routed
+to `matrixmultiply`, which does its own register/cache blocking and beats the
+portable blocked kernel by 4.8-6.1x on this workload. There is deliberately no
+`tile_kb` knob, because honouring one would mean abandoning the faster kernel.
 
 ### Executor Trait
 

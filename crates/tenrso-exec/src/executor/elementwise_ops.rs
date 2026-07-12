@@ -13,7 +13,9 @@ use scirs2_core::ndarray_ext::{Array, IxDyn};
 use scirs2_core::numeric::{Float, FromPrimitive, Num};
 use tenrso_core::{DenseND, TensorHandle};
 
+use super::blocked_reductions;
 use super::parallel::should_parallelize;
+use super::simd_ops;
 use super::types::{BinaryOp, CpuExecutor, ElemOp, ReduceOp};
 
 /// Scalar operation types for tensor-scalar binary ops
@@ -123,13 +125,15 @@ impl CpuExecutor {
         use rayon::prelude::*;
 
         let input_data: Vec<T> = dense.view().iter().cloned().collect();
-        let result_data: Vec<T> = match op {
+        // `install` runs this on the executor's own pool, so `with_threads(n)`
+        // really does cap this region at n workers.
+        let result_data: Vec<T> = self.install(|| match op {
             ScalarOp::Add => input_data.par_iter().map(|&v| v + scalar).collect(),
             ScalarOp::Sub => input_data.par_iter().map(|&v| v - scalar).collect(),
             ScalarOp::Mul => input_data.par_iter().map(|&v| v * scalar).collect(),
             ScalarOp::Div => input_data.par_iter().map(|&v| v / scalar).collect(),
             ScalarOp::Pow => input_data.par_iter().map(|&v| v.powf(scalar)).collect(),
-        };
+        });
 
         Array::from_shape_vec(IxDyn(dense.shape()), result_data)
             .unwrap_or_else(|_| dense.view().mapv(|v| v + scalar))
@@ -169,6 +173,18 @@ impl CpuExecutor {
             .ok_or_else(|| anyhow!("Only dense tensors supported for parallel_elem_op"))?;
 
         let use_parallel = self.enable_parallel && should_parallelize(dense.shape());
+
+        // The AVX2 kernels, for the `exp`/`log`-family ops that they actually
+        // accelerate. `None` means no SIMD path applies to this op / element type /
+        // memory layout, so we fall through to the ordinary implementation below —
+        // which computes the same values, just slower.
+        if self.enable_simd {
+            if let Some(result_data) = simd_ops::simd_elem_op(&op, dense, use_parallel, self) {
+                return Ok(TensorHandle::from_dense_auto(DenseND::from_array(
+                    result_data,
+                )));
+            }
+        }
 
         let result_data = if use_parallel {
             self.parallel_elem_op_inner(&op, dense)
@@ -270,7 +286,8 @@ impl CpuExecutor {
         use rayon::prelude::*;
 
         let input_data: Vec<T> = dense.view().iter().cloned().collect();
-        let result_data: Vec<T> = match op {
+        // Installed into the executor's pool so `with_threads(n)` bounds it.
+        let result_data: Vec<T> = self.install(|| match op {
             ElemOp::Neg => input_data.par_iter().map(|&v| -v).collect(),
             ElemOp::Abs => input_data.par_iter().map(|&v| v.abs()).collect(),
             ElemOp::Exp => input_data.par_iter().map(|&v| v.exp()).collect(),
@@ -362,7 +379,7 @@ impl CpuExecutor {
                     })
                     .collect()
             }
-        };
+        });
 
         Array::from_shape_vec(IxDyn(dense.shape()), result_data)
             .unwrap_or_else(|_| dense.view().to_owned())
@@ -454,31 +471,34 @@ impl CpuExecutor {
         let x_data: Vec<T> = x.view().iter().cloned().collect();
         let y_data: Vec<T> = y.view().iter().cloned().collect();
 
-        let result_data: Vec<T> = x_data
-            .par_iter()
-            .zip(y_data.par_iter())
-            .map(|(&xv, &yv)| match op {
-                BinaryOp::Add => xv + yv,
-                BinaryOp::Sub => xv - yv,
-                BinaryOp::Mul => xv * yv,
-                BinaryOp::Div => xv / yv,
-                BinaryOp::Pow => xv.powf(yv),
-                BinaryOp::Maximum => {
-                    if xv > yv {
-                        xv
-                    } else {
-                        yv
+        // Installed into the executor's pool so `with_threads(n)` bounds it.
+        let result_data: Vec<T> = self.install(|| {
+            x_data
+                .par_iter()
+                .zip(y_data.par_iter())
+                .map(|(&xv, &yv)| match op {
+                    BinaryOp::Add => xv + yv,
+                    BinaryOp::Sub => xv - yv,
+                    BinaryOp::Mul => xv * yv,
+                    BinaryOp::Div => xv / yv,
+                    BinaryOp::Pow => xv.powf(yv),
+                    BinaryOp::Maximum => {
+                        if xv > yv {
+                            xv
+                        } else {
+                            yv
+                        }
                     }
-                }
-                BinaryOp::Minimum => {
-                    if xv < yv {
-                        xv
-                    } else {
-                        yv
+                    BinaryOp::Minimum => {
+                        if xv < yv {
+                            xv
+                        } else {
+                            yv
+                        }
                     }
-                }
-            })
-            .collect();
+                })
+                .collect()
+        });
 
         let result_array = Array::from_shape_vec(IxDyn(x.shape()), result_data)
             .map_err(|e| anyhow!("Failed to create result array: {}", e))?;
@@ -525,10 +545,20 @@ impl CpuExecutor {
 
         let use_parallel = self.enable_parallel && should_parallelize(dense.shape());
 
-        let result_val = if use_parallel {
-            self.parallel_full_reduce_inner(&op, dense)?
+        // The blocked kernel, when it applies: it keeps several independent
+        // accumulators so the float dependency chain stops being the bottleneck.
+        // `None` = it declined (unsupported op, too small, or non-contiguous), so
+        // use the ordinary path.
+        let blocked = if self.enable_blocked_reductions {
+            blocked_reductions::blocked_full_reduce(&op, dense, use_parallel, self)
         } else {
-            self.serial_full_reduce_inner(&op, dense)?
+            None
+        };
+
+        let result_val = match blocked {
+            Some(value) => value,
+            None if use_parallel => self.parallel_full_reduce_inner(&op, dense)?,
+            None => self.serial_full_reduce_inner(&op, dense)?,
         };
 
         let result_array = Array::from_elem(IxDyn(&[]), result_val);
@@ -613,7 +643,12 @@ impl CpuExecutor {
         let data: Vec<T> = dense.view().iter().cloned().collect();
         let total_elements = data.len();
 
-        match op {
+        // Installed into the executor's pool so `with_threads(n)` bounds it.
+        //
+        // Note this path is now only reached for the reductions the blocked kernel
+        // declines (`All`, `Any`, `ArgMax`, `ArgMin`), for non-contiguous tensors,
+        // and when `enable_blocked_reductions` is off.
+        self.install(|| match op {
             ReduceOp::Sum => {
                 let sum = data.par_iter().cloned().reduce(|| T::zero(), |a, b| a + b);
                 Ok(sum)
@@ -653,7 +688,7 @@ impl CpuExecutor {
             ReduceOp::ArgMax | ReduceOp::ArgMin => Err(anyhow!(
                 "ArgMax/ArgMin should use dedicated argmax/argmin methods"
             )),
-        }
+        })
     }
 
     /// Parallel reduction along specified axes

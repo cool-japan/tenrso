@@ -7,6 +7,7 @@ pub mod functions;
 pub mod geneticalgorithmplanner_traits;
 pub mod greedyplanner_traits;
 pub mod plan_ops;
+pub mod refine;
 pub mod simulatedannealingplanner_traits;
 pub mod types;
 
@@ -17,3 +18,4 @@ pub use types::{
 };
 // Re-export functions
 pub use functions::*;
+pub use refine::refine_plan;

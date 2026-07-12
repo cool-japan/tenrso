@@ -50,6 +50,11 @@ tikv-jemallocator = "0.7.0"
 tikv-jemalloc-ctl = "0.7.0"
 mimalloc = { version = "0.1.52", default-features = false }
 num_cpus = "1.17.0"
+# Raw libc/syscall bindings. Used ONLY for the Linux NUMA memory-policy syscalls
+# (mbind/get_mempolicy/getcpu), which glibc does not export as functions.
+# This is a pure-Rust syscall binding crate, not a C library: the Pure Rust
+# policy (no BLAS/LAPACK) is unaffected.
+libc = "0.2.186"
 crossbeam = "0.8.4"
 dashmap = "6.2.1"
 tonic = { version = "0.14.6", features = ["transport"] }
@@ -61,6 +66,18 @@ futures = "0.3.32"
 crc32fast = "1.5.0"
 xxhash-rust = { version = "0.8.16", features = ["xxh64"] }
 blake3 = "1.8.5"
+
+# OxiCUDA — pure-Rust NVIDIA CUDA family (driver/memory/BLAS). Used ONLY by
+# tenrso-ooc's optional, default-OFF `cuda-compute` feature to run real
+# elementwise ops on an NVIDIA GPU. NO nvcc/CUDA SDK is required at build time
+# (PTX is generated in pure Rust and JIT-loaded at runtime via libcuda); these
+# never link unless `cuda-compute` is enabled, so the Pure-Rust default build is
+# unaffected. Version 0.4.1 matches what scirs2-fft / torsh already lock, so a
+# downstream lockfile keeps a single copy. Optional-ness is declared per member
+# crate (Workspace Policy: no version pin in member Cargo.toml).
+oxicuda-driver = "0.4.1"
+oxicuda-memory = "0.4.1"
+oxicuda-blas = "0.4.1"
 
 # SciRS2 ecosystem (MANDATORY - see SCIRS2_INTEGRATION_POLICY.md)
 scirs2-core = { version = "0.6.0", features = ["array", "random", "parallel"] }

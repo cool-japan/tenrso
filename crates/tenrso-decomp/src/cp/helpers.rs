@@ -172,68 +172,22 @@ where
     Ok(DenseND::from_array(reconstructed))
 }
 
-/// Line search to find optimal step size for CP-ALS update
-pub(crate) fn line_search_cp<T>(
-    tensor: &DenseND<T>,
-    factors: &[Array2<T>],
-    prev_factors: &[Array2<T>],
-    mode: usize,
-    new_factor: &Array2<T>,
-    _initial_alpha: T,
-    _max_iters: usize,
-) -> T
-where
-    T: Float
-        + FloatConst
-        + NumCast
-        + NumAssign
-        + Sum
-        + Send
-        + Sync
-        + scirs2_core::ndarray_ext::ScalarOperand
-        + scirs2_core::numeric::FromPrimitive
-        + std::fmt::Display
-        + 'static,
-{
-    let tensor_norm = tensor.frobenius_norm();
-    let tensor_norm_sq = tensor_norm * tensor_norm;
-    let mut best_alpha = T::one();
-    let mut best_fit = T::neg_infinity();
-
-    // Try different step sizes
-    let alphas = [
-        cast_lit::<T, _>(0.25),
-        cast_lit::<T, _>(0.5),
-        cast_lit::<T, _>(0.75),
-        T::one(),
-        cast_lit::<T, _>(1.25),
-    ];
-
-    for &alpha in &alphas {
-        // Create test factors with this step size
-        let mut test_factors = factors.to_vec();
-        let factor_prev = &prev_factors[mode];
-
-        let mut test_factor = new_factor.clone();
-        for i in 0..test_factor.shape()[0] {
-            for j in 0..test_factor.shape()[1] {
-                let diff = new_factor[[i, j]] - factor_prev[[i, j]];
-                test_factor[[i, j]] = factor_prev[[i, j]] + alpha * diff;
-            }
-        }
-        test_factors[mode] = test_factor;
-
-        // Compute fit with this step size
-        if let Ok(fit) = compute_fit(tensor, &test_factors, tensor_norm_sq) {
-            if fit > best_fit {
-                best_fit = fit;
-                best_alpha = alpha;
-            }
-        }
-    }
-
-    best_alpha
-}
+// NOTE: a *per-mode* line search along the ALS direction used to live here. It was
+// deleted, not moved, because it is provably a constant function.
+//
+// With every other factor held fixed, the CP objective restricted to factor `k` is
+// the exact quadratic
+//
+//     f(A) = ‖X‖² − 2·⟨M_k, A⟩ + ⟨G_k, AᵀA⟩,     ∇f = 0  ⟺  A = M_k·G_k⁻¹,
+//
+// and `M_k·G_k⁻¹` is *precisely* what [`solve_least_squares`] returns. So the ALS
+// step already lands on the global minimiser of the line it is searched along, and
+// `argmin_α f(A_prev + α·(A_new − A_prev))` is identically `α = 1` — for every mode,
+// every iteration, every tensor. A search that can only ever return 1 is not a line
+// search.
+//
+// A line search only has something to find once the *whole factor set* moves at once.
+// That is the ELS / extrapolation direction, and it lives in [`super::els`].
 
 /// Initialize factor matrices based on strategy
 pub(crate) fn initialize_factors<T>(

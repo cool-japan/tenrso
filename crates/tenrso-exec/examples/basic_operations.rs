@@ -113,8 +113,11 @@ fn main() -> anyhow::Result<()> {
     println!("\n5. Memory Pool Statistics");
     println!("-------------------------");
 
-    let executor = CpuExecutor::with_threads(4);
-    println!("Created executor with 4 threads");
+    let executor = CpuExecutor::with_threads(4)?;
+    println!(
+        "Created executor with a private pool of {} threads",
+        executor.effective_num_threads()
+    );
 
     // Perform some operations
     for i in 0..5 {

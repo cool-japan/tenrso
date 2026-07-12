@@ -8,6 +8,7 @@
 //! index/stride mapping mistakes rather than a tautology.
 
 use super::*;
+use scirs2_core::numeric::Complex64;
 use scirs2_core::random::seeded_rng;
 use std::collections::HashMap;
 use tenrso_core::DenseND;
@@ -1014,4 +1015,495 @@ fn test_unary_zero_sized_axis() {
     let s = execute_unary_einsum(&spec, &a).unwrap();
     assert!(s.shape().is_empty());
     assert_eq!(s.as_slice(), &[0.0]);
+}
+
+// ──────────────────── parallel blocked kernel ───────────────────────────────
+
+/// An element type that is deliberately **not** `Send` and **not** `Sync`.
+///
+/// `PhantomData<*const ()>` is neither, and auto traits are structural, so
+/// `Local` is neither.  It exists to pin down the promise made in the module
+/// docs: `execute_dense_contraction` must keep working for an element type that
+/// rayon can never touch.  If a future refactor adds `Send + Sync` to that entry
+/// point's bounds, **this test stops compiling** — which is the whole point.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Local(f64, std::marker::PhantomData<*const ()>);
+
+impl Local {
+    fn new(v: f64) -> Self {
+        Local(v, std::marker::PhantomData)
+    }
+}
+
+impl std::ops::Add for Local {
+    type Output = Local;
+    fn add(self, rhs: Local) -> Local {
+        Local::new(self.0 + rhs.0)
+    }
+}
+impl std::ops::Sub for Local {
+    type Output = Local;
+    fn sub(self, rhs: Local) -> Local {
+        Local::new(self.0 - rhs.0)
+    }
+}
+impl std::ops::Mul for Local {
+    type Output = Local;
+    fn mul(self, rhs: Local) -> Local {
+        Local::new(self.0 * rhs.0)
+    }
+}
+impl std::ops::Div for Local {
+    type Output = Local;
+    fn div(self, rhs: Local) -> Local {
+        Local::new(self.0 / rhs.0)
+    }
+}
+impl std::ops::Rem for Local {
+    type Output = Local;
+    fn rem(self, rhs: Local) -> Local {
+        Local::new(self.0 % rhs.0)
+    }
+}
+impl std::ops::AddAssign for Local {
+    fn add_assign(&mut self, rhs: Local) {
+        self.0 += rhs.0;
+    }
+}
+impl scirs2_core::numeric::Zero for Local {
+    fn zero() -> Self {
+        Local::new(0.0)
+    }
+    fn is_zero(&self) -> bool {
+        self.0 == 0.0
+    }
+}
+impl scirs2_core::numeric::One for Local {
+    fn one() -> Self {
+        Local::new(1.0)
+    }
+}
+impl Num for Local {
+    type FromStrRadixErr = <f64 as Num>::FromStrRadixErr;
+    fn from_str_radix(src: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
+        f64::from_str_radix(src, radix).map(Local::new)
+    }
+}
+
+/// Shapes big enough that the block schedule really subdivides *and* the total
+/// FMA count clears `PARALLEL_MIN_FMA`, so the parallel driver actually forks:
+/// `3 · 61 · 97 · 53 ≈ 9.4 · 10⁵` ≫ `2¹⁶`.  Deliberately non-power-of-two, so
+/// the final row block of every task is ragged.
+const PAR_BATCH: usize = 3;
+const PAR_M: usize = 61;
+const PAR_K: usize = 97;
+const PAR_N: usize = 53;
+
+/// The parallel kernel must be **bit**-identical to the serial one — not merely
+/// close.  Exact `==` on `f64` is the assertion, deliberately: the row-block
+/// partition is designed to preserve the per-element summation order exactly,
+/// and a tolerance would hide a regression that silently reorders it.
+#[test]
+fn test_parallel_blocked_is_bit_identical_f64() {
+    let a = random_tensor(0x9E37, &[PAR_BATCH, PAR_M, PAR_K]);
+    let b = random_tensor(0x79B9, &[PAR_BATCH, PAR_K, PAR_N]);
+    let spec = EinsumSpec::parse("bij,bjk->bik").unwrap();
+
+    let serial = execute_dense_contraction(&spec, &a, &b).unwrap();
+    let parallel = execute_dense_contraction_parallel(&spec, &a, &b).unwrap();
+
+    assert_eq!(parallel.shape(), &[PAR_BATCH, PAR_M, PAR_N]);
+    assert_eq!(
+        parallel
+            .as_slice()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        serial
+            .as_slice()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        "row-block partition changed the summation order"
+    );
+}
+
+/// Same bit-identity check for a *non-batched* contraction, where the row-block
+/// split is the only source of parallelism (batch == 1 → the tiles come purely
+/// from cutting `m`, so every task holds a strict sub-range of the rows).
+#[test]
+fn test_parallel_blocked_is_bit_identical_single_matrix() {
+    let a = random_tensor(0xBEEF, &[151, 131]);
+    let b = random_tensor(0xCAFE, &[131, 113]);
+    let spec = EinsumSpec::parse("ij,jk->ik").unwrap();
+
+    let serial = execute_dense_contraction(&spec, &a, &b).unwrap();
+    let parallel = execute_dense_contraction_parallel(&spec, &a, &b).unwrap();
+
+    assert_eq!(parallel.shape(), &[151, 113]);
+    for (p, s) in parallel.as_slice().iter().zip(serial.as_slice()) {
+        assert_eq!(p.to_bits(), s.to_bits());
+    }
+}
+
+/// `Complex64` has no native GEMM, so the accelerated entry point sends it to
+/// the blocked kernel — through the concrete-downcast arm, hence *in parallel*.
+/// It must agree exactly with the serial kernel, and with the algebra.
+#[test]
+fn test_complex_element_type_parallel_fallback() {
+    let n = 40usize;
+    let a_data: Vec<Complex64> = (0..n * n)
+        .map(|i| Complex64::new(i as f64 * 0.5, (i % 5) as f64))
+        .collect();
+    let b_data: Vec<Complex64> = (0..n * n)
+        .map(|i| Complex64::new((i % 7) as f64, i as f64 * 0.25))
+        .collect();
+    let a = DenseND::from_vec(a_data, &[n, n]).unwrap();
+    let b = DenseND::from_vec(b_data, &[n, n]).unwrap();
+    let spec = EinsumSpec::parse("ij,jk->ik").unwrap();
+
+    let serial = execute_dense_contraction(&spec, &a, &b).unwrap();
+    let dispatched = execute_dense_contraction_accelerated(&spec, &a, &b).unwrap();
+    let parallel = execute_dense_contraction_parallel(&spec, &a, &b).unwrap();
+
+    assert_eq!(dispatched.shape(), &[n, n]);
+    assert_eq!(dispatched.as_slice(), serial.as_slice());
+    assert_eq!(parallel.as_slice(), serial.as_slice());
+
+    // Independent check of one entry against the definition.
+    let a_view = a.view();
+    let b_view = b.view();
+    let expected: Complex64 = (0..n).map(|p| a_view[[3, p]] * b_view[[p, 7]]).sum();
+    let got = dispatched.view()[[3, 7]];
+    assert!((got - expected).norm() < 1e-9, "{got} vs {expected}");
+}
+
+/// The same for an integer type, at a size that actually forks (`64·64·64`
+/// FMAs = 2¹⁸ > `PARALLEL_MIN_FMA`), and with exact integer equality against a
+/// straightforward triple loop.
+#[test]
+fn test_integer_element_type_parallel_fallback() {
+    let n = 64usize;
+    let a_data: Vec<i64> = (0..n * n).map(|i| (i % 11) as i64 - 5).collect();
+    let b_data: Vec<i64> = (0..n * n).map(|i| (i % 13) as i64 - 6).collect();
+    let a = DenseND::from_vec(a_data.clone(), &[n, n]).unwrap();
+    let b = DenseND::from_vec(b_data.clone(), &[n, n]).unwrap();
+    let spec = EinsumSpec::parse("ij,jk->ik").unwrap();
+
+    let serial = execute_dense_contraction(&spec, &a, &b).unwrap();
+    let dispatched = execute_dense_contraction_accelerated(&spec, &a, &b).unwrap();
+    assert_eq!(dispatched.as_slice(), serial.as_slice());
+
+    for (i, j) in [(0usize, 0usize), (17, 5), (63, 63)] {
+        let expected: i64 = (0..n).map(|p| a_data[i * n + p] * b_data[p * n + j]).sum();
+        assert_eq!(dispatched.view()[[i, j]], expected);
+    }
+}
+
+/// A `!Send + !Sync` element type still contracts, through the serial kernel.
+///
+/// This is the no-API-break guarantee, enforced by the compiler: `Local` cannot
+/// cross a thread boundary, so this only compiles as long as
+/// `execute_dense_contraction` stays free of `Send`/`Sync` bounds.
+#[test]
+fn test_non_send_element_type_still_contracts() {
+    let a = DenseND::from_vec(
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+            .into_iter()
+            .map(Local::new)
+            .collect(),
+        &[2, 3],
+    )
+    .unwrap();
+    let b = DenseND::from_vec(
+        vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+            .into_iter()
+            .map(Local::new)
+            .collect(),
+        &[3, 2],
+    )
+    .unwrap();
+    let spec = EinsumSpec::parse("ij,jk->ik").unwrap();
+
+    let c = execute_dense_contraction(&spec, &a, &b).unwrap();
+    assert_eq!(c.shape(), &[2, 2]);
+    let v = c.view();
+    assert_eq!(v[[0, 0]], Local::new(58.0)); // 1*7 + 2*9 + 3*11
+    assert_eq!(v[[0, 1]], Local::new(64.0));
+    assert_eq!(v[[1, 0]], Local::new(139.0));
+    assert_eq!(v[[1, 1]], Local::new(154.0));
+}
+
+/// Degenerate extents must not panic in the parallel driver either (`k == 0` is
+/// an empty sum → zeros; `m == 0` is an empty result).
+#[test]
+fn test_parallel_blocked_degenerate_extents() {
+    let spec = EinsumSpec::parse("ij,jk->ik").unwrap();
+
+    let a = DenseND::<f64>::zeros(&[4, 0]);
+    let b = DenseND::<f64>::zeros(&[0, 3]);
+    let c = execute_dense_contraction_parallel(&spec, &a, &b).unwrap();
+    assert_eq!(c.shape(), &[4, 3]);
+    assert!(c.as_slice().iter().all(|x| *x == 0.0));
+
+    let a = DenseND::<f64>::zeros(&[0, 5]);
+    let b = DenseND::<f64>::zeros(&[5, 3]);
+    let c = execute_dense_contraction_parallel(&spec, &a, &b).unwrap();
+    assert_eq!(c.shape(), &[0, 3]);
+    assert!(c.as_slice().is_empty());
+}
+
+/// The row-block schedule: one task per batch element when the batch alone
+/// saturates the machine, a genuine `m`-split when it does not, never zero rows.
+#[test]
+fn test_parallel_row_chunk_schedule() {
+    use super::gemm::parallel_row_chunk as row_chunk;
+
+    // Batch already over-decomposes: keep whole matrices intact.
+    assert_eq!(row_chunk(64, 100, 8), 100);
+    // Single matrix, 8 threads → 32 tasks of ⌈100/32⌉ = 4 rows.
+    assert_eq!(row_chunk(1, 100, 8), 4);
+    // Fewer rows than tasks: one row each, never zero.
+    assert_eq!(row_chunk(1, 3, 8), 1);
+    // Single-threaded: still a valid (whole-matrix) schedule.
+    assert_eq!(row_chunk(1, 100, 1), 25);
+}
+
+// ──────────────────── which kernel a type actually gets ─────────────────────
+//
+// The two blocked kernels are bit-identical by construction, so *no* assertion
+// on results can tell them apart: a test that only checks
+// `dispatched == serial` passes just as happily against a dispatcher that
+// silently sends everything to the serial kernel.  That is exactly how the
+// parallel arm could regress unnoticed.  These tests assert on the *dispatch
+// decision itself*, which `DispatchKind` makes into an observable value.
+
+/// `f32`/`f64` reach the native `matrixmultiply` GEMM.
+#[test]
+fn test_dispatch_kind_native_for_floats() {
+    use super::gemm::{dispatch_kind, DispatchKind};
+
+    assert_eq!(dispatch_kind::<f64>(), DispatchKind::NativeGemm);
+    assert_eq!(dispatch_kind::<f32>(), DispatchKind::NativeGemm);
+}
+
+/// Every standard non-float scalar reaches the **parallel** blocked kernel.
+///
+/// This is the test that fails if the parallel dispatch arm is deleted: with the
+/// arm gone these types resolve to `SerialBlocked` (or the GEMM errors outright),
+/// and the whole point of the arm is that they do not.
+#[test]
+fn test_dispatch_kind_parallel_for_standard_scalars() {
+    use super::gemm::{dispatch_kind, DispatchKind};
+
+    use scirs2_core::numeric::Complex32;
+
+    macro_rules! assert_parallel {
+        ($($scalar:ty),+ $(,)?) => {$(
+            assert_eq!(
+                dispatch_kind::<$scalar>(),
+                DispatchKind::ParallelBlocked,
+                "{} must reach the parallel blocked kernel",
+                stringify!($scalar),
+            );
+        )+};
+    }
+    assert_parallel!(
+        i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, Complex32, Complex64,
+    );
+}
+
+/// A type rayon can never touch falls back to the serial blocked kernel.
+///
+/// `Local` is `!Send + !Sync` (see its definition), so `SerialBlocked` is not a
+/// missed optimisation here — it is the only correct answer.
+#[test]
+fn test_dispatch_kind_serial_for_non_send_type() {
+    use super::gemm::{dispatch_kind, DispatchKind};
+
+    assert_eq!(dispatch_kind::<Local>(), DispatchKind::SerialBlocked);
+}
+
+/// The kernel `dispatch_kind` *names* is the kernel that actually runs.
+///
+/// A probe that agreed with nothing would be decoration, so this pins the two
+/// together from the other side: the dispatching entry point produces the same
+/// values as the kernel `dispatch_kind` claims for the type.  (`i64` is
+/// `ParallelBlocked`; the blocked kernels are bit-identical, so the equality is
+/// exact.)
+#[test]
+fn test_dispatch_kind_agrees_with_the_kernel_that_runs() {
+    use super::gemm::{dispatch_kind, DispatchKind};
+
+    assert_eq!(dispatch_kind::<i64>(), DispatchKind::ParallelBlocked);
+
+    let spec = EinsumSpec::parse("bij,bjk->bik").unwrap();
+    let a = DenseND::from_vec(
+        (0..PAR_BATCH * PAR_M * PAR_K)
+            .map(|i| (i % 19) as i64 - 9)
+            .collect(),
+        &[PAR_BATCH, PAR_M, PAR_K],
+    )
+    .unwrap();
+    let b = DenseND::from_vec(
+        (0..PAR_BATCH * PAR_K * PAR_N)
+            .map(|i| (i % 23) as i64 - 11)
+            .collect(),
+        &[PAR_BATCH, PAR_K, PAR_N],
+    )
+    .unwrap();
+
+    // Goes through `DispatchBackend` → the `ParallelBlocked` arm.  If that arm
+    // were emptied, this would be an `Err`, not a silent serial run.
+    let dispatched = execute_dense_contraction_accelerated(&spec, &a, &b)
+        .expect("the ParallelBlocked arm must execute, not error");
+    let serial = execute_dense_contraction(&spec, &a, &b).unwrap();
+    assert_eq!(dispatched.as_slice(), serial.as_slice());
+}
+
+// ──────────────────── batch-parallel native GEMM ────────────────────────────
+
+/// `matrixmultiply` is single-threaded, so the batch loop over it is what
+/// parallelises a batched `f32`/`f64` einsum.  Each batch element writes a
+/// disjoint output slice and no dot product is split, so the result must not
+/// depend on the thread count **at all** — not "to within a tolerance", but to
+/// the bit.  Anything less would mean an output element's summation order moved.
+#[test]
+fn test_native_batched_gemm_is_bit_identical_across_thread_counts() {
+    use scirs2_core::parallel_ops::ThreadPoolBuilder;
+
+    // 12 · 48 · 40 · 44 ≈ 1.0 · 10⁶ FMA — comfortably over PARALLEL_MIN_BATCH_FMA,
+    // so the parallel batch loop is genuinely taken.  Ragged extents on purpose.
+    let (batch, m, k, n) = (12usize, 48usize, 40usize, 44usize);
+    let spec = EinsumSpec::parse("bij,bjk->bik").unwrap();
+
+    let a = DenseND::from_vec(
+        (0..batch * m * k)
+            .map(|i| ((i % 37) as f64 - 18.0) * 0.3141592653589793)
+            .collect(),
+        &[batch, m, k],
+    )
+    .unwrap();
+    let b = DenseND::from_vec(
+        (0..batch * k * n)
+            .map(|i| ((i % 29) as f64 - 14.0) * 0.2718281828459045)
+            .collect(),
+        &[batch, k, n],
+    )
+    .unwrap();
+
+    // Reference: one thread, so the batch loop provably runs serially.
+    let reference = ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("single-threaded rayon pool")
+        .install(|| execute_dense_contraction_accelerated(&spec, &a, &b))
+        .unwrap();
+
+    for threads in [2usize, 3, 4, 5, 8] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap_or_else(|e| panic!("rayon pool with {threads} threads: {e}"));
+        let got = pool
+            .install(|| execute_dense_contraction_accelerated(&spec, &a, &b))
+            .unwrap();
+
+        assert_eq!(got.shape(), &[batch, m, n]);
+        for (i, (g, r)) in got
+            .as_slice()
+            .iter()
+            .zip(reference.as_slice().iter())
+            .enumerate()
+        {
+            assert_eq!(
+                g.to_bits(),
+                r.to_bits(),
+                "element {i} differs on {threads} threads: {g} vs {r} (serial)",
+            );
+        }
+    }
+}
+
+/// The same, for `f32` — a different `GemmScalar` impl, so it is a different
+/// code path through `matrixmultiply`.
+#[test]
+fn test_native_batched_gemm_f32_is_bit_identical_across_thread_counts() {
+    use scirs2_core::parallel_ops::ThreadPoolBuilder;
+
+    let (batch, m, k, n) = (16usize, 40usize, 36usize, 38usize);
+    let spec = EinsumSpec::parse("bij,bjk->bik").unwrap();
+
+    let a = DenseND::from_vec(
+        (0..batch * m * k)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.125)
+            .collect(),
+        &[batch, m, k],
+    )
+    .unwrap();
+    let b = DenseND::from_vec(
+        (0..batch * k * n)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.375)
+            .collect(),
+        &[batch, k, n],
+    )
+    .unwrap();
+
+    let reference = ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("single-threaded rayon pool")
+        .install(|| execute_dense_contraction_accelerated(&spec, &a, &b))
+        .unwrap();
+
+    for threads in [2usize, 5, 8] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap_or_else(|e| panic!("rayon pool with {threads} threads: {e}"));
+        let got = pool
+            .install(|| execute_dense_contraction_accelerated(&spec, &a, &b))
+            .unwrap();
+        for (g, r) in got.as_slice().iter().zip(reference.as_slice().iter()) {
+            assert_eq!(g.to_bits(), r.to_bits(), "f32 batch GEMM: {g} vs {r}");
+        }
+    }
+}
+
+/// The batch-parallel path must still be *correct*, not merely reproducible:
+/// cross-check it against the brute-force reference einsum.
+#[test]
+fn test_native_batched_gemm_parallel_matches_naive() {
+    let (batch, m, k, n) = (9usize, 21usize, 17usize, 19usize);
+    let spec_str = "bij,bjk->bik";
+    let spec = EinsumSpec::parse(spec_str).unwrap();
+
+    let a = random_tensor(0x5EED_1234, &[batch, m, k]);
+    let b = random_tensor(0x5EED_5678, &[batch, k, n]);
+
+    let got = execute_dense_contraction_accelerated(&spec, &a, &b).unwrap();
+    let want = naive_einsum(spec_str, &a, &b);
+
+    assert_eq!(got.shape(), want.shape());
+    for (g, w) in got.as_slice().iter().zip(want.as_slice()) {
+        assert!(
+            (g - w).abs() < 1e-9 * w.abs().max(1.0),
+            "batch-parallel GEMM disagrees with the naive reference: {g} vs {w}"
+        );
+    }
+}
+
+/// A batch below the fork/join threshold still produces every element — the
+/// serial branch of the batch loop must not be a different kernel by accident.
+#[test]
+fn test_native_batched_gemm_small_batch_serial_branch() {
+    let spec = EinsumSpec::parse("bij,bjk->bik").unwrap();
+    // 2 · 2 · 2 · 2 = 16 FMA — far below PARALLEL_MIN_BATCH_FMA.
+    let a = DenseND::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 2, 2]).unwrap();
+    let b = DenseND::from_vec(vec![1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0], &[2, 2, 2]).unwrap();
+
+    let c = execute_dense_contraction_accelerated(&spec, &a, &b).unwrap();
+    assert_eq!(c.shape(), &[2, 2, 2]);
+    // Batch 0 multiplies by the identity; batch 1 by 2·identity.
+    assert_eq!(c.as_slice(), &[1.0, 2.0, 3.0, 4.0, 10.0, 12.0, 14.0, 16.0]);
 }

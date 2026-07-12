@@ -44,6 +44,8 @@ pub mod contraction;
 pub mod dashboard;
 pub mod data_integrity;
 pub mod gpu;
+#[cfg(feature = "cuda-compute")]
+mod gpu_cuda;
 pub mod memory;
 pub mod memory_tiers;
 pub mod ml_eviction;

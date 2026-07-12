@@ -21,13 +21,26 @@
 //!
 //! # Current Implementation
 //!
-//! Buffer operations (`DeviceBuffer`, `Device::add`, `Device::mul`, ...) always
-//! execute on the CPU in this crate; GPU *devices* can be enumerated (see
-//! [`DeviceManager::available_backends`]) but tensor kernels are not yet
-//! dispatched to them. Device buffer/compute operations:
+//! By default, buffer operations (`DeviceBuffer`, `Device::add`, `Device::mul`,
+//! ...) execute on the CPU in this crate; GPU *devices* can be enumerated (see
+//! [`DeviceManager::available_backends`]) but tensor kernels are not dispatched
+//! to them. Device buffer/compute operations:
 //! - Run on the CPU regardless of which backends were detected
 //! - Support async transfers using thread pools
-//! - Provide the same API that future GPU-dispatching backends will use
+//! - Provide the same API that GPU-dispatching backends use
+//!
+//! ## Real GPU dispatch (`cuda-compute` feature, default-off)
+//!
+//! When the optional `cuda-compute` feature is enabled, [`Device::add`] and
+//! [`Device::mul`] for `f32` / `f64` on a [`DeviceType::Cuda`] device run the
+//! arithmetic on an actual NVIDIA GPU via the pure-Rust `oxicuda` crates (see
+//! [`crate::gpu_cuda`]). Because [`DeviceBuffer`] is host-backed (`data: Vec<T>`),
+//! each such op is a full host->device->host round-trip: for a single
+//! element-wise op the PCIe transfer dominates, so this is a
+//! **correctness / capability path, NOT a speedup** for lone host-buffer ops.
+//! Persistent on-device residency (which is where a real speedup would come
+//! from) is a future milestone. Without the feature, every code path below is
+//! exactly the CPU implementation.
 //!
 //! Device *enumeration* is honest: a device only appears in
 //! [`DeviceManager::list_devices`] if its backend's cargo feature was compiled
@@ -69,6 +82,17 @@ use std::sync::Arc;
 use scirs2_core::{
     IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
+
+/// Selects which element-wise binary op [`Device::try_cuda_binary`] dispatches
+/// to the GPU. Only compiled under the `cuda-compute` feature.
+#[cfg(feature = "cuda-compute")]
+#[derive(Clone, Copy)]
+enum CudaBinOp {
+    /// `c = a + b`
+    Add,
+    /// `c = a * b`
+    Mul,
+}
 
 /// Device type enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -463,7 +487,19 @@ impl Device {
         Ok(buffer)
     }
 
-    /// Element-wise addition: c = a + b
+    /// Element-wise addition: `c = a + b`.
+    ///
+    /// # GPU dispatch (`cuda-compute` feature)
+    ///
+    /// With the `cuda-compute` feature enabled, when this device is a
+    /// [`DeviceType::Cuda`] device and `T` is `f32` or `f64`, the addition runs
+    /// on the actual NVIDIA GPU (H2D copy of `a`/`b`, kernel, D2H copy into
+    /// `c`). This is a **correctness / capability path, not a speedup**: since
+    /// buffers are host-backed, the PCIe round-trip dominates a single
+    /// element-wise op and this is slower than the CPU path (see the module
+    /// docs). A genuine GPU failure is returned as `Err` — it is never masked
+    /// by a CPU result. Without the feature (or for other device types / element
+    /// types) the CPU implementation below runs.
     pub fn add<T>(
         &self,
         a: &DeviceBuffer<T>,
@@ -471,13 +507,20 @@ impl Device {
         c: &mut DeviceBuffer<T>,
     ) -> Result<()>
     where
-        T: Clone + Send + Sync + std::ops::Add<Output = T>,
+        T: Clone + Send + Sync + std::ops::Add<Output = T> + 'static,
     {
         if a.size() != b.size() || a.size() != c.size() {
             return Err(anyhow!("Buffer size mismatch"));
         }
 
         self.stats.record_operation();
+
+        #[cfg(feature = "cuda-compute")]
+        {
+            if let Some(gpu_result) = self.try_cuda_binary(a, b, c, CudaBinOp::Add) {
+                return gpu_result;
+            }
+        }
 
         // CPU fallback
         #[cfg(feature = "parallel")]
@@ -500,7 +543,19 @@ impl Device {
         Ok(())
     }
 
-    /// Element-wise multiplication: c = a * b
+    /// Element-wise multiplication: `c = a * b`.
+    ///
+    /// # GPU dispatch (`cuda-compute` feature)
+    ///
+    /// With the `cuda-compute` feature enabled, when this device is a
+    /// [`DeviceType::Cuda`] device and `T` is `f32` or `f64`, the product runs
+    /// on the actual NVIDIA GPU (H2D copy of `a`/`b`, kernel, D2H copy into
+    /// `c`). This is a **correctness / capability path, not a speedup**: since
+    /// buffers are host-backed, the PCIe round-trip dominates a single
+    /// element-wise op and this is slower than the CPU path (see the module
+    /// docs). A genuine GPU failure is returned as `Err` — it is never masked
+    /// by a CPU result. Without the feature (or for other device types / element
+    /// types) the CPU implementation below runs.
     pub fn mul<T>(
         &self,
         a: &DeviceBuffer<T>,
@@ -508,13 +563,20 @@ impl Device {
         c: &mut DeviceBuffer<T>,
     ) -> Result<()>
     where
-        T: Clone + Send + Sync + std::ops::Mul<Output = T>,
+        T: Clone + Send + Sync + std::ops::Mul<Output = T> + 'static,
     {
         if a.size() != b.size() || a.size() != c.size() {
             return Err(anyhow!("Buffer size mismatch"));
         }
 
         self.stats.record_operation();
+
+        #[cfg(feature = "cuda-compute")]
+        {
+            if let Some(gpu_result) = self.try_cuda_binary(a, b, c, CudaBinOp::Mul) {
+                return gpu_result;
+            }
+        }
 
         // CPU fallback
         #[cfg(feature = "parallel")]
@@ -535,6 +597,110 @@ impl Device {
         }
 
         Ok(())
+    }
+
+    /// Attempts to dispatch an element-wise binary op to a real CUDA GPU.
+    ///
+    /// Returns:
+    /// - `None` when this op is **not** GPU-eligible (device is not
+    ///   [`DeviceType::Cuda`], or `T` is neither `f32` nor `f64`) — the caller
+    ///   then runs the CPU implementation.
+    /// - `Some(Ok(()))` when the op ran on the GPU and `c` was filled with the
+    ///   device result.
+    /// - `Some(Err(_))` when the op was routed to the GPU but a real GPU failure
+    ///   occurred. The error is propagated honestly; it is **never** replaced by
+    ///   a CPU result.
+    #[cfg(feature = "cuda-compute")]
+    fn try_cuda_binary<T: Clone + Send + Sync + 'static>(
+        &self,
+        a: &DeviceBuffer<T>,
+        b: &DeviceBuffer<T>,
+        c: &mut DeviceBuffer<T>,
+        op: CudaBinOp,
+    ) -> Option<Result<()>> {
+        use std::any::TypeId;
+
+        if self.device_type() != DeviceType::Cuda {
+            return None;
+        }
+
+        let ordinal = self.device_id() as i32;
+        let a_host = a.as_slice();
+        let b_host = b.as_slice();
+        let n = a_host.len();
+        if b_host.len() != n {
+            return Some(Err(anyhow!(
+                "cuda dispatch: host inputs not equally materialised (a={}, b={})",
+                n,
+                b_host.len()
+            )));
+        }
+
+        if TypeId::of::<T>() == TypeId::of::<f32>() {
+            // SAFETY: guarded by the TypeId check — `T` is exactly `f32`, so the
+            // `[T]` slices are `[f32]` with identical layout.
+            let a_f32: &[f32] =
+                unsafe { std::slice::from_raw_parts(a_host.as_ptr().cast::<f32>(), n) };
+            let b_f32: &[f32] =
+                unsafe { std::slice::from_raw_parts(b_host.as_ptr().cast::<f32>(), n) };
+            let mut out = vec![0.0f32; n];
+            let res = match op {
+                CudaBinOp::Add => {
+                    crate::gpu_cuda::cuda_elementwise_add_f32(ordinal, a_f32, b_f32, &mut out)
+                }
+                CudaBinOp::Mul => {
+                    crate::gpu_cuda::cuda_elementwise_mul_f32(ordinal, a_f32, b_f32, &mut out)
+                }
+            };
+            return Some(res.map(|()| self.store_gpu_result(c, &out)));
+        }
+
+        if TypeId::of::<T>() == TypeId::of::<f64>() {
+            // SAFETY: guarded by the TypeId check — `T` is exactly `f64`.
+            let a_f64: &[f64] =
+                unsafe { std::slice::from_raw_parts(a_host.as_ptr().cast::<f64>(), n) };
+            let b_f64: &[f64] =
+                unsafe { std::slice::from_raw_parts(b_host.as_ptr().cast::<f64>(), n) };
+            let mut out = vec![0.0f64; n];
+            let res = match op {
+                CudaBinOp::Add => {
+                    crate::gpu_cuda::cuda_elementwise_add_f64(ordinal, a_f64, b_f64, &mut out)
+                }
+                CudaBinOp::Mul => {
+                    crate::gpu_cuda::cuda_elementwise_mul_f64(ordinal, a_f64, b_f64, &mut out)
+                }
+            };
+            return Some(res.map(|()| self.store_gpu_result_f64(c, &out)));
+        }
+
+        None
+    }
+
+    /// Copies an `f32` GPU result into the host-backed output buffer `c`.
+    ///
+    /// Only ever called with `T == f32` (from [`Self::try_cuda_binary`]); the
+    /// reinterpretation of `out: &[f32]` as `&[T]` is therefore sound.
+    #[cfg(feature = "cuda-compute")]
+    fn store_gpu_result<T: Clone + 'static>(&self, c: &mut DeviceBuffer<T>, out: &[f32]) {
+        // SAFETY: `T` is `f32` in every call site, so `[f32]` and `[T]` share a
+        // layout; the reinterpreted slice is cloned into `c`'s host Vec.
+        let out_t: &[T] =
+            unsafe { std::slice::from_raw_parts(out.as_ptr().cast::<T>(), out.len()) };
+        c.data.clear();
+        c.data.extend_from_slice(out_t);
+    }
+
+    /// Copies an `f64` GPU result into the host-backed output buffer `c`.
+    ///
+    /// Only ever called with `T == f64` (from [`Self::try_cuda_binary`]).
+    #[cfg(feature = "cuda-compute")]
+    fn store_gpu_result_f64<T: Clone + 'static>(&self, c: &mut DeviceBuffer<T>, out: &[f64]) {
+        // SAFETY: `T` is `f64` in every call site, so `[f64]` and `[T]` share a
+        // layout; the reinterpreted slice is cloned into `c`'s host Vec.
+        let out_t: &[T] =
+            unsafe { std::slice::from_raw_parts(out.as_ptr().cast::<T>(), out.len()) };
+        c.data.clear();
+        c.data.extend_from_slice(out_t);
     }
 
     /// Synchronize device (wait for all operations to complete)
@@ -1220,5 +1386,189 @@ mod tests {
         let mut c = device.allocate(100).unwrap();
 
         assert!(device.add(&a, &b, &mut c).is_err());
+    }
+}
+
+/// Bit-exact validation that `Device::add` / `Device::mul` really run on an
+/// NVIDIA GPU under the `cuda-compute` feature.
+///
+/// Element-wise `f32`/`f64` add and mul are per-element IEEE-754
+/// round-to-nearest with **no accumulation**, so a correct GPU result is
+/// **bit-identical** to `a[i] (+|*) b[i]` computed on the CPU. Asserting raw
+/// bit-pattern equality (`to_bits`) therefore proves the device produced the
+/// values (a stub returning zeros / a wrong reduction order would differ).
+///
+/// These tests **skip gracefully** (return early) only when no CUDA driver /
+/// device is present — matching oxicuda's own GPU-test skip pattern. A skip on a
+/// driverless box is honest; on a box with a real GPU (which this one has) the
+/// tests must actually run and pass.
+#[cfg(all(test, feature = "cuda-compute"))]
+mod cuda_compute_tests {
+    use super::*;
+    use scirs2_core::random::{SeedableRng, StdRng};
+
+    /// Returns a [`DeviceType::Cuda`] device backed by the real GPU at ordinal
+    /// 0, or `None` (honest skip) when no CUDA driver/device is present.
+    fn real_cuda_device() -> Option<Arc<Device>> {
+        // Honest skip on a driverless box (NOT `#[ignore]`). This machine has a
+        // real NVIDIA GPU, so `init()` + `Device::get(0)` must both succeed and
+        // these tests must run.
+        if oxicuda_driver::init().is_err() || oxicuda_driver::Device::get(0).is_err() {
+            eprintln!("[cuda-compute] no CUDA driver/device present — skipping GPU dispatch test");
+            return None;
+        }
+
+        // Prefer the honest scirs2-core enumeration path a user would take.
+        let manager = DeviceManager::new().expect("device manager");
+        if let Some(device) = manager.devices_by_type(DeviceType::Cuda).into_iter().next() {
+            return Some(device);
+        }
+
+        // The driver is present but scirs2-core's enumeration (nvidia-smi) found
+        // nothing; the dispatch still targets the real device at ordinal 0.
+        Some(Device::new(DeviceInfo {
+            device_type: DeviceType::Cuda,
+            device_id: 0,
+            name: "CUDA device 0 (oxicuda)".to_string(),
+            total_memory: 0,
+            available_memory: 0,
+            compute_capability: "unknown".to_string(),
+            compute_units: 0,
+        }))
+    }
+
+    /// Number of elements: > 256 (the kernel block size) and not a multiple of
+    /// it, so the multi-block path and the in-kernel `tid < n` bounds guard are
+    /// both exercised.
+    const N: usize = 4099;
+
+    #[test]
+    fn cuda_add_f32_is_bit_exact_on_gpu() {
+        let Some(device) = real_cuda_device() else {
+            return;
+        };
+        assert_eq!(device.device_type(), DeviceType::Cuda);
+
+        let mut rng = StdRng::seed_from_u64(0x7E05_01AD);
+        let a_host: Vec<f32> = (0..N).map(|_| rng.gen_range(-1000.0f32..1000.0)).collect();
+        let b_host: Vec<f32> = (0..N).map(|_| rng.gen_range(-1000.0f32..1000.0)).collect();
+
+        let mut a = device.allocate::<f32>(N).expect("alloc a");
+        let mut b = device.allocate::<f32>(N).expect("alloc b");
+        let mut c = device.allocate::<f32>(N).expect("alloc c");
+        a.copy_from_host(&a_host).expect("h2d a");
+        b.copy_from_host(&b_host).expect("h2d b");
+
+        device
+            .add(&a, &b, &mut c)
+            .expect("GPU f32 add must succeed on a machine with a CUDA device");
+        let got = c.copy_to_host().expect("d2h c");
+        assert_eq!(got.len(), N, "GPU result length");
+
+        for i in 0..N {
+            let cpu = a_host[i] + b_host[i];
+            assert_eq!(
+                got[i].to_bits(),
+                cpu.to_bits(),
+                "f32 GPU add differs from CPU at [{i}]: gpu={} (0x{:08x}) cpu={} (0x{:08x})",
+                got[i],
+                got[i].to_bits(),
+                cpu,
+                cpu.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn cuda_mul_f32_is_bit_exact_on_gpu() {
+        let Some(device) = real_cuda_device() else {
+            return;
+        };
+        assert_eq!(device.device_type(), DeviceType::Cuda);
+
+        let mut rng = StdRng::seed_from_u64(0x7E05_01A2);
+        let a_host: Vec<f32> = (0..N).map(|_| rng.gen_range(-1000.0f32..1000.0)).collect();
+        let b_host: Vec<f32> = (0..N).map(|_| rng.gen_range(-1000.0f32..1000.0)).collect();
+
+        let mut a = device.allocate::<f32>(N).expect("alloc a");
+        let mut b = device.allocate::<f32>(N).expect("alloc b");
+        let mut c = device.allocate::<f32>(N).expect("alloc c");
+        a.copy_from_host(&a_host).expect("h2d a");
+        b.copy_from_host(&b_host).expect("h2d b");
+
+        device
+            .mul(&a, &b, &mut c)
+            .expect("GPU f32 mul must succeed on a machine with a CUDA device");
+        let got = c.copy_to_host().expect("d2h c");
+        assert_eq!(got.len(), N, "GPU result length");
+
+        for i in 0..N {
+            let cpu = a_host[i] * b_host[i];
+            assert_eq!(
+                got[i].to_bits(),
+                cpu.to_bits(),
+                "f32 GPU mul differs from CPU at [{i}]: gpu={} (0x{:08x}) cpu={} (0x{:08x})",
+                got[i],
+                got[i].to_bits(),
+                cpu,
+                cpu.to_bits()
+            );
+        }
+    }
+
+    /// `f64` GPU dispatch is **real but currently blocked upstream**, and this
+    /// test pins that honest behavior as a **tripwire**.
+    ///
+    /// `Device::add` / `Device::mul` genuinely route `f64` to the GPU: the
+    /// inputs are uploaded (H2D) and the oxicuda `f64` element-wise kernel is
+    /// launched. On the pinned oxicuda `0.4.1`, that kernel's PTX is rejected by
+    /// `ptxas` at module load (`CUDA: invalid PTX`) because of a known upstream
+    /// `oxicuda-ptx` bug: the element-wise template declares its `%f_*` scratch
+    /// registers as `.f32` while emitting `.f64` instructions, so the `f64`
+    /// module fails to load. (oxicuda's own suite pins the identical behavior in
+    /// `f64_elementwise_currently_rejected_by_ptxas_known_oxiptx_bug`.)
+    ///
+    /// Per this crate's honesty contract, a requested GPU op that fails returns
+    /// `Err` — it is **never** silently swapped for a CPU result. This test
+    /// asserts that honest `Err`. When upstream oxicuda fixes `f64` element-wise
+    /// PTX, these calls will start succeeding, **this test will FAIL**, and it
+    /// must then be replaced with bit-exact `f64` add/mul oracle checks
+    /// (identical to the `f32` tests above but comparing `u64` bit patterns).
+    #[test]
+    fn cuda_f64_elementwise_is_honest_err_upstream_ptx_tripwire() {
+        let Some(device) = real_cuda_device() else {
+            return;
+        };
+        assert_eq!(device.device_type(), DeviceType::Cuda);
+
+        let mut a = device.allocate::<f64>(256).expect("alloc a");
+        let mut b = device.allocate::<f64>(256).expect("alloc b");
+        let mut c = device.allocate::<f64>(256).expect("alloc c");
+        a.copy_from_host(&vec![1.5f64; 256]).expect("h2d a");
+        b.copy_from_host(&vec![2.25f64; 256]).expect("h2d b");
+
+        let add = device.add(&a, &b, &mut c);
+        assert!(
+            add.is_err(),
+            "f64 GPU add unexpectedly succeeded — upstream oxicuda f64 element-wise \
+             appears fixed; replace this tripwire with bit-exact f64 checks"
+        );
+        let add_msg = format!("{:#}", add.unwrap_err());
+        assert!(
+            add_msg.contains("PTX"),
+            "f64 add error should surface the upstream PTX failure, got: {add_msg}"
+        );
+
+        let mul = device.mul(&a, &b, &mut c);
+        assert!(
+            mul.is_err(),
+            "f64 GPU mul unexpectedly succeeded — upstream oxicuda f64 element-wise \
+             appears fixed; replace this tripwire with bit-exact f64 checks"
+        );
+        let mul_msg = format!("{:#}", mul.unwrap_err());
+        assert!(
+            mul_msg.contains("PTX"),
+            "f64 mul error should surface the upstream PTX failure, got: {mul_msg}"
+        );
     }
 }

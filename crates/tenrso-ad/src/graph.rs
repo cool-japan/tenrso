@@ -845,21 +845,34 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
             Operation::Input => Ok(vec![]),
 
             Operation::Add { lhs, rhs } => {
-                // d/dx (x + y) = 1, d/dy (x + y) = 1
-                Ok(vec![
-                    (*lhs, grad_output.clone()),
-                    (*rhs, grad_output.clone()),
-                ])
+                // d/dx (x + y) = 1, d/dy (x + y) = 1.
+                //
+                // The forward `&lhs + &rhs` co-broadcasts operands of unequal
+                // but compatible shape (e.g. `W + b`), so the incoming gradient
+                // is at the broadcast output shape. Reduce it back to each
+                // operand's own shape before it is accumulated.
+                let lhs_shape = node_value_shape(nodes, *lhs, "Add")?;
+                let rhs_shape = node_value_shape(nodes, *rhs, "Add")?;
+                let grad_lhs = unbroadcast_grad(grad_output, &lhs_shape)?;
+                let grad_rhs = unbroadcast_grad(grad_output, &rhs_shape)?;
+                Ok(vec![(*lhs, grad_lhs), (*rhs, grad_rhs)])
             }
 
             Operation::Sub { lhs, rhs } => {
-                // d/dx (x - y) = 1, d/dy (x - y) = -1
-                let grad_rhs = grad_output.mapv(|x| -x);
-                Ok(vec![(*lhs, grad_output.clone()), (*rhs, grad_rhs)])
+                // d/dx (x - y) = 1, d/dy (x - y) = -1, each reduced back to the
+                // corresponding operand shape to undo forward co-broadcasting.
+                let lhs_shape = node_value_shape(nodes, *lhs, "Sub")?;
+                let rhs_shape = node_value_shape(nodes, *rhs, "Sub")?;
+                let neg_grad = grad_output.mapv(|x| -x);
+                let grad_lhs = unbroadcast_grad(grad_output, &lhs_shape)?;
+                let grad_rhs = unbroadcast_grad(&neg_grad, &rhs_shape)?;
+                Ok(vec![(*lhs, grad_lhs), (*rhs, grad_rhs)])
             }
 
             Operation::Mul { lhs, rhs } => {
-                // d/dx (x * y) = y, d/dy (x * y) = x
+                // d/dx (x * y) = y, d/dy (x * y) = x. Each raw product is formed
+                // at the broadcast output shape, then reduced back to its
+                // operand's shape (sum over the broadcast axes).
                 let lhs_val = nodes
                     .get(lhs)
                     .and_then(|n| n.value.as_ref())
@@ -869,13 +882,19 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
                     .and_then(|n| n.value.as_ref())
                     .ok_or_else(|| anyhow!("RHS value not available for Mul backward"))?;
 
-                let grad_lhs = grad_output * rhs_val;
-                let grad_rhs = grad_output * lhs_val;
+                let lhs_shape = lhs_val.shape().to_vec();
+                let rhs_shape = rhs_val.shape().to_vec();
+                let raw_lhs = grad_output * rhs_val;
+                let raw_rhs = grad_output * lhs_val;
+                let grad_lhs = unbroadcast_grad(&raw_lhs, &lhs_shape)?;
+                let grad_rhs = unbroadcast_grad(&raw_rhs, &rhs_shape)?;
                 Ok(vec![(*lhs, grad_lhs), (*rhs, grad_rhs)])
             }
 
             Operation::Div { lhs, rhs } => {
-                // d/dx (x / y) = 1/y, d/dy (x / y) = -x/y^2
+                // d/dx (x / y) = 1/y, d/dy (x / y) = -x/y^2. Both raw gradients
+                // are at the broadcast output shape and are reduced back to
+                // their operand's shape.
                 let lhs_val = nodes
                     .get(lhs)
                     .and_then(|n| n.value.as_ref())
@@ -885,8 +904,12 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
                     .and_then(|n| n.value.as_ref())
                     .ok_or_else(|| anyhow!("RHS value not available for Div backward"))?;
 
-                let grad_lhs = grad_output / rhs_val;
-                let grad_rhs = -(grad_output * lhs_val) / (rhs_val * rhs_val);
+                let lhs_shape = lhs_val.shape().to_vec();
+                let rhs_shape = rhs_val.shape().to_vec();
+                let raw_lhs = grad_output / rhs_val;
+                let raw_rhs = -(grad_output * lhs_val) / (rhs_val * rhs_val);
+                let grad_lhs = unbroadcast_grad(&raw_lhs, &lhs_shape)?;
+                let grad_rhs = unbroadcast_grad(&raw_rhs, &rhs_shape)?;
                 Ok(vec![(*lhs, grad_lhs), (*rhs, grad_rhs)])
             }
 
@@ -1094,36 +1117,10 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
                 input,
                 original_shape,
             } => {
-                // Backward: sum over all axes that were added or expanded during broadcast.
-                //
-                // Algorithm:
-                // 1. Pad original_shape on the left with 1s to match grad_output.ndim().
-                // 2. For each axis where padded_orig[ax] == 1 and out_shape[ax] > 1:
-                //    sum over that axis (keepdim: remove then re-insert as size 1).
-                // 3. Reshape to original_shape (removes leading padded-1 dimensions).
-                let ndim_out = grad_output.ndim();
-                let ndim_in = original_shape.len();
-                let pad_left = ndim_out.saturating_sub(ndim_in);
-                let padded_orig: Vec<usize> = std::iter::repeat_n(1, pad_left)
-                    .chain(original_shape.iter().copied())
-                    .collect();
-                let out_shape = grad_output.shape().to_vec();
-                let mut grad = grad_output.clone();
-                for ax in 0..ndim_out {
-                    if padded_orig[ax] == 1 && out_shape[ax] > 1 {
-                        let summed = grad.sum_axis(Axis(ax));
-                        let mut new_shape = summed.shape().to_vec();
-                        new_shape.insert(ax, 1);
-                        grad = summed
-                            .to_shape(IxDyn(&new_shape))
-                            .context("Broadcast backward keepdim reshape failed")?
-                            .to_owned();
-                    }
-                }
-                grad = grad
-                    .to_shape(IxDyn(original_shape))
-                    .context("Broadcast backward final reshape failed")?
-                    .to_owned();
+                // Backward: reduce-sum over every axis that was added or expanded
+                // during the broadcast. This is exactly the adjoint of
+                // broadcasting, shared with the elementwise ops via the helper.
+                let grad = unbroadcast_grad(grad_output, original_shape)?;
                 Ok(vec![(*input, grad)])
             }
 
@@ -1376,6 +1373,89 @@ impl<T: Float + ScalarOperand + FromPrimitive> ComputationGraph<T> {
     }
 }
 
+/// Fetch the stored value shape of a graph node.
+///
+/// Used by the elementwise backward rules to recover each operand's own
+/// (pre-broadcast) shape so the incoming gradient can be reduced back to it.
+fn node_value_shape<T>(
+    nodes: &HashMap<NodeId, GraphNode<T>>,
+    id: NodeId,
+    op: &str,
+) -> Result<Vec<usize>>
+where
+    T: Float,
+{
+    nodes
+        .get(&id)
+        .and_then(|n| n.value.as_ref())
+        .map(|v| v.shape().to_vec())
+        .ok_or_else(|| anyhow!("Operand value not available for {} backward", op))
+}
+
+/// Reduce-sum a gradient defined at a broadcast *output* shape back down to
+/// `target_shape` — the adjoint (VJP) of NumPy-style broadcasting.
+///
+/// The elementwise ops (`+`, `-`, `*`, `/`) silently co-broadcast operands of
+/// unequal-but-compatible shape (e.g. `W[m, n] + b[n]`). The forward output then
+/// has the broadcast shape, so the raw gradient flowing back to a broadcast
+/// operand is also at that shape and must be summed over every axis the operand
+/// did not actually own before it can be accumulated into that operand's
+/// gradient.
+///
+/// Two kinds of broadcasting are undone:
+/// 1. **Leading axes** that broadcasting prepended (the operand had smaller rank
+///    than the output): summed away entirely.
+/// 2. **Interior/trailing singleton axes** where `target_shape[k] == 1` but the
+///    output extent was `> 1`: summed with keepdim so the axis collapses to 1.
+///
+/// When `grad.shape() == target_shape` no axis matches either rule and the
+/// function returns an exact copy, so the non-broadcast (same-shape) path is
+/// left unchanged — the adjoint of broadcasting reduces to the identity there.
+///
+/// # Complexity
+///
+/// O(n) where n = `grad.len()`, dominated by the reduce-sums.
+fn unbroadcast_grad<T>(grad: &ArrayD<T>, target_shape: &[usize]) -> Result<ArrayD<T>>
+where
+    T: Float,
+{
+    // Fast path: identical shape is an identity. This covers the common
+    // same-shape case exercised by the existing non-broadcast tests.
+    if grad.shape() == target_shape {
+        return Ok(grad.clone());
+    }
+    let ndim_out = grad.ndim();
+    let ndim_in = target_shape.len();
+    // Left-pad the target shape with 1s so it lines up (right-aligned) with the
+    // output shape, mirroring NumPy broadcasting rank alignment.
+    let pad_left = ndim_out.saturating_sub(ndim_in);
+    let padded_target: Vec<usize> = std::iter::repeat_n(1, pad_left)
+        .chain(target_shape.iter().copied())
+        .collect();
+    let out_shape = grad.shape().to_vec();
+    let mut reduced = grad.clone();
+    // Collapse every axis where the operand was size 1 but the output was
+    // larger. `padded_target` and `out_shape` are both indexed by `ax`, so a
+    // plain range loop is the clearest form here.
+    for ax in 0..ndim_out {
+        if padded_target[ax] == 1 && out_shape[ax] > 1 {
+            let summed = reduced.sum_axis(Axis(ax));
+            let mut new_shape = summed.shape().to_vec();
+            new_shape.insert(ax, 1);
+            reduced = summed
+                .to_shape(IxDyn(&new_shape))
+                .context("unbroadcast_grad: keepdim reshape failed")?
+                .to_owned();
+        }
+    }
+    // Drop the leading padded-1 dimensions to recover the exact target shape.
+    let result = reduced
+        .to_shape(IxDyn(target_shape))
+        .context("unbroadcast_grad: final reshape to target shape failed")?
+        .to_owned();
+    Ok(result)
+}
+
 /// Rewrite every `NodeId` field inside an `Operation` value, replacing any
 /// occurrence of `from` with `to`.
 fn rewrite_op_node_id(op: &mut Operation, from: NodeId, to: NodeId) {
@@ -1442,8 +1522,10 @@ impl fmt::Display for GraphStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gradcheck::{check_gradient, GradCheckConfig};
     use scirs2_core::ndarray_ext::array;
     use scirs2_core::ndarray_ext::{ArrayD, IxDyn};
+    use tenrso_core::DenseND;
 
     #[test]
     fn test_basic_addition() -> Result<()> {
@@ -1955,6 +2037,290 @@ mod tests {
         assert!(graph.slice_nd(&x, vec![(2, 1), (0, 3)]).is_err());
         // Wrong number of ranges
         assert!(graph.slice_nd(&x, vec![(0, 2)]).is_err());
+        Ok(())
+    }
+
+    // ===== Broadcasting-aware elementwise backward (reverse-broadcast) =====
+    //
+    // The forward elementwise ops co-broadcast operands of unequal-but-compatible
+    // shape (`W + b`, `W * s`, ...). These tests verify that the backward pass
+    // reduces each broadcast operand's gradient back to that operand's own shape
+    // and value, cross-checked against finite differences via
+    // `gradcheck::check_gradient`. Against the previous un-summed backward the
+    // analytical gradient came out at the broadcast *output* shape, so
+    // `check_gradient` (which requires `grad.shape() == input.shape()`) errored
+    // and every one of these tests failed.
+
+    #[derive(Clone, Copy)]
+    enum ElemOp {
+        Add,
+        Sub,
+        Mul,
+        Div,
+    }
+
+    fn apply_elem_op(
+        graph: &ComputationGraph<f64>,
+        op: ElemOp,
+        l: &Variable,
+        r: &Variable,
+    ) -> Result<Variable> {
+        match op {
+            ElemOp::Add => graph.add(l, r),
+            ElemOp::Sub => graph.sub(l, r),
+            ElemOp::Mul => graph.mul(l, r),
+            ElemOp::Div => graph.div(l, r),
+        }
+    }
+
+    /// Forward `op(lhs, rhs)` (both constants), result returned as a `DenseND`
+    /// for finite-difference probing.
+    fn elem_forward(op: ElemOp, lhs: &DenseND<f64>, rhs: &DenseND<f64>) -> Result<DenseND<f64>> {
+        let graph = ComputationGraph::<f64>::new();
+        let l = graph.constant(lhs.as_array().clone())?;
+        let r = graph.constant(rhs.as_array().clone())?;
+        let y = apply_elem_op(&graph, op, &l, &r)?;
+        Ok(DenseND::from_array(graph.value(&y)?))
+    }
+
+    /// Analytical gradient of `sum(grad_y * op(lhs, rhs))` w.r.t. `rhs` — the
+    /// vector-Jacobian product of `op` for upstream gradient `grad_y`. `lhs` is a
+    /// fixed constant; `rhs` is the differentiated operand.
+    fn elem_grad_rhs(
+        op: ElemOp,
+        lhs: &DenseND<f64>,
+        rhs: &DenseND<f64>,
+        grad_y: &DenseND<f64>,
+    ) -> Result<DenseND<f64>> {
+        let graph = ComputationGraph::<f64>::new();
+        let l = graph.constant(lhs.as_array().clone())?;
+        let r = graph.variable(rhs.as_array().clone(), true)?;
+        let y = apply_elem_op(&graph, op, &l, &r)?;
+        let gy = graph.constant(grad_y.as_array().clone())?;
+        let weighted = graph.mul(&y, &gy)?;
+        let loss = graph.sum(&weighted)?;
+        graph.backward(&loss)?;
+        Ok(DenseND::from_array(graph.gradient(&r)?))
+    }
+
+    /// Analytical gradient of `sum(grad_y * op(lhs, rhs))` w.r.t. `lhs`, used by
+    /// the same-shape regression guard.
+    fn elem_grad_lhs(
+        op: ElemOp,
+        lhs: &DenseND<f64>,
+        rhs: &DenseND<f64>,
+        grad_y: &DenseND<f64>,
+    ) -> Result<DenseND<f64>> {
+        let graph = ComputationGraph::<f64>::new();
+        let l = graph.variable(lhs.as_array().clone(), true)?;
+        let r = graph.constant(rhs.as_array().clone())?;
+        let y = apply_elem_op(&graph, op, &l, &r)?;
+        let gy = graph.constant(grad_y.as_array().clone())?;
+        let weighted = graph.mul(&y, &gy)?;
+        let loss = graph.sum(&weighted)?;
+        graph.backward(&loss)?;
+        Ok(DenseND::from_array(graph.gradient(&l)?))
+    }
+
+    /// Run `check_gradient` on `op`'s gradient w.r.t. the `rhs` operand, using the
+    /// oracle's default (unmodified) finite-difference tolerances.
+    fn gradcheck_rhs(
+        op: ElemOp,
+        w: &DenseND<f64>,
+        b: &DenseND<f64>,
+        grad_y: &DenseND<f64>,
+    ) -> Result<()> {
+        let f = |bb: &DenseND<f64>| elem_forward(op, w, bb);
+        let df = |bb: &DenseND<f64>, gy: &DenseND<f64>| elem_grad_rhs(op, w, bb, gy);
+        let config = GradCheckConfig::default();
+        let result = check_gradient(f, df, b, grad_y, &config)?;
+        assert!(
+            result.passed,
+            "gradcheck failed: max_abs_diff={:.3e}, max_rel_diff={:.3e}, {}/{} failed",
+            result.max_abs_diff, result.max_rel_diff, result.num_failures, result.num_elements
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_broadcast_vector_grad() -> Result<()> {
+        // y = W + b, W:[3,4], b:[4] (bias broadcast over rows).
+        let w = DenseND::from_vec((0..12).map(|i| i as f64 * 0.5 - 2.0).collect(), &[3, 4])?;
+        let b = DenseND::from_vec(vec![0.5, -1.0, 2.0, 3.5], &[4])?;
+        let grad_y = DenseND::from_vec((0..12).map(|i| 1.0 + 0.25 * i as f64).collect(), &[3, 4])?;
+
+        let analytical = elem_grad_rhs(ElemOp::Add, &w, &b, &grad_y)?;
+        // Must be reduced back to b's shape [4], equal to the column-sums of grad_y.
+        assert_eq!(analytical.shape(), &[4]);
+        for j in 0..4 {
+            let expected: f64 = (0..3)
+                .map(|i| *grad_y.get(&[i, j]).expect("grad_y index"))
+                .sum();
+            let got = *analytical.get(&[j]).expect("analytical index");
+            assert!(
+                (got - expected).abs() < 1e-9,
+                "b grad[{j}] = {got}, expected column-sum {expected}"
+            );
+        }
+        // Finite-difference cross-check.
+        gradcheck_rhs(ElemOp::Add, &w, &b, &grad_y)
+    }
+
+    #[test]
+    fn test_add_broadcast_scalar_grad() -> Result<()> {
+        // y = W + b, W:[3,4], b:[1] (single scalar broadcast to the whole matrix).
+        let w = DenseND::from_vec((0..12).map(|i| i as f64 - 3.0).collect(), &[3, 4])?;
+        let b = DenseND::from_vec(vec![0.75], &[1])?;
+        let grad_y = DenseND::from_vec((0..12).map(|i| 0.5 + 0.1 * i as f64).collect(), &[3, 4])?;
+
+        let analytical = elem_grad_rhs(ElemOp::Add, &w, &b, &grad_y)?;
+        assert_eq!(analytical.shape(), &[1]);
+        let expected: f64 = (0..12).map(|i| 0.5 + 0.1 * i as f64).sum();
+        let got = *analytical.get(&[0]).expect("analytical index");
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "scalar b grad = {got}, expected total-sum {expected}"
+        );
+        gradcheck_rhs(ElemOp::Add, &w, &b, &grad_y)
+    }
+
+    #[test]
+    fn test_mul_broadcast_vector_grad() -> Result<()> {
+        // y = W * s, W:[3,4], s:[4] broadcast over rows.
+        // d/ds sum(grad_y * (W*s)) = sum_over_rows(grad_y * W).
+        let w = DenseND::from_vec((0..12).map(|i| 1.0 + i as f64 * 0.3).collect(), &[3, 4])?;
+        let s = DenseND::from_vec(vec![2.0, -0.5, 1.5, 0.25], &[4])?;
+        let grad_y = DenseND::from_vec((0..12).map(|i| 0.2 + 0.15 * i as f64).collect(), &[3, 4])?;
+
+        let analytical = elem_grad_rhs(ElemOp::Mul, &w, &s, &grad_y)?;
+        assert_eq!(analytical.shape(), &[4]);
+        for j in 0..4 {
+            let expected: f64 = (0..3)
+                .map(|i| {
+                    *grad_y.get(&[i, j]).expect("grad_y index") * *w.get(&[i, j]).expect("w index")
+                })
+                .sum();
+            let got = *analytical.get(&[j]).expect("analytical index");
+            assert!(
+                (got - expected).abs() < 1e-9,
+                "s grad[{j}] = {got}, expected sum(grad_y*W over rows) {expected}"
+            );
+        }
+        gradcheck_rhs(ElemOp::Mul, &w, &s, &grad_y)
+    }
+
+    #[test]
+    fn test_mul_broadcast_scalar_grad() -> Result<()> {
+        // y = W * s, W:[2,3], s:[1] scalar broadcast.
+        let w = DenseND::from_vec((0..6).map(|i| i as f64 - 1.0).collect(), &[2, 3])?;
+        let s = DenseND::from_vec(vec![1.25], &[1])?;
+        let grad_y = DenseND::from_vec((0..6).map(|i| 1.0 + 0.5 * i as f64).collect(), &[2, 3])?;
+
+        let analytical = elem_grad_rhs(ElemOp::Mul, &w, &s, &grad_y)?;
+        assert_eq!(analytical.shape(), &[1]);
+        let expected: f64 = (0..6)
+            .map(|i| {
+                let ii = i as usize;
+                *grad_y.get(&[ii / 3, ii % 3]).expect("grad_y index")
+                    * *w.get(&[ii / 3, ii % 3]).expect("w index")
+            })
+            .sum();
+        let got = *analytical.get(&[0]).expect("analytical index");
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "scalar s grad = {got}, expected sum(grad_y*W) {expected}"
+        );
+        gradcheck_rhs(ElemOp::Mul, &w, &s, &grad_y)
+    }
+
+    #[test]
+    fn test_sub_broadcast_vector_grad() -> Result<()> {
+        // y = W - b, W:[3,4], b:[4]. d/db = -column_sums(grad_y).
+        let w = DenseND::from_vec((0..12).map(|i| i as f64 * 0.4).collect(), &[3, 4])?;
+        let b = DenseND::from_vec(vec![1.0, 2.0, -1.0, 0.5], &[4])?;
+        let grad_y = DenseND::from_vec((0..12).map(|i| 0.3 + 0.2 * i as f64).collect(), &[3, 4])?;
+
+        let analytical = elem_grad_rhs(ElemOp::Sub, &w, &b, &grad_y)?;
+        assert_eq!(analytical.shape(), &[4]);
+        for j in 0..4 {
+            let expected: f64 = -(0..3)
+                .map(|i| *grad_y.get(&[i, j]).expect("grad_y index"))
+                .sum::<f64>();
+            let got = *analytical.get(&[j]).expect("analytical index");
+            assert!(
+                (got - expected).abs() < 1e-9,
+                "b grad[{j}] = {got}, expected -column-sum {expected}"
+            );
+        }
+        gradcheck_rhs(ElemOp::Sub, &w, &b, &grad_y)
+    }
+
+    #[test]
+    fn test_div_broadcast_vector_grad() -> Result<()> {
+        // y = W / b, W:[3,4], b:[4] (all b well away from zero).
+        // d/db = sum_over_rows(-grad_y * W / b^2).
+        let w = DenseND::from_vec((0..12).map(|i| 1.0 + i as f64 * 0.3).collect(), &[3, 4])?;
+        let b = DenseND::from_vec(vec![2.0, 4.0, 3.0, 5.0], &[4])?;
+        let grad_y = DenseND::from_vec((0..12).map(|i| 0.5 + 0.1 * i as f64).collect(), &[3, 4])?;
+
+        let analytical = elem_grad_rhs(ElemOp::Div, &w, &b, &grad_y)?;
+        assert_eq!(analytical.shape(), &[4]);
+        for j in 0..4 {
+            let bj = *b.get(&[j]).expect("b index");
+            let expected: f64 = (0..3)
+                .map(|i| {
+                    let gy = *grad_y.get(&[i, j]).expect("grad_y index");
+                    let wij = *w.get(&[i, j]).expect("w index");
+                    -gy * wij / (bj * bj)
+                })
+                .sum();
+            let got = *analytical.get(&[j]).expect("analytical index");
+            assert!(
+                (got - expected).abs() < 1e-9,
+                "b grad[{j}] = {got}, expected {expected}"
+            );
+        }
+        gradcheck_rhs(ElemOp::Div, &w, &b, &grad_y)
+    }
+
+    #[test]
+    fn test_elementwise_same_shape_regression() -> Result<()> {
+        // Regression guard: for equal-shape operands, unbroadcast is the identity,
+        // so backward is unchanged. Verify shape preservation, exact values, and a
+        // finite-difference cross-check for every op and both operands.
+        let a = DenseND::from_vec((0..6).map(|i| 1.0 + i as f64 * 0.5).collect(), &[2, 3])?;
+        let c = DenseND::from_vec((0..6).map(|i| 2.0 + i as f64 * 0.3).collect(), &[2, 3])?;
+        let grad_y = DenseND::from_vec((0..6).map(|i| 0.7 + 0.11 * i as f64).collect(), &[2, 3])?;
+
+        for op in [ElemOp::Add, ElemOp::Sub, ElemOp::Mul, ElemOp::Div] {
+            let g_lhs = elem_grad_lhs(op, &a, &c, &grad_y)?;
+            let g_rhs = elem_grad_rhs(op, &a, &c, &grad_y)?;
+            assert_eq!(g_lhs.shape(), &[2, 3], "lhs grad shape changed");
+            assert_eq!(g_rhs.shape(), &[2, 3], "rhs grad shape changed");
+
+            // Exact reference values for the same-shape (identity-unbroadcast) case.
+            for idx in 0..6 {
+                let (i, j) = (idx / 3, idx % 3);
+                let gy = *grad_y.get(&[i, j]).expect("grad_y index");
+                let av = *a.get(&[i, j]).expect("a index");
+                let cv = *c.get(&[i, j]).expect("c index");
+                let (want_l, want_r) = match op {
+                    ElemOp::Add => (gy, gy),
+                    ElemOp::Sub => (gy, -gy),
+                    ElemOp::Mul => (gy * cv, gy * av),
+                    ElemOp::Div => (gy / cv, -gy * av / (cv * cv)),
+                };
+                let got_l = *g_lhs.get(&[i, j]).expect("g_lhs index");
+                let got_r = *g_rhs.get(&[i, j]).expect("g_rhs index");
+                assert!(
+                    (got_l - want_l).abs() < 1e-9 && (got_r - want_r).abs() < 1e-9,
+                    "same-shape grad mismatch at [{i},{j}]: lhs {got_l} vs {want_l}, rhs {got_r} vs {want_r}"
+                );
+            }
+
+            // Finite-difference cross-check w.r.t. the rhs operand.
+            gradcheck_rhs(op, &a, &c, &grad_y)?;
+        }
         Ok(())
     }
 }

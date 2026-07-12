@@ -598,16 +598,45 @@ where
                 let (_l, u, perm) = self.lu_decomposition()?;
 
                 // det(A) = det(P) * det(L) * det(U)
-                // det(P) = (-1)^(number of permutations)
                 // det(L) = 1 (unit lower triangular)
                 // det(U) = product of diagonal elements
+                // det(P) = sign of the pivot permutation.
+                //
+                // The sign of a permutation is (-1)^(number of transpositions),
+                // which equals (-1)^(n - number_of_disjoint_cycles). It is an
+                // invariant of the permutation itself and must NOT be inferred
+                // from the count of *displaced* elements: a single row swap
+                // displaces two elements (an even count) yet is one
+                // transposition -> an ODD permutation with det(P) = -1. Using
+                // the displaced-element parity therefore returns the wrong sign
+                // whenever the permutation has an odd number of non-trivial
+                // cycles. We instead decompose `perm` into disjoint cycles and
+                // use parity = (-1)^(n - num_cycles), which is exact.
+                //
+                // (Cycle decomposition is chosen over instrumenting
+                // `lu_decomposition` to count swaps because the latter is a
+                // public API whose 3-tuple return is also consumed by the
+                // verified `solve()`; recovering the parity from the returned
+                // permutation keeps this fix self-contained and leaves the
+                // permutation's parity — an invariant — provably correct.)
 
                 let det_u: T = (0..n).map(|i| u[&[i, i]]).product();
 
-                // Count permutations
-                let perm_count = perm.iter().enumerate().filter(|(i, &p)| p != *i).count();
+                let mut visited = vec![false; n];
+                let mut num_cycles = 0usize;
+                for start in 0..n {
+                    if visited[start] {
+                        continue;
+                    }
+                    num_cycles += 1;
+                    let mut j = start;
+                    while !visited[j] {
+                        visited[j] = true;
+                        j = perm[j];
+                    }
+                }
 
-                let sign = if perm_count % 2 == 0 {
+                let sign = if (n - num_cycles).is_multiple_of(2) {
                     T::one()
                 } else {
                     -T::one()
@@ -1004,5 +1033,197 @@ where
         let norm_inv = inv_a.frobenius_norm();
 
         Ok(norm_a * norm_inv)
+    }
+}
+
+#[cfg(test)]
+mod det_sign_tests {
+    use super::DenseND;
+
+    /// Independent determinant oracle via recursive Laplace (cofactor)
+    /// expansion along the first row. This never touches LU, permutations, or
+    /// pivoting, so it is a faithful reference for the LU-path sign logic.
+    fn cofactor_det(rows: &[Vec<f64>]) -> f64 {
+        let n = rows.len();
+        match n {
+            1 => rows[0][0],
+            2 => rows[0][0] * rows[1][1] - rows[0][1] * rows[1][0],
+            _ => {
+                let mut det = 0.0;
+                for c in 0..n {
+                    let minor: Vec<Vec<f64>> = rows[1..]
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .enumerate()
+                                .filter(|(j, _)| *j != c)
+                                .map(|(_, &v)| v)
+                                .collect()
+                        })
+                        .collect();
+                    let sign = if c % 2 == 0 { 1.0 } else { -1.0 };
+                    det += sign * rows[0][c] * cofactor_det(&minor);
+                }
+                det
+            }
+        }
+    }
+
+    fn to_rows(a: &DenseND<f64>, n: usize) -> Vec<Vec<f64>> {
+        (0..n)
+            .map(|i| (0..n).map(|j| a[&[i, j]]).collect())
+            .collect()
+    }
+
+    /// Deterministic LCG producing values in (-1, 1); pure-Rust, reproducible,
+    /// no `rand` dependency (SciRS2 policy) and no seedable-RNG requirement.
+    fn lcg_matrix(n: usize, seed: u64) -> DenseND<f64> {
+        let mut state = seed;
+        let mut next = || -> f64 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 32) as f64 / (u32::MAX as f64) - 0.5
+        };
+        let data: Vec<f64> = (0..n * n).map(|_| next() * 2.0).collect();
+        DenseND::<f64>::from_vec(data, &[n, n]).expect("square matrix construction")
+    }
+
+    /// Unit lower-triangular matrix whose true determinant is +1. Partial
+    /// pivoting performs a single row swap (2 displaced elements -> the old
+    /// displaced-count parity is EVEN -> it returned -1). The true parity is
+    /// ODD, so the correct answer is +1.
+    #[test]
+    fn det_unit_lower_triangular_is_plus_one() {
+        let a = DenseND::<f64>::from_vec(
+            vec![
+                1.0, 0.0, 0.0, 0.0, //
+                2.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                0.0, 0.0, 0.0, 1.0,
+            ],
+            &[4, 4],
+        )
+        .unwrap();
+        let d = a.det().unwrap();
+        // Old (displaced-element parity) logic returns -1 here.
+        assert!(
+            (d - 1.0).abs() < 1e-10,
+            "expected +1, got {d} (old sign bug returns -1)"
+        );
+    }
+
+    /// Oracle-verified dense 4x4 with true determinant -164. The old logic
+    /// returned +164.
+    #[test]
+    fn det_dense_4x4_is_minus_164() {
+        let a = DenseND::<f64>::from_vec(
+            vec![
+                0.0, 2.0, 1.0, 3.0, //
+                1.0, 0.0, 4.0, 2.0, //
+                3.0, 1.0, 0.0, 1.0, //
+                2.0, 5.0, 1.0, 0.0,
+            ],
+            &[4, 4],
+        )
+        .unwrap();
+        let d = a.det().unwrap();
+        assert!(
+            (d - (-164.0)).abs() < 1e-8,
+            "expected -164, got {d} (old sign bug returns +164)"
+        );
+        // Cross-check against the independent cofactor oracle.
+        let reference = cofactor_det(&to_rows(&a, 4));
+        assert!((reference - (-164.0)).abs() < 1e-9);
+    }
+
+    /// An explicit single-transposition permutation matrix (I_4 with rows 0
+    /// and 1 swapped) has determinant -1. The old displaced-count parity
+    /// (2 displaced elements -> even) wrongly yields +1.
+    #[test]
+    fn det_single_transposition_permutation_is_minus_one() {
+        let a = DenseND::<f64>::from_vec(
+            vec![
+                0.0, 1.0, 0.0, 0.0, //
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                0.0, 0.0, 0.0, 1.0,
+            ],
+            &[4, 4],
+        )
+        .unwrap();
+        let d = a.det().unwrap();
+        assert!(
+            (d - (-1.0)).abs() < 1e-10,
+            "expected -1, got {d} (old sign bug returns +1)"
+        );
+    }
+
+    /// General regression: det() must match the independent Leibniz/cofactor
+    /// oracle across many random matrices of size 4, 5, 6. The old
+    /// displaced-count logic disagrees on roughly half of these because a
+    /// random pivot permutation has a random parity that only coincides with
+    /// its displaced-element parity when it has an even number of non-trivial
+    /// cycles.
+    #[test]
+    fn det_matches_cofactor_oracle_random() {
+        for n in 4..=6usize {
+            for seed in 0..24u64 {
+                let a = lcg_matrix(
+                    n,
+                    seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        .wrapping_add(n as u64),
+                );
+                let reference = cofactor_det(&to_rows(&a, n));
+                let got = a.det().unwrap();
+                assert!(
+                    (got - reference).abs() <= 1e-8 * (1.0 + reference.abs()),
+                    "n={n} seed={seed}: det()={got} vs cofactor oracle={reference}"
+                );
+            }
+        }
+    }
+
+    /// Multiplicativity det(A)·det(B) == det(A·B) for random 4x4 pairs. This is
+    /// a strong end-to-end check: under the old sign bug it fails on ~half the
+    /// pairs because the sign errors of det(A), det(B) and det(A·B) are
+    /// independent.
+    #[test]
+    fn det_is_multiplicative_random_4x4() {
+        for seed in 0..24u64 {
+            let a = lcg_matrix(4, 0x1234 ^ seed.wrapping_mul(2_654_435_761));
+            let b = lcg_matrix(4, 0xABCD ^ seed.wrapping_mul(40_503));
+            let ab = a.matmul(&b).unwrap();
+            let lhs = a.det().unwrap() * b.det().unwrap();
+            let rhs = ab.det().unwrap();
+            assert!(
+                (lhs - rhs).abs() <= 1e-7 * (1.0 + rhs.abs()),
+                "seed={seed}: det(A)det(B)={lhs} vs det(AB)={rhs}"
+            );
+        }
+    }
+
+    /// Sanity: already-correct cases still hold after the fix.
+    #[test]
+    fn det_known_correct_cases_preserved() {
+        // Identity (n>=4 exercises the LU path; no swaps -> sign +1).
+        let id4 = DenseND::<f64>::eye(4);
+        assert!((id4.det().unwrap() - 1.0).abs() < 1e-12);
+
+        // Singular 3x3 (two identical rows) via the closed-form Sarrus path.
+        let singular = DenseND::<f64>::from_vec(
+            vec![
+                1.0, 2.0, 3.0, //
+                1.0, 2.0, 3.0, //
+                4.0, 5.0, 7.0,
+            ],
+            &[3, 3],
+        )
+        .unwrap();
+        assert!(singular.det().unwrap().abs() < 1e-12);
+
+        // Closed-form 2x2 and 3x3 unchanged.
+        let m2 = DenseND::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        assert!((m2.det().unwrap() - (-2.0)).abs() < 1e-12);
     }
 }

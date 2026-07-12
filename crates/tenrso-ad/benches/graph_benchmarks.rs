@@ -8,9 +8,10 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use scirs2_core::ndarray_ext::array;
+use std::collections::HashMap;
 use std::hint::black_box;
-use tenrso_ad::graph::ComputationGraph;
-use tenrso_ad::graph_optimizer::{GraphOptimizer, OptimizationPass};
+use tenrso_ad::graph::{ComputationGraph, NodeId, Variable};
+use tenrso_ad::graph_optimizer::{compile_plan, FusionConfig, GraphOptimizer, OptimizationPass};
 
 /// Benchmark basic arithmetic operations in the graph
 fn bench_graph_arithmetic(c: &mut Criterion) {
@@ -269,41 +270,28 @@ fn bench_graph_activations(c: &mut Criterion) {
     }
     group.finish();
 }
-
-/// Benchmark graph optimization impact
+/// Benchmark the in-place optimization passes (CSE / constant folding / DCE)
+/// and real operation fusion (a compiled fused plan vs. the same plan unfused).
 fn bench_graph_optimization(c: &mut Criterion) {
     let mut group = c.benchmark_group("graph_optimization");
 
-    // Benchmark operation fusion
-    group.bench_function("fusion_matmul_bias_relu", |bencher| {
+    // In-place passes: common subexpression elimination.
+    group.bench_function("pass_cse", |bencher| {
         bencher.iter(|| {
             let graph = ComputationGraph::<f64>::new();
             let x = graph
-                .variable(
-                    scirs2_core::ndarray_ext::Array2::<f64>::zeros((32, 64)).into_dyn(),
-                    true,
-                )
+                .variable(array![1.0, 2.0, 3.0].into_dyn(), true)
                 .unwrap();
-            let w = graph
-                .variable(
-                    scirs2_core::ndarray_ext::Array2::<f64>::zeros((64, 128)).into_dyn(),
-                    false,
-                )
+            let y = graph
+                .variable(array![4.0, 5.0, 6.0].into_dyn(), true)
                 .unwrap();
-            let b = graph
-                .variable(
-                    scirs2_core::ndarray_ext::Array1::<f64>::zeros(128).into_dyn(),
-                    false,
-                )
-                .unwrap();
+            // Two commutatively-identical sums: one of them is redundant.
+            let _s1 = graph.add(&x, &y).unwrap();
+            let s2 = graph.add(&y, &x).unwrap();
+            let loss = graph.sum(&s2).unwrap();
 
-            let xw = graph.matmul(&x, &w).unwrap();
-            let xwb = graph.add(&xw, &b).unwrap();
-            let out = graph.relu(&xwb).unwrap();
-            let loss = graph.sum(&out).unwrap();
-
-            // Apply optimization
-            let optimizer = GraphOptimizer::new().with_pass(OptimizationPass::OperationFusion);
+            let optimizer =
+                GraphOptimizer::new().with_pass(OptimizationPass::CommonSubexpressionElimination);
             let _ = optimizer.optimize(&graph);
 
             black_box(loss);
@@ -334,47 +322,86 @@ fn bench_graph_optimization(c: &mut Criterion) {
         });
     });
 
-    // Benchmark full optimization pipeline
-    group.bench_function("full_optimization", |bencher| {
+    // Real fusion: forward + backward of a 3-layer MLP, fused vs unfused.
+    // Both plans execute the *same* graph; the fused one materializes 6 fewer
+    // intermediate buffers (2 per layer).
+    let (graph, params, loss_id) = build_mlp_graph(64, 128, 3);
+    let outputs = [loss_id];
+    let fused = compile_plan(&graph, &outputs, &FusionConfig::default()).expect("fused plan");
+    let unfused = compile_plan(
+        &graph,
+        &outputs,
+        &FusionConfig {
+            enable_fusion: false,
+        },
+    )
+    .expect("unfused plan");
+    let feeds: HashMap<_, _> = params
+        .iter()
+        .map(|v| (v.id(), graph.value(v).expect("param value")))
+        .collect();
+    let seed =
+        scirs2_core::ndarray_ext::ArrayD::from_elem(scirs2_core::ndarray_ext::IxDyn(&[]), 1.0_f64);
+
+    group.bench_function("mlp_unfused_fwd_bwd", |bencher| {
         bencher.iter(|| {
-            let graph = ComputationGraph::<f64>::new();
-            let x = graph
-                .variable(
-                    scirs2_core::ndarray_ext::Array2::<f64>::zeros((16, 32)).into_dyn(),
-                    true,
-                )
-                .unwrap();
-            let w = graph
-                .variable(
-                    scirs2_core::ndarray_ext::Array2::<f64>::zeros((32, 64)).into_dyn(),
-                    false,
-                )
-                .unwrap();
-            let b = graph
-                .variable(
-                    scirs2_core::ndarray_ext::Array1::<f64>::zeros(64).into_dyn(),
-                    false,
-                )
-                .unwrap();
+            let exec = unfused.forward(&feeds).expect("forward");
+            let grads = unfused.backward(&exec, loss_id, &seed).expect("backward");
+            black_box(grads.len());
+        });
+    });
 
-            // Create some dead code
-            let _ = graph.sigmoid(&x).unwrap();
-
-            // Main path with fusible operations
-            let xw = graph.matmul(&x, &w).unwrap();
-            let xwb = graph.add(&xw, &b).unwrap();
-            let out = graph.relu(&xwb).unwrap();
-            let loss = graph.sum(&out).unwrap();
-
-            // Apply all optimizations
-            let optimizer = GraphOptimizer::new().with_pass(OptimizationPass::All);
-            let _ = optimizer.optimize(&graph);
-
-            black_box(loss);
+    group.bench_function("mlp_fused_fwd_bwd", |bencher| {
+        bencher.iter(|| {
+            let exec = fused.forward(&feeds).expect("forward");
+            let grads = fused.backward(&exec, loss_id, &seed).expect("backward");
+            black_box(grads.len());
         });
     });
 
     group.finish();
+}
+
+/// `loss = sum(relu(... relu(x @ w0 + b0) ... @ wL + bL))`, returning the graph,
+/// its leaves, and the loss node.
+fn build_mlp_graph(
+    batch: usize,
+    width: usize,
+    layers: usize,
+) -> (ComputationGraph<f64>, Vec<Variable>, NodeId) {
+    let graph = ComputationGraph::<f64>::new();
+    let mut h = graph
+        .variable(
+            scirs2_core::ndarray_ext::Array2::<f64>::from_elem((batch, width), 0.05).into_dyn(),
+            true,
+        )
+        .expect("input");
+    let mut params = vec![h];
+    for layer in 0..layers {
+        let w = graph
+            .variable(
+                scirs2_core::ndarray_ext::Array2::<f64>::from_elem(
+                    (width, width),
+                    0.01 + 0.001 * layer as f64,
+                )
+                .into_dyn(),
+                true,
+            )
+            .expect("weight");
+        let b = graph
+            .variable(
+                scirs2_core::ndarray_ext::Array1::<f64>::from_elem(width, 0.1).into_dyn(),
+                true,
+            )
+            .expect("bias");
+        params.push(w);
+        params.push(b);
+        let z = graph.matmul(&h, &w).expect("matmul");
+        let zb = graph.add(&z, &b).expect("bias add");
+        h = graph.relu(&zb).expect("relu");
+    }
+    let loss = graph.sum(&h).expect("loss");
+    (graph, params, loss.id())
 }
 
 /// Benchmark memory usage (indirectly via gradient storage)

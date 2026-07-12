@@ -11,7 +11,7 @@ Tensor decomposition methods: CP-ALS, Tucker-HOOI/HOSVD, TT-SVD, and advanced va
 ### CP (Canonical Polyadic) Decompositions
 - **cp_als** - Canonical Polyadic decomposition via Alternating Least Squares
 - **cp_als_constrained** - CP-ALS with non-negativity, L2 regularization, and orthogonality constraints
-- **cp_als_accelerated** - Accelerated CP-ALS with momentum/extrapolation
+- **cp_als_accelerated** - CP-ALS with exact enhanced line search (ELS) extrapolation; fewer sweeps to a target fit in ill-conditioned "swamp" problems
 - **cp_completion** - CP-based tensor completion for missing data
 - **cp_randomized** - Randomized CP decomposition for large-scale tensors
 - **cp_als_incremental** - Incremental/online CP-ALS for streaming tensor data

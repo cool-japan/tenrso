@@ -495,7 +495,6 @@ let result = einsum_ex::<f32>("bij,bjk->bik")
     .inputs(&[tensor_a, tensor_b])
     .hints(&ExecHints {
         prefer_sparse: true,
-        tile_kb: Some(512),
         ..Default::default()
     })
     .run()?;

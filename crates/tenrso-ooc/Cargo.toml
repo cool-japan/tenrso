@@ -44,6 +44,10 @@ prost = { workspace = true, optional = true }
 oxicode = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+# Real GPU compute backend (default-OFF; only pulled in by `cuda-compute`).
+oxicuda-driver = { workspace = true, optional = true }
+oxicuda-memory = { workspace = true, optional = true }
+oxicuda-blas = { workspace = true, optional = true }
 crc32fast.workspace = true
 xxhash-rust.workspace = true
 blake3.workspace = true
@@ -77,12 +81,24 @@ metal = ["gpu", "scirs2-core/metal"]
 # Cross-platform GPU compute adapter detection (Vulkan / DirectX12 / Metal /
 # GL) via scirs2-core's `wgpu` backend.
 vulkan = ["gpu", "scirs2-core/wgpu"]
+# REAL CUDA elementwise dispatch (src/gpu_cuda.rs). Off by default. Builds on
+# top of the `cuda` enumeration feature and additionally pulls in the pure-Rust
+# oxicuda driver/memory/BLAS crates so that `Device::add` / `Device::mul` for
+# f32 execute on an actual NVIDIA GPU (H2D -> kernel -> D2H). No CUDA SDK is
+# needed at build time; libcuda is loaded at runtime. This is a capability /
+# correctness path, NOT a speedup for single host-buffer ops (see src/gpu.rs).
+cuda-compute = ["cuda", "dep:oxicuda-driver", "dep:oxicuda-memory", "dep:oxicuda-blas"]
 opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-semantic-conventions", "dep:tokio", "dep:parking_lot"]
 prometheus-metrics = ["dep:prometheus", "dep:parking_lot", "dep:lazy_static"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 mimalloc-allocator = ["dep:mimalloc"]
 lock-free = ["dep:crossbeam", "dep:dashmap", "dep:parking_lot"]
 distributed = ["dep:tonic", "dep:prost", "dep:oxicode", "dep:bytes", "dep:futures", "dep:tokio", "dep:parking_lot", "lock-free"]
+
+# NUMA memory policies (src/numa.rs) are a Linux kernel facility; libc is only
+# needed there, so it is not pulled in on other platforms.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

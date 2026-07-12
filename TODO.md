@@ -1,10 +1,87 @@
 # TenRSo TODO
 
 > **Version:** 0.1.0
-> **Status:** 🎉 **0.1.0 STABLE RELEASED** — 2,678 nextest + 548 doctests passing (100%)
-> **Last Updated:** 2026-07-11
+> **Status:** 🎉 **0.1.0 STABLE** — 2,769 nextest + 600 doctests passing (100%), clippy `-D warnings` clean workspace-wide (incl. `cuda-compute`)
+> **Last Updated:** 2026-07-12
 
 This document tracks high-level tasks across the entire TenRSo project. For crate-specific tasks, see individual `crates/*/TODO.md` files.
+
+---
+
+## 2026-07-12 Depth session II (`/ucont` continued)
+
+A second long-horizon audit + implementation pass (Opus orchestrator, ~20 subagents across
+4 iterations, adversarially verified). The recurring lesson held: **the 0.1.0 test suite
+checks output shape and "does it run", not whether the numbers are right** — so it stayed
+green over every bug below. Base rate remains high; a third pass is warranted.
+
+**9 more advertised-but-fake capabilities eliminated** (implemented for real *with
+measurement*, or removed honestly — no facade left behind):
+- `tenrso-planner::refine_plan` — a third order-invariant "search" (after SA/GA): swapped
+  `Plan::nodes` scored by a permutation-invariant `sum(node.cost)`, never wrote `Plan::order`.
+  Now real NNI local search over the contraction tree (50× cost cut on the regression case,
+  proven to reach the global optimum).
+- `tenrso-ooc::NumaAllocator` — allocated **nothing** (returned a counter). Now real aligned
+  allocation + `mbind`/`get_mempolicy` NUMA binding, verified against the kernel's own view.
+- `tenrso-exec` executor "optimization layer" — "SIMD" that was plain `mapv`, a dead
+  `optimized_ops` layer, a broadcast module that would *panic* on any real broadcast, and an
+  inert `num_threads`. → real AVX2 transcendental kernels where they win (exp 4–5×), honest
+  deletion where they don't (bandwidth-bound ops), a real scoped rayon pool for `with_threads`,
+  a 13× faster live broadcast path. (Also fixed real cancellation bugs in `tanh`/`elu`/`selu`.)
+- `tenrso-ad::OperationFusion` — ran CSE and reported a **fabricated** fusion count. Now real
+  graph fusion, gradients pinned three ways.
+- `cp_als_accelerated` line search — discarded its result; structurally could never damp
+  below 1.0. Now real ELS with incremental fit.
+- `ExecHints::tile_kb`/`prefer_lowrank` — zero readers; deleted (measured: could only steer
+  the slower kernel f32/f64 never reach). `subset` implemented for real.
+
+**5 more silent wrong-answer bugs found (executed-oracle-confirmed), 4 fixed:**
+- [x] `DenseND::det` (n≥4) returned the **wrong sign** — permutation parity computed from
+      displaced-element count, not true cycle parity. (Fixed via cycle decomposition.)
+- [x] `cp_completion` — one aggregated Gram for all rows → completion non-functional (0.83
+      rel err on an exact rank-2 tensor). Now a per-row masked normal-equation solve.
+- [x] Sparse `max_axis` — clamped every slice's max against 0 (assumed an implicit zero) →
+      a fully-dense all-negative slice returned 0. (`min_axis` was already correct.)
+- [x] Eager `ComputationGraph` Add/Sub/Mul/Div backward — never un-broadcast the gradient
+      → a `W+bias` operand got a wrong-shaped/un-summed gradient. Now a proper `unbroadcast_grad`
+      adjoint; gradchecked at unmodified tolerances.
+- [ ] `tt_svd` — silently **non-exact** (2.2e-3 recon at full rank) because scirs2-linalg's
+      thin SVD is inaccurate on the tall-skinny unfoldings TT-SVD always produces. Fix
+      attempted (Gram-SVD → 3.2e-7) but **reverted** — insufficient for the strict exactness
+      bar; the robust fix is QR-then-SVD (~1e-13). **OPEN** — see checklist.
+
+**First real GPU dispatch** (was mislabeled "blocked by hardware"): `tenrso-ooc::Device::add`/
+`mul` for f32/f64 now execute on the **RTX A4000** via pure-Rust `oxicuda`, behind default-off
+`cuda-compute`, **bit-exact-verified on the GPU**. Capability path, not a speedup (host buffers).
+
+**CP-ALS <2s — the standing SIMD recommendation was proven WRONG** (roofline data): CP-ALS is
+GEMM-bound, but `matrixmultiply` is already near the AVX2 f64 roofline (33 & 19 GFLOP/s/core),
+so a SIMD micro-kernel is a NO-GO. The real lever is K-splitting the tall-skinny root GEMM
+(24 → 82 GFLOP/s). See the Deferred/Blocked "Pure Rust Policy" note and the checklist.
+
+**Open for the next pass:** `tt_svd` (QR thin SVD); K-split `gemm_rows`; independent adversarial
+re-verification of the 4 fixes above (this session's verifier agents were cut off by a usage
+limit — the fixes are test-backed and the workspace is green, but not skeptic-re-checked);
+add `mul`/f64 GPU bit-exact tests. See `crates/*/TODO.md` and the source markers below.
+
+### Actionable now (2026-07-12 — real, in-policy, unblocked)
+
+- [ ] **`tt_svd` exactness** — route tall-skinny unfoldings through a **QR-then-SVD** thin SVD
+      (`A = QR`, SVD the small `R`, `U = Q·U_r`) instead of `scirs2_linalg::svd`. A Gram-based
+      attempt reached 3.2e-7 but not the <1e-10 exactness / <1e-12 orthonormality bars.
+      `crates/tenrso-decomp/src/tt/algorithms.rs`. Add a full-rank exactness regression (order ≥ 3).
+- [ ] **CP-ALS <2s via K-split** — replace the output-row blocking of the tall-skinny root GEMM
+      `gemm_rows` (M=256) with K-splitting (partition K=65536 across threads, sum partials):
+      measured 24 → 82 GFLOP/s. `crates/tenrso-kernels/src/mttkrp_dimtree.rs`
+      (`mttkrp_all_parallel`). In-policy (ndarray `dot` + rayon), no SIMD, no BLAS.
+- [ ] **Adversarially re-verify** the 4 landed 2026-07-12 fixes (`det`, `cp_completion`,
+      `max_axis`, graph broadcast-backward) with fresh independent oracles.
+- [ ] **GPU test coverage** — add bit-exact `Device::mul` and f64 tests (only `add`/f32 is
+      currently covered, though all four arms are wired). `required-features = ["cuda-compute"]`.
+- [ ] **Refactor `crates/tenrso-ad/src/graph.rs`** — the 2026-07-12 broadcast-backward fix pushed
+      it to **2327 lines**, over the 2000-line policy (was 1960 at HEAD). Split the `#[cfg(test)]`
+      module (and/or the optimizer helpers) into a `graph/` module dir via `splitrs`. Mechanical;
+      tree is green, this is style-policy debt, not a correctness issue.
 
 ---
 
@@ -116,18 +193,32 @@ not silently dropped.
 
 ### Blocked by Pure Rust Policy (COOLJAPAN) — would require a C/Fortran BLAS
 - **Einsum ≥ 80% of OpenBLAS baseline** — structurally unmeasurable in-tree; no OpenBLAS
-  by policy. Pure-Rust `matrixmultiply` GEMM (~3–4 GFLOP/s) cannot reach multi-threaded
-  OpenBLAS DGEMM (~50 GFLOP/s). *In-policy progress is still possible* via a SIMD GEMM
-  micro-kernel (see CP-ALS), but the OpenBLAS-parity number itself is out of policy.
+  by policy, and a hand-rolled SIMD GEMM micro-kernel is a **NO-GO** (measured 2026-07-12):
+  pure-Rust `matrixmultiply` already runs **33 & 19 GFLOP/s/core** at the CP-ALS root-GEMM
+  shapes — near the AVX2 f64 roofline (~40–70% of peak), *5–8× above* the ~3–6 GFLOP/s this
+  file previously (wrongly) assumed. A `scirs2-core::simd_ops` kernel cannot beat a mature
+  packed GEMM already near roofline. Multi-threaded OpenBLAS parity (~50 GFLOP/s) stays out
+  of policy.
 - **`tenrso-ooc` BLAS-optimized matmul** — same reason.
-- Note: CP-ALS <2s is **NOT** in this bucket anymore — it is GEMM-bound and has an
-  in-policy path (SIMD micro-kernel). It stays an active target.
+- Note: CP-ALS <2s is **NOT** in this bucket and the lever is **NOT** SIMD (see above). It is
+  GEMM-throughput bound; the real in-policy fix is **K-splitting the tall-skinny root GEMM
+  `gemm_rows`** in `mttkrp_dimtree.rs` — its current output-row blocking starves the
+  microkernel (24 GFLOP/s, *slower than one core*) whereas K-splitting the contraction dim
+  measured **82 vs 24 GFLOP/s (3.4×)**, projecting the 256³ r64 10-iter run to ~1.4–1.5s.
+  Active — see the checklist item below.
 
-### Blocked by external hardware backends (default-off, not yet dispatching compute)
-- **GPU compute backend (CUDA/ROCm/Metal/Vulkan)** — device *enumeration* is done and
-  honest (2026-07-11), but `Device::add`/`mul` still run on CPU. Actually dispatching
-  kernels to detected hardware is a large separate milestone; needs `oxicuda`/wgpu compute
-  paths. GPU *kernels* for `tenrso-kernels` likewise.
+### Actionable-but-large future milestones (NOT hardware-blocked — reclassified 2026-07-12)
+- **GPU compute backend (CUDA/ROCm/Metal/Vulkan)** — the old "blocked by external hardware"
+  label was **false**: this box has a real **RTX A4000 (16 GB)** and `/notebooks/oxicuda`
+  (pure-Rust CUDA family — no nvcc/SDK at build time, PTX generated in Rust + JIT via
+  libcuda, zero scirs2 dep) is available. **First real dispatch DONE + bit-exact-verified on
+  the A4000** (2026-07-12): `tenrso-ooc::Device::add`/`mul` for f32/f64 via oxicuda, behind a
+  default-off `cuda-compute` feature. Honest scope: it is a *capability/correctness* path,
+  **not** a speedup — buffers are host-`Vec`, so PCIe dominates a single op. Remaining (a
+  genuine milestone, but engineering scope, not hardware availability): GPU kernels for
+  `tenrso-kernels` (MTTKRP/Khatri-Rao/n-mode), `tenrso-exec` einsum GEMM offload via
+  `oxicuda-blas`, and on-device tensor residency. `Device::add`/`mul` still fall back to CPU
+  for non-f32/f64 and when the feature is off.
 - **Distributed / cluster execution, MPI-based distributed MTTKRP,
   communication-avoiding algorithms, tensor partitioning** — a distributed-runtime
   milestone; no in-tree transport.

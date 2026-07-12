@@ -21,6 +21,7 @@
 mod advanced;
 mod core;
 mod dimtree;
+mod els;
 pub(crate) mod helpers;
 #[cfg(feature = "sparse")]
 mod sparse;

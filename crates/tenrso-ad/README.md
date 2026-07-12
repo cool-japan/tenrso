@@ -69,7 +69,12 @@ Efficient handling of highly sparse gradients:
 ### Graph-Based AD (PyTorch-style)
 
 - Dynamic computation graphs
-- Graph optimization passes: operation fusion, dead code elimination, memory planning
+- In-place graph passes: common subexpression elimination, constant folding, dead code elimination
+- Operation fusion: `compile_fused_plan` compiles the graph into an executable plan whose fused
+  kernels (MatMul+Bias, MatMul+Bias+ReLU, Mul+Add, Add+ReLU) materialize one buffer where the
+  unfused graph materializes two or three — forward *and* backward. Fusion is a compiled plan
+  rather than an in-place rewrite because the graph is an eager tape: by the time a pass runs,
+  every intermediate has already been allocated, so only re-execution can benefit.
 - Eager execution with gradient accumulation
 
 ### Gradient Monitoring
@@ -261,7 +266,7 @@ cargo bench --bench graph_benchmarks   # Graph-based AD benchmarks
 ### Test Breakdown
 
 - `graph.rs`: 15 tests (computation graph, dynamic AD)
-- `graph_optimizer.rs`: 12 tests (operation fusion, DCE, memory planning)
+- `graph_optimizer/`: 37 tests (operation fusion + fused VJP gradchecks, CSE, constant folding, DCE)
 - `monitoring.rs`: 15 tests (gradient health tracking)
 - `mixed_precision.rs`: 14 tests (FP16/BF16 training)
 - `sparse_grad.rs`: 13 tests (sparse gradient handling)

@@ -2,6 +2,8 @@
 //!
 //! Contains: cp_als_accelerated, cp_completion, cp_randomized, cp_als_incremental
 
+use super::dimtree::AlsDimTree;
+use super::els::{ErrorPolynomial, ELS_ALPHA_MAX, ELS_ALPHA_MIN, ELS_REFINE_ITERS};
 use super::helpers::*;
 use super::types::*;
 use scirs2_core::ndarray_ext::Array2;
@@ -12,29 +14,93 @@ use std::iter::Sum;
 use tenrso_core::DenseND;
 use tenrso_kernels::mttkrp;
 
-/// Accelerated CP-ALS with line search optimization
-///
-/// An enhanced version of CP-ALS that uses line search to determine optimal
-/// step sizes and incorporates acceleration techniques for faster convergence.
-///
-/// This method typically converges 2-5x faster than standard CP-ALS while
-/// maintaining the same approximation quality.
+/// CP-ALS accelerated by an **exact Enhanced Line Search** (ELS) on the sweep's
+/// extrapolation direction.
 ///
 /// # Algorithm
 ///
-/// Uses a combination of:
-/// - **Line search**: Finds optimal step size in update direction
-/// - **Extrapolation**: Accelerates convergence using Nesterov-style momentum
-/// - **Adaptive restart**: Resets momentum when fit decreases
+/// Each iteration runs one exact Gauss-Seidel ALS sweep (the same dimension-tree engine
+/// [`cp_als`](crate::cp_als) uses, `2·nnz·R`), takes the resulting *joint* direction
+/// `D_k = A_k^new − A_k^prev`, and then **searches the line**
+///
+/// ```text
+/// A_k(α) = A_k^prev + α · D_k        (all N factors move together)
+/// ```
+///
+/// for the `α` that minimises `‖X − X̂(α)‖²`, and **applies that α**. `α = 1` reproduces
+/// the plain sweep, `α > 1` extrapolates (this is what breaks CP-ALS *swamps*), and
+/// `α < 1` damps when the joint move overshoots — which it can, because only mode `N−1`
+/// is optimal for the post-sweep factor set.
+///
+/// The search is **exact, not a grid probe**: along that line the squared error is a
+/// polynomial in `α` of degree `2N` whose `2N+1` coefficients are assembled once per
+/// sweep from `N−1` extra MTTKRPs plus `R×R` Gram algebra (see the internal `els`
+/// module). Evaluating the error at *any* `α` is then a Horner evaluation, so the global
+/// minimiser on `[0, 4]` is found by rooting the derivative. Because `α = 1` is always in
+/// the candidate set, the accelerated sweep is **provably never worse than a plain ALS
+/// sweep**, and the final fit costs nothing extra — `p(α*)` *is* the squared error.
+///
+/// # What it actually buys you — measured, not asserted
+///
+/// One accelerated sweep costs `(N+1)·nnz·R` (the `2·nnz·R` sweep plus `(N−1)·nnz·R` of
+/// exact-search MTTKRP probes) against plain CP-ALS's `2·nnz·R` — i.e. **2× per sweep for
+/// a 3-way tensor, 2.5× for a 4-way one**. That per-sweep tax is the exact price of an
+/// exact line search, and there is no cheaper exact variant: the mode-0 MTTKRP is a
+/// degree-`N−1` matrix polynomial, so `N−1` probes are the interpolation floor.
+///
+/// The honest scorecard therefore has three separate axes. Measured on 40³ tensors,
+/// **time to a common fit target**, median of 5, contended box
+/// (`cargo run --release -p tenrso-decomp --example cp_els_bench`):
+///
+/// | tensor                       | sweeps→target | wall→target | final fit `cp_als` → accel |
+/// |------------------------------|:-------------:|:-----------:|:--------------------------:|
+/// | uniform random, rank 10      |   **1.8×**    |   0.9×      | 0.5108 → 0.5108            |
+/// | clean low-rank + small noise |    1.0×       |   1.0×      | 0.2552 → 0.2552            |
+/// | collinear swamp, `c = 0.90`  |   **2.4×**    |   0.9×      | 0.99995 → **1.00000**     |
+/// | collinear swamp, `c = 0.99`  |   **2.4×**    | **1.3×**    | 0.99853 → **0.99895**     |
+/// | swamp `c = 0.99` + noise     |   **1.7×**    |   1.0×      | 0.9486 → 0.9487           |
+/// | collinear swamp, 4-way       |   **2.4×**    |   0.6×      | 0.99919 → **0.99999**     |
+///
+/// Read that as:
+///
+/// * **Iterations to a target: a real, consistent 1.7–2.4× fewer sweeps in swamps.** The
+///   extrapolation direction is exactly what breaks the swamp.
+/// * **Attainable quality: strictly higher in swamps.** In the same budget ELS reaches
+///   fits plain ALS does not (`1.00000` vs `0.99995`, `0.99999` vs `0.99919`) — the
+///   headline benefit, because in a deep swamp plain ALS can need *thousands* more sweeps
+///   to close that gap.
+/// * **Wall clock is roughly break-even, NOT a blanket win.** The 2×–2.5× per-sweep tax
+///   eats most of the sweep-count saving: best case here is **1.3×** faster to target
+///   (deep 3-way swamp), and it is a net **loss** (0.6×) on the 4-way tensor, where the
+///   per-sweep penalty outgrows the sweep saving. There is **no** general wall-clock
+///   speedup to promise, and this doc does not promise one.
+///
+/// **When to reach for it:** ill-conditioned / collinear **3-way** problems where plain
+/// ALS stalls in a swamp and you care about the fit it cannot otherwise reach. On an easy,
+/// well-separated low-rank tensor plain [`cp_als`](crate::cp_als) already converges in a
+/// handful of sweeps and there is nothing to accelerate — ELS then merely pays its probe
+/// overhead for no gain (and for order `N ≥ 4` that overhead makes it slower in wall
+/// clock). What it *never* does is return a worse fit than [`cp_als`](crate::cp_als): the
+/// search always includes `α = 1`, so every sweep is at least as good as the plain sweep
+/// it replaces.
 ///
 /// # Arguments
 ///
 /// * `tensor` - Input tensor to decompose
 /// * `rank` - CP rank (number of components)
-/// * `max_iters` - Maximum number of ALS iterations
+/// * `max_iters` - Maximum number of ALS sweeps
 /// * `tol` - Convergence tolerance for relative fit change
 /// * `init` - Initialization strategy for factor matrices
-/// * `time_limit` - Optional time limit for execution
+/// * `time_limit` - Optional wall-clock limit
+///
+/// # Errors
+///
+/// Invalid rank or tolerance, an order-`< 2` tensor, or a failing linear-algebra solve.
+///
+/// # Complexity
+///
+/// Time: `O(max_iters · ((N+1)·nnz·R + N·Imax·R² + N·R³))`
+/// Space: `O(N·Imax·R)` for the two factor sets plus `O(√nnz·R)` of tree working set.
 ///
 /// # Examples
 ///
@@ -45,7 +111,7 @@ use tenrso_kernels::mttkrp;
 /// let tensor = DenseND::<f64>::random_uniform(&[30, 30, 30], 0.0, 1.0);
 /// let cp = cp_als_accelerated(&tensor, 10, 50, 1e-4, InitStrategy::Random, None).unwrap();
 ///
-/// println!("Converged in {} iterations (faster than standard CP-ALS)", cp.iters);
+/// println!("Converged in {} sweeps", cp.iters);
 /// println!("Final fit: {:.4}", cp.fit);
 /// ```
 pub fn cp_als_accelerated<T>(
@@ -69,9 +135,40 @@ where
         + std::fmt::Display
         + 'static,
 {
+    cp_als_accelerated_traced(tensor, rank, max_iters, tol, init, time_limit)
+        .map(|(decomp, _alphas)| decomp)
+}
+
+/// [`cp_als_accelerated`], additionally returning the **line-searched `α` of every
+/// sweep**.
+///
+/// The public [`CpDecomp`] has nowhere to carry the step history, but the regression
+/// tests have to be able to prove two things that no fit number can show on its own:
+/// that the applied step *is* the searched optimum, and that the search really does
+/// return `α < 1` when the full ALS step overshoots. Hence this crate-internal variant.
+pub(crate) fn cp_als_accelerated_traced<T>(
+    tensor: &DenseND<T>,
+    rank: usize,
+    max_iters: usize,
+    tol: f64,
+    init: InitStrategy,
+    time_limit: Option<std::time::Duration>,
+) -> Result<(CpDecomp<T>, Vec<f64>), CpError>
+where
+    T: Float
+        + FloatConst
+        + NumCast
+        + NumAssign
+        + Sum
+        + Send
+        + Sync
+        + scirs2_core::ndarray_ext::ScalarOperand
+        + scirs2_core::numeric::FromPrimitive
+        + std::fmt::Display
+        + 'static,
+{
     let start_time = std::time::Instant::now();
 
-    // Validate inputs
     if rank == 0 {
         return Err(CpError::InvalidRank(rank));
     }
@@ -79,35 +176,33 @@ where
         return Err(CpError::InvalidTolerance(tol));
     }
 
-    // Initialize factor matrices
+    let tol_t: T = cast_f64(tol, "tol")?;
+
     let mut factors = initialize_factors(tensor, rank, init)?;
     let n_modes = factors.len();
 
-    // Store previous factors for extrapolation
-    let mut prev_factors: Vec<Array2<T>> = factors.to_vec();
+    // Shape-only, built once, reused by every sweep.
+    let tree = AlsDimTree::new(tensor.shape())?;
+    let tensor_view = tensor.view();
 
-    // Extrapolation parameters
-    let mut alpha: T = cast_lit(0.5_f64);
-    let alpha_max: T = cast_lit(0.9_f64);
-    let alpha_min: T = cast_lit(0.1_f64);
+    let tensor_norm_sq_t = compute_norm_squared(tensor);
+    let tensor_norm_sq = tensor_norm_sq_t.to_f64().ok_or_else(|| {
+        CpError::ShapeMismatch("tensor norm is not representable as f64".to_string())
+    })?;
+    let tensor_norm = tensor_norm_sq.sqrt();
 
-    let tol_t: T = cast_f64(tol, "tol")?;
-    let tensor_norm = tensor.frobenius_norm();
-    let tensor_norm_sq = tensor_norm * tensor_norm;
-    let mut prev_fit = T::zero();
     let mut fit = T::zero();
-
-    // Convergence tracking
+    let mut prev_fit = T::zero();
     let mut fit_history = Vec::with_capacity(max_iters);
-    let mut oscillation_count = 0;
+    let mut alpha_history = Vec::with_capacity(max_iters);
+    let mut oscillation_count = 0usize;
     let mut convergence_reason = ConvergenceReason::MaxIterations;
     let mut final_fit_change = T::zero();
-    let mut iters = 0;
+    let mut iters = 0usize;
 
     for iter in 0..max_iters {
         iters = iter + 1;
 
-        // Check time limit
         if let Some(limit) = time_limit {
             if start_time.elapsed() > limit {
                 convergence_reason = ConvergenceReason::TimeLimit;
@@ -115,72 +210,93 @@ where
             }
         }
 
-        // ALS updates for each mode
-        for mode in 0..n_modes {
-            let tensor_view = tensor.view();
-            let factor_views: Vec<_> = factors.iter().map(|f| f.view()).collect();
-            let mttkrp_result = mttkrp(&tensor_view, &factor_views, mode)
-                .map_err(|e| CpError::ShapeMismatch(e.to_string()))?;
+        let prev_factors: Vec<Array2<T>> = factors.clone();
 
-            let gram = compute_gram_hadamard(&factors, mode);
+        // ── One exact Gauss-Seidel ALS sweep (2·nnz·R on the dimension tree) ──────
+        //
+        // Mode 0 is visited first, so its MTTKRP is taken against the *pre-sweep*
+        // factors 1..N-1 — which is exactly the α = 0 interpolation node the error
+        // polynomial needs. Capturing it here makes that node free.
+        let mut mttkrp_0: Option<Array2<T>> = None;
+        {
+            let mut update = |mode: usize,
+                              mttkrp_result: &Array2<T>,
+                              factors: &mut Vec<Array2<T>>|
+             -> Result<(), CpError> {
+                if mode == 0 {
+                    mttkrp_0 = Some(mttkrp_result.clone());
+                }
+                let gram = compute_gram_hadamard(factors, mode);
+                factors[mode] = solve_least_squares(mttkrp_result, &gram)?;
+                Ok(())
+            };
+            tree.gauss_seidel_sweep(&tensor_view, &mut factors, &mut update)?;
+        }
+        let mttkrp_0 = mttkrp_0.ok_or_else(|| {
+            CpError::ShapeMismatch("dimension-tree sweep never visited mode 0".to_string())
+        })?;
 
-            let mut factor_new = solve_least_squares(&mttkrp_result, &gram)?;
+        // ── The line search: exact, over the joint extrapolation direction ────────
+        let polynomial = ErrorPolynomial::build(
+            &tensor_view,
+            &tree,
+            &prev_factors,
+            &factors,
+            &mttkrp_0,
+            tensor_norm_sq,
+        )?;
+        let (alpha, error_sq) = polynomial.minimize(ELS_ALPHA_MIN, ELS_ALPHA_MAX, ELS_REFINE_ITERS);
+        alpha_history.push(alpha);
 
-            // LINE SEARCH: Find optimal step size
-            let alpha_ls = line_search_cp(
-                tensor,
-                &factors,
-                &prev_factors,
-                mode,
-                &factor_new,
-                cast_lit(0.5_f64),
-                5,
-            );
-
-            // Apply extrapolation with line search step size
-            if iter > 0 {
-                let factor_prev = &prev_factors[mode];
-                for i in 0..factor_new.shape()[0] {
-                    for j in 0..factor_new.shape()[1] {
-                        let diff = factor_new[[i, j]] - factor_prev[[i, j]];
-                        factor_new[[i, j]] += alpha_ls * alpha * diff;
+        // ── APPLY the searched optimum. The applied point IS the argmin. ──────────
+        //
+        // α = 1 is the plain sweep result, already in `factors`; anything else is a
+        // genuine re-blend of the two factor sets. α < 1 damps, α > 1 extrapolates.
+        if alpha != 1.0 {
+            let alpha_t: T = cast_f64(alpha, "els alpha")?;
+            for mode in 0..n_modes {
+                let rows = factors[mode].shape()[0];
+                for i in 0..rows {
+                    for r in 0..rank {
+                        let base = prev_factors[mode][[i, r]];
+                        let step = factors[mode][[i, r]] - base;
+                        factors[mode][[i, r]] = base + alpha_t * step;
                     }
                 }
             }
-
-            // Store previous factor before update
-            prev_factors[mode] = factors[mode].clone();
-
-            // Update factor
-            factors[mode] = factor_new;
         }
 
-        // Compute fit
-        fit = compute_fit(tensor, &factors, tensor_norm_sq)?;
+        // ── The fit is free: `error_sq` *is* ‖X − X̂(α*)‖². No reconstruction. ─────
+        let fit_f64 = if tensor_norm > 0.0 {
+            1.0 - error_sq.max(0.0).sqrt() / tensor_norm
+        } else {
+            0.0
+        };
+        let fit_f64 = if fit_f64.is_finite() {
+            fit_f64.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        fit = cast_f64(fit_f64, "fit")?;
         fit_history.push(fit);
 
-        // Adaptive extrapolation strength
-        if iter > 0 {
-            if fit > prev_fit {
-                alpha = (alpha * cast_lit::<T, _>(1.05_f64)).min(alpha_max);
-            } else {
-                alpha = (alpha * cast_lit::<T, _>(0.7_f64)).max(alpha_min);
-                oscillation_count += 1;
-
-                if oscillation_count > 5 && iter > 10 {
-                    convergence_reason = ConvergenceReason::Oscillation;
-                    break;
-                }
-            }
-        }
-
-        // Check convergence
         if iter > 0 {
             final_fit_change = (fit - prev_fit).abs();
-            let relative_change = final_fit_change / (prev_fit.abs() + cast_lit::<T, _>(1e-10_f64));
 
+            // With an exact line search the error cannot increase, so this should stay
+            // at zero; it is kept as an honest tripwire, not as a control knob.
+            if fit < prev_fit {
+                oscillation_count += 1;
+            }
+
+            let relative_change = final_fit_change / (prev_fit.abs() + cast_lit::<T, _>(1e-10_f64));
             if relative_change < tol_t {
                 convergence_reason = ConvergenceReason::FitTolerance;
+                break;
+            }
+
+            if oscillation_count > 5 && iter > 10 {
+                convergence_reason = ConvergenceReason::Oscillation;
                 break;
             }
         }
@@ -188,7 +304,7 @@ where
         prev_fit = fit;
     }
 
-    Ok(CpDecomp {
+    let decomp = CpDecomp {
         factors,
         weights: None,
         fit,
@@ -200,7 +316,9 @@ where
             oscillation_count,
             final_fit_change,
         }),
-    })
+    };
+
+    Ok((decomp, alpha_history))
 }
 
 /// CP decomposition with weighted optimization for tensor completion
@@ -335,24 +453,64 @@ where
                 }
             }
 
-            let mut gram = Array2::<T>::zeros((rank, rank));
+            // ── Per-row weighted normal-equation solve ────────────────────────────
+            //
+            // Weighted CP completion is *not* one least-squares problem per mode: the
+            // observation mask varies from row to row, so each row `i` of the factor
+            // has its own R×R normal system built only from the columns observed in
+            // that very row:
+            //
+            //     G_i = Σ_{j : mask_unfolded[i,j] > 0}  kr[j,:]ᵀ kr[j,:]      (R×R)
+            //     b_i = masked MTTKRP row i  (already assembled above)         (R)
+            //     factors[mode][i,:] = G_i^{-1} · b_i
+            //
+            // Aggregating one Gram over *all* observed (i,j) pairs and applying its
+            // single inverse to every row solves a different, wrong problem — and for
+            // an all-ones mask it inflates the Gram by a factor of `mode_size`, so even
+            // a fully observed tensor is not reproduced. The per-row form is the correct
+            // cost of weighted completion: O(mode_size · (R²·nnz_row + R³)).
+            //
+            // A Tikhonov ridge `λ_i · I` stabilises rows with few (or zero) observed
+            // fibres, where `G_i` is rank-deficient. It is scaled to the row's own Gram,
+            // `λ_i = 1e-8 · tr(G_i)/R`, plus a fixed `1e-12` floor so that a completely
+            // unobserved row (`G_i = 0`, `b_i = 0`) still yields the finite minimum-norm
+            // solution `0` instead of a singular solve. On a well-observed row this ridge
+            // is a ~1e-8 relative perturbation, negligible against the solution.
+            let mut factor_new = Array2::<T>::zeros((mode_size, rank));
+            let rank_t: T = cast_lit(rank);
+            let ridge_rel: T = cast_lit(1e-8_f64);
+            let ridge_floor: T = cast_lit(1e-12_f64);
 
-            for r1 in 0..rank {
-                for r2 in 0..rank {
-                    let mut sum = T::zero();
-                    for i in 0..mode_size {
-                        for j in 0..kr.nrows() {
-                            let observed = mask_unfolded[[i, j]];
-                            if observed > T::zero() {
-                                sum += kr[[j, r1]] * kr[[j, r2]];
+            for i in 0..mode_size {
+                let mut gram_row = Array2::<T>::zeros((rank, rank));
+                for j in 0..kr.nrows() {
+                    if mask_unfolded[[i, j]] > T::zero() {
+                        for r1 in 0..rank {
+                            let kr_j_r1 = kr[[j, r1]];
+                            for r2 in 0..rank {
+                                gram_row[[r1, r2]] += kr_j_r1 * kr[[j, r2]];
                             }
                         }
                     }
-                    gram[[r1, r2]] = sum;
+                }
+
+                let mut trace = T::zero();
+                for r in 0..rank {
+                    trace += gram_row[[r, r]];
+                }
+                let ridge = ridge_rel * trace / rank_t + ridge_floor;
+                for r in 0..rank {
+                    gram_row[[r, r]] += ridge;
+                }
+
+                let b_i = mttkrp_result.row(i).to_owned();
+                let solution =
+                    lstsq(&gram_row.view(), &b_i.view(), None).map_err(CpError::LinalgError)?;
+                for r in 0..rank {
+                    factor_new[[i, r]] = solution.x[r];
                 }
             }
 
-            let factor_new = solve_least_squares(&mttkrp_result, &gram)?;
             factors[mode] = factor_new;
         }
 
@@ -731,4 +889,571 @@ where
         iters,
         convergence: None,
     })
+}
+
+#[cfg(test)]
+mod els_regression {
+    //! Regression tests for the ELS line search in [`cp_als_accelerated`].
+    //!
+    //! # What broke, and what these tests pin down
+    //!
+    //! The previous implementation computed a step size and then **threw it away**: it
+    //! applied `A_prev + (1 + α_ls·α)·D` instead of the searched point `A_prev + α_ls·D`,
+    //! re-purposing the line-searched value as a *momentum gain on top of an already-full
+    //! ALS step*. With `α ∈ [0.1, 0.9]` (and `α_ls` provably identically `1`, since a
+    //! single-mode search along the ALS direction can only ever return `1`), the effective
+    //! step was confined to `[1.1, 1.9]`: **strictly greater than 1, always**. A line
+    //! search that cannot return a step below 1 cannot damp, and damping is the one thing
+    //! a line search exists to do.
+    //!
+    //! `OLD_STEP_RANGE` below is that reachable interval. The tests show the exact error
+    //! polynomial takes its minimum *outside* it — so the old code was structurally
+    //! forced onto a strictly worse point.
+
+    use super::super::els::{ErrorPolynomial, ELS_ALPHA_MAX, ELS_ALPHA_MIN, ELS_REFINE_ITERS};
+    use super::*;
+    use crate::cp_als;
+    use scirs2_core::ndarray_ext::{Array, IxDyn};
+
+    /// Every step the *old* implementation could possibly take: `1 + α_ls·α` with
+    /// `α_ls ≡ 1` and `α` clamped to `[0.1, 0.9]`.
+    const OLD_STEP_RANGE: (f64, f64) = (1.1, 1.9);
+
+    /// Deterministic data generator. The regression must be reproducible, and
+    /// `scirs2_core::random`'s thread RNG is not seedable from a test.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg(seed.wrapping_mul(6364136223846793005).wrapping_add(1))
+        }
+        fn uniform(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+        }
+        fn normal(&mut self) -> f64 {
+            let u1 = self.uniform().max(1e-12);
+            let u2 = self.uniform();
+            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        }
+    }
+
+    /// A CP tensor whose factor columns have pairwise correlation `collinearity`.
+    ///
+    /// High collinearity is the classical CP-ALS **swamp**: the Gram matrices go
+    /// near-singular, the per-mode solves take long swings, and a sweep's modes end up
+    /// strongly coupled — so the *joint* move of all `N` factors at once genuinely
+    /// overshoots and has to be damped. This is the regime the accelerated driver exists
+    /// for, and the regime in which the old always-overstep rule did the most damage.
+    fn collinear_cp_tensor(
+        shape: &[usize],
+        rank: usize,
+        collinearity: f64,
+        seed: u64,
+    ) -> DenseND<f64> {
+        let mut rng = Lcg::new(seed);
+        let n_modes = shape.len();
+
+        let mut factors: Vec<Vec<Vec<f64>>> = Vec::with_capacity(n_modes);
+        for &dim in shape {
+            let base: Vec<f64> = (0..dim).map(|_| rng.normal()).collect();
+            let mut columns = Vec::with_capacity(rank);
+            for _ in 0..rank {
+                let independent: Vec<f64> = (0..dim).map(|_| rng.normal()).collect();
+                let mut column: Vec<f64> = (0..dim)
+                    .map(|i| {
+                        collinearity * base[i]
+                            + (1.0 - collinearity * collinearity).sqrt() * independent[i]
+                    })
+                    .collect();
+                let norm = column.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-12);
+                for value in &mut column {
+                    *value /= norm;
+                }
+                columns.push(column);
+            }
+            factors.push(columns);
+        }
+
+        let mut data = Array::<f64, IxDyn>::zeros(IxDyn(shape));
+        let numel: usize = shape.iter().product();
+        let mut index = vec![0usize; n_modes];
+        for flat in 0..numel {
+            let mut remainder = flat;
+            for mode in (0..n_modes).rev() {
+                index[mode] = remainder % shape[mode];
+                remainder /= shape[mode];
+            }
+            let mut value = 0.0;
+            for r in 0..rank {
+                let mut term = 1.0;
+                for (mode, &i) in index.iter().enumerate() {
+                    term *= factors[mode][r][i];
+                }
+                value += term;
+            }
+            data[IxDyn(&index)] = value;
+        }
+
+        DenseND::from_array(data)
+    }
+
+    /// The regression fixture: a 3-way swamp. `Nnsvd` gives a deterministic,
+    /// *non-orthogonal* (hence strongly coupled) start, which is what makes the joint ALS
+    /// direction overshoot.
+    fn overshoot_fixture() -> (DenseND<f64>, usize, InitStrategy) {
+        (
+            collinear_cp_tensor(&[8, 8, 8], 3, 0.9, 1),
+            3,
+            InitStrategy::Nnsvd,
+        )
+    }
+
+    /// Re-run the driver's sweeps by hand, yielding, for every sweep, the exact error
+    /// polynomial and the factor set the driver ended that sweep on.
+    fn replay(
+        tensor: &DenseND<f64>,
+        rank: usize,
+        init: InitStrategy,
+        sweeps: usize,
+    ) -> Vec<(ErrorPolynomial, f64)> {
+        let tree = AlsDimTree::new(tensor.shape()).expect("tree");
+        let tensor_view = tensor.view();
+        let norm_sq = compute_norm_squared(tensor);
+        let mut factors = initialize_factors(tensor, rank, init).expect("init");
+        let n_modes = factors.len();
+
+        let mut out = Vec::with_capacity(sweeps);
+        for _ in 0..sweeps {
+            let prev: Vec<Array2<f64>> = factors.clone();
+
+            let mut mttkrp_0: Option<Array2<f64>> = None;
+            {
+                let mut update = |mode: usize,
+                                  m: &Array2<f64>,
+                                  f: &mut Vec<Array2<f64>>|
+                 -> Result<(), CpError> {
+                    if mode == 0 {
+                        mttkrp_0 = Some(m.clone());
+                    }
+                    let gram = compute_gram_hadamard(f, mode);
+                    f[mode] = solve_least_squares(m, &gram)?;
+                    Ok(())
+                };
+                tree.gauss_seidel_sweep(&tensor_view, &mut factors, &mut update)
+                    .expect("sweep");
+            }
+            let mttkrp_0 = mttkrp_0.expect("mode 0 is visited first");
+
+            let polynomial =
+                ErrorPolynomial::build(&tensor_view, &tree, &prev, &factors, &mttkrp_0, norm_sq)
+                    .expect("polynomial");
+            let (alpha, _) = polynomial.minimize(ELS_ALPHA_MIN, ELS_ALPHA_MAX, ELS_REFINE_ITERS);
+
+            for mode in 0..n_modes {
+                let rows = factors[mode].shape()[0];
+                factors[mode] = Array2::<f64>::from_shape_fn((rows, rank), |(i, r)| {
+                    prev[mode][[i, r]] + alpha * (factors[mode][[i, r]] - prev[mode][[i, r]])
+                });
+            }
+
+            out.push((polynomial, alpha));
+        }
+        out
+    }
+
+    /// **The bug.** The step the driver applies must *be* the step the search found — not
+    /// that step used as a momentum gain on top of a full ALS step.
+    ///
+    /// Checked two ways: the applied `α` is the global minimiser of the exact error over
+    /// the whole search interval, and the driver's own `α` history agrees with an
+    /// independent replay of the same sweeps.
+    #[test]
+    fn accelerated_applies_exactly_the_searched_optimum() {
+        let (tensor, rank, init) = overshoot_fixture();
+        let sweeps = 40;
+
+        let (_decomp, driver_alphas) =
+            cp_als_accelerated_traced(&tensor, rank, sweeps, 1e-12, init, None)
+                .expect("accelerated CP should succeed");
+        let replayed = replay(&tensor, rank, init, driver_alphas.len());
+
+        for (sweep, ((polynomial, alpha), &driver_alpha)) in
+            replayed.iter().zip(driver_alphas.iter()).enumerate()
+        {
+            assert!(
+                (alpha - driver_alpha).abs() < 1e-12,
+                "sweep {sweep}: driver applied alpha {driver_alpha}, search says {alpha}"
+            );
+
+            // The applied point is the argmin of the exact error over [0, 4].
+            let applied = polynomial.eval(*alpha);
+            for step in 0..=400 {
+                let candidate =
+                    ELS_ALPHA_MIN + (ELS_ALPHA_MAX - ELS_ALPHA_MIN) * (step as f64) / 400.0;
+                let value = polynomial.eval(candidate);
+                assert!(
+                    applied <= value + 1e-9 * applied.abs().max(1.0),
+                    "sweep {sweep}: applied alpha {alpha} gives error {applied:.12e}, but \
+                     alpha {candidate} gives a smaller error {value:.12e}"
+                );
+            }
+        }
+    }
+
+    /// **The concrete failure the old code could not avoid.** On an overshooting sweep the
+    /// exact optimum is *below 1* — the full ALS step is too long and must be damped. The
+    /// old rule was confined to `[1.1, 1.9]`, so it could not merely fail to damp: every
+    /// step available to it was strictly worse than the one this search finds.
+    #[test]
+    fn overshooting_sweep_is_damped_below_one() {
+        let (tensor, rank, init) = overshoot_fixture();
+        let replayed = replay(&tensor, rank, init, 40);
+
+        let damped: Vec<usize> = replayed
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, alpha))| *alpha < 1.0)
+            .map(|(sweep, _)| sweep)
+            .collect();
+
+        assert!(
+            !damped.is_empty(),
+            "the fixture must actually overshoot somewhere: alphas = {:?}",
+            replayed.iter().map(|(_, a)| *a).collect::<Vec<_>>()
+        );
+
+        for &sweep in &damped {
+            let (polynomial, alpha) = &replayed[sweep];
+            let damped_error = polynomial.eval(*alpha);
+
+            // Damping beats the plain, undamped ALS sweep.
+            let full_step_error = polynomial.eval(1.0);
+            assert!(
+                damped_error < full_step_error,
+                "sweep {sweep}: alpha {alpha} < 1 must strictly beat the full ALS step"
+            );
+
+            // ...and beats *everything* the old always-overstep rule could have chosen.
+            let (lo, hi) = OLD_STEP_RANGE;
+            for step in 0..=100 {
+                let old = lo + (hi - lo) * (step as f64) / 100.0;
+                assert!(
+                    damped_error < polynomial.eval(old),
+                    "sweep {sweep}: the old rule's step {old} is not worse than the \
+                     searched optimum {alpha} — the fixture does not demonstrate overshoot"
+                );
+            }
+        }
+    }
+
+    /// End-to-end, through the public API: an exact line search that always includes
+    /// `α = 1` cannot do worse than the plain sweep it accelerates, so the accelerated
+    /// driver must never return a worse fit than [`cp_als`].
+    ///
+    /// The old code failed this: forced to overstep every sweep, it landed at fit 0.9936
+    /// where plain CP-ALS reached 0.9995 on the 40³ `c = 0.9` swamp.
+    #[test]
+    fn accelerated_fit_is_never_worse_than_plain_cp_als() {
+        for (collinearity, seed) in [(0.9f64, 1u64), (0.9, 3), (0.95, 5), (0.99, 7)] {
+            let tensor = collinear_cp_tensor(&[12, 12, 12], 3, collinearity, seed);
+
+            for init in [InitStrategy::Svd, InitStrategy::Nnsvd] {
+                let plain = cp_als(&tensor, 3, 60, 1e-10, init, None).expect("cp_als");
+                let accelerated =
+                    cp_als_accelerated(&tensor, 3, 60, 1e-10, init, None).expect("accelerated");
+
+                assert!(
+                    accelerated.fit >= plain.fit - 1e-9,
+                    "c={collinearity} seed={seed} init={init:?}: accelerated fit {:.9} is \
+                     worse than plain cp_als {:.9}",
+                    accelerated.fit,
+                    plain.fit
+                );
+            }
+        }
+    }
+
+    /// The fit the driver reports is derived from the ELS polynomial rather than from a
+    /// reconstruction, so it has to be checked against an actual reconstruction.
+    #[test]
+    fn reported_fit_matches_an_explicit_reconstruction() {
+        let (tensor, rank, init) = overshoot_fixture();
+        let decomp = cp_als_accelerated(&tensor, rank, 25, 1e-12, init, None).expect("accelerated");
+
+        let reconstructed = compute_reconstruction(&decomp.factors).expect("reconstruct");
+        let mut error_sq = 0.0f64;
+        for (&x, &y) in tensor.view().iter().zip(reconstructed.view().iter()) {
+            error_sq += (x - y) * (x - y);
+        }
+        let expected = 1.0 - error_sq.sqrt() / tensor.frobenius_norm();
+
+        assert!(
+            (decomp.fit - expected).abs() < 1e-9,
+            "reported fit {:.12} != reconstruction fit {:.12}",
+            decomp.fit,
+            expected
+        );
+    }
+
+    /// An exact line search cannot increase the error, so the fit history must be
+    /// monotonically non-decreasing — a property the old momentum rule did not have.
+    #[test]
+    fn fit_history_is_monotone() {
+        let (tensor, rank, init) = overshoot_fixture();
+        let decomp = cp_als_accelerated(&tensor, rank, 40, 1e-12, init, None).expect("accelerated");
+        let convergence = decomp.convergence.expect("convergence info");
+
+        for window in convergence.fit_history.windows(2) {
+            assert!(
+                window[1] >= window[0] - 1e-9,
+                "fit went backwards: {:?}",
+                convergence.fit_history
+            );
+        }
+        assert_eq!(
+            convergence.oscillation_count, 0,
+            "an exact line search must not oscillate"
+        );
+    }
+}
+
+#[cfg(test)]
+mod completion_regression {
+    //! Regression tests for [`cp_completion`].
+    //!
+    //! # What broke, and what these tests pin down
+    //!
+    //! Weighted CP completion fits a CP model to a *partially observed* tensor. For
+    //! each mode, row `i` of the factor is the solution of its **own** R×R normal
+    //! system, assembled only from the fibres observed *in that row*:
+    //!
+    //! ```text
+    //! G_i = Σ_{j : mask[i,j] > 0}  kr[j,:]ᵀ kr[j,:]        b_i = masked-MTTKRP row i
+    //! factors[mode][i,:] = G_i⁻¹ · b_i
+    //! ```
+    //!
+    //! The previous implementation instead built a **single** R×R Gram aggregated over
+    //! *all* observed `(i,j)` pairs and applied its one inverse to every row. Because the
+    //! mask varies per row, that solves the wrong least-squares problem for every row but
+    //! the (accidental) uniform-mask one. The tell-tale side effect: on an *all-ones*
+    //! mask the aggregated Gram equals `mode_size · (krᵀkr)`, so the scale is wrong and a
+    //! *fully observed* tensor is not even reproduced — completion on an all-ones mask
+    //! landed at reconstruction relative error ≈ 0.83 where plain [`cp_als`] reaches
+    //! machine epsilon.
+    //!
+    //! Each test below **fails against the aggregated-Gram code** and passes against the
+    //! per-row solve.
+
+    use super::*;
+    use crate::cp_als;
+    use scirs2_core::ndarray_ext::{Array, IxDyn};
+
+    /// Deterministic LCG — `scirs2_core::random`'s thread RNG is not seedable from a
+    /// test, and these regressions must be reproducible.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg(seed.wrapping_mul(6364136223846793005).wrapping_add(1))
+        }
+        fn uniform(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+        }
+        fn normal(&mut self) -> f64 {
+            let u1 = self.uniform().max(1e-12);
+            let u2 = self.uniform();
+            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        }
+    }
+
+    /// An **exact** rank-`rank` tensor built from random Gaussian factors. A correct
+    /// completion of an exact low-rank tensor with enough observations must recover it
+    /// to solver precision.
+    fn exact_cp_tensor(shape: &[usize], rank: usize, seed: u64) -> DenseND<f64> {
+        let mut rng = Lcg::new(seed);
+        let factors: Vec<Array2<f64>> = shape
+            .iter()
+            .map(|&dim| Array2::from_shape_fn((dim, rank), |_| rng.normal()))
+            .collect();
+        compute_reconstruction(&factors).expect("reconstruct exact tensor")
+    }
+
+    /// `truth` with every entry where `mask == 0` zeroed — the honest completion input:
+    /// the solver never sees a held-out value.
+    fn apply_mask(truth: &DenseND<f64>, mask: &DenseND<f64>) -> DenseND<f64> {
+        let mut arr = truth.view().to_owned();
+        for (a, &m) in arr.iter_mut().zip(mask.view().iter()) {
+            if m == 0.0 {
+                *a = 0.0;
+            }
+        }
+        DenseND::from_array(arr)
+    }
+
+    /// Relative Frobenius error over *all* entries.
+    fn relative_error(truth: &DenseND<f64>, recon: &DenseND<f64>) -> f64 {
+        let mut err = 0.0;
+        let mut nrm = 0.0;
+        for (&t, &r) in truth.view().iter().zip(recon.view().iter()) {
+            err += (t - r) * (t - r);
+            nrm += t * t;
+        }
+        (err / nrm).sqrt()
+    }
+
+    /// Relative Frobenius error restricted to the held-out (`mask == 0`) entries — the
+    /// only quantity that measures whether completion actually *completed*.
+    fn missing_relative_error(
+        truth: &DenseND<f64>,
+        recon: &DenseND<f64>,
+        mask: &DenseND<f64>,
+    ) -> f64 {
+        let mut err = 0.0;
+        let mut nrm = 0.0;
+        for ((&t, &r), &m) in truth
+            .view()
+            .iter()
+            .zip(recon.view().iter())
+            .zip(mask.view().iter())
+        {
+            if m == 0.0 {
+                err += (t - r) * (t - r);
+                nrm += t * t;
+            }
+        }
+        (err / nrm).sqrt()
+    }
+
+    /// **The key regression.** With an all-ones mask, per-row completion is *identical*
+    /// to plain [`cp_als`] (every row's Gram is the same full `krᵀkr`, which equals the
+    /// Hadamard-of-Grams `cp_als` uses). So it must reproduce the exact tensor to solver
+    /// precision **and** match `cp_als`'s reconstruction. The aggregated-Gram code fails
+    /// this catastrophically — it inflates the Gram by `mode_size` and lands near rel
+    /// error 0.83.
+    #[test]
+    fn all_ones_mask_reproduces_cp_als() {
+        let shape = [8, 7, 6];
+        let rank = 2;
+        let tensor = exact_cp_tensor(&shape, rank, 1);
+        let mask = DenseND::from_array(Array::<f64, IxDyn>::ones(IxDyn(&shape)));
+
+        let completion = cp_completion(&tensor, &mask, rank, 300, 1e-10, InitStrategy::Svd)
+            .expect("cp_completion");
+        let als = cp_als(&tensor, rank, 300, 1e-10, InitStrategy::Svd, None).expect("cp_als");
+
+        let recon_c = compute_reconstruction(&completion.factors).expect("recon completion");
+        let recon_a = compute_reconstruction(&als.factors).expect("recon cp_als");
+
+        let err_truth = relative_error(&tensor, &recon_c);
+        assert!(
+            err_truth < 1e-6,
+            "all-ones completion rel error {err_truth:.3e} is not < 1e-6 \
+             (aggregated-Gram bug lands near 0.83)"
+        );
+
+        let err_vs_als = relative_error(&recon_a, &recon_c);
+        assert!(
+            err_vs_als < 1e-6,
+            "completion vs cp_als reconstruction differ by {err_vs_als:.3e} (not < 1e-6)"
+        );
+    }
+
+    /// A high-observation (≈88%) random mask on an exact rank-2 tensor. Every fibre is
+    /// then observed far more than `rank` times, so each per-row Gram is well determined
+    /// and the completion fixed point is the true tensor. Held-out entries must be
+    /// recovered to small error. The aggregated-Gram code cannot (oracle: ≈0.88 on the
+    /// missing entries). Threshold `1e-4` sits ~4 orders below the broken code and well
+    /// above solver precision for an exact low-rank tensor at this observation fraction.
+    #[test]
+    fn high_observation_recovers_missing_entries() {
+        let shape = [10, 9, 8];
+        let rank = 2;
+        let truth = exact_cp_tensor(&shape, rank, 7);
+
+        let observed_fraction = 0.88;
+        let mut rng = Lcg::new(123);
+        let mut mask_arr = Array::<f64, IxDyn>::zeros(IxDyn(&shape));
+        {
+            let mut mask_it = mask_arr.iter_mut();
+            for _ in truth.view().iter() {
+                let m = mask_it.next().expect("mask length matches tensor");
+                if rng.uniform() < observed_fraction {
+                    *m = 1.0;
+                }
+            }
+        }
+        let mask = DenseND::from_array(mask_arr);
+        let observed = apply_mask(&truth, &mask);
+
+        let completion = cp_completion(&observed, &mask, rank, 800, 1e-12, InitStrategy::Svd)
+            .expect("cp_completion");
+        let recon = compute_reconstruction(&completion.factors).expect("recon");
+
+        let missing = missing_relative_error(&truth, &recon, &mask);
+        assert!(
+            missing < 1e-4,
+            "held-out entries recovered only to rel error {missing:.3e} (not < 1e-4)"
+        );
+    }
+
+    /// A low-observation (≈20%) mask with a mode-0 row forced to be *entirely* unobserved,
+    /// so its per-row Gram is `G = 0` and only the ridge keeps the solve well posed. The
+    /// solve must produce finite factors and a finite fit in `[0, 1]` — no NaN/inf from a
+    /// singular system. Exercises the `1e-12` ridge floor directly.
+    #[test]
+    fn degenerate_rows_exercise_ridge_without_nan() {
+        let shape = [6, 5, 4];
+        let rank = 2;
+        let truth = exact_cp_tensor(&shape, rank, 11);
+
+        let mut rng = Lcg::new(99);
+        let mut mask_arr = Array::<f64, IxDyn>::zeros(IxDyn(&shape));
+        {
+            let mut mask_it = mask_arr.iter_mut();
+            for _ in truth.view().iter() {
+                let m = mask_it.next().expect("mask length matches tensor");
+                if rng.uniform() < 0.2 {
+                    *m = 1.0;
+                }
+            }
+        }
+        // Force the entire mode-0 row 0 to be unobserved: G_0 becomes pure ridge.
+        for (idx, m) in mask_arr.indexed_iter_mut() {
+            if idx[0] == 0 {
+                *m = 0.0;
+            }
+        }
+        let mask = DenseND::from_array(mask_arr);
+        let observed = apply_mask(&truth, &mask);
+
+        let completion = cp_completion(&observed, &mask, rank, 50, 1e-8, InitStrategy::Random)
+            .expect("cp_completion");
+
+        for factor in &completion.factors {
+            for &v in factor.iter() {
+                assert!(
+                    v.is_finite(),
+                    "factor entry {v} is not finite (ridge failed)"
+                );
+            }
+        }
+        assert!(
+            completion.fit.is_finite(),
+            "fit {} is not finite",
+            completion.fit
+        );
+        assert!(
+            (0.0..=1.0).contains(&completion.fit),
+            "fit {} is outside [0, 1]",
+            completion.fit
+        );
+    }
 }

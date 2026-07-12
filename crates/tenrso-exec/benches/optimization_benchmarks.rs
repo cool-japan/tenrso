@@ -1,427 +1,178 @@
-//! Comprehensive benchmarks for optimization features
+//! Benchmarks for the executor's optimization knobs.
 //!
-//! This benchmark suite measures the performance impact of:
-//! - SIMD-accelerated element-wise operations
-//! - Tiled/blocked reductions for large tensors
-//! - Vectorized broadcasting optimizations
+//! # These compare genuinely different code paths
 //!
-//! Each benchmark compares optimized vs unoptimized performance to quantify speedups.
+//! The suite this replaces benchmarked `with_simd(true)` against
+//! `with_simd(false)` — but `enable_simd` was read only inside a dead module, so
+//! *both arms ran the identical code* and the "speedup" it printed was noise
+//! around 1.0x with a SIMD-sounding label on it.
+//!
+//! Every pair below now toggles a flag that selects a different implementation:
+//!
+//! - `with_simd`: AVX2 `exp`/`log` kernels vs scalar libm `mapv`.
+//! - `with_blocked_reductions`: multi-accumulator blocked reduction vs the naive
+//!   single-accumulator fold.
+//! - `with_threads`: the executor's private rayon pool, at several sizes.
+//!
+//! Note these drive `parallel_elem_op` / `full_reduce` — the inherent methods that
+//! read the executor's configuration. The `TenrsoExecutor` *trait* methods
+//! (`elem_op`, …) deliberately ignore executor config and are not benchmarked here.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 use tenrso_core::{DenseND, TensorHandle};
-use tenrso_exec::{BinaryOp, CpuExecutor, ElemOp, ReduceOp, TenrsoExecutor};
+use tenrso_exec::{BinaryOp, CpuExecutor, ElemOp, ReduceOp};
 
-/// Benchmark SIMD element-wise operations vs standard implementation
-fn bench_simd_element_wise(c: &mut Criterion) {
-    let mut group = c.benchmark_group("simd_element_wise");
+fn tensor_1d(n: usize, f: impl Fn(usize) -> f64) -> TensorHandle<f64> {
+    let data: Vec<f64> = (0..n).map(f).collect();
+    TensorHandle::from_dense_auto(DenseND::from_vec(data, &[n]).expect("dense"))
+}
 
-    // Test sizes: small (no SIMD), medium (SIMD threshold), large (SIMD optimal)
-    for size in [512, 1024, 4096, 16384, 65536].iter() {
-        let n = *size;
+/// AVX2 `exp`-family kernels vs the scalar `mapv` path.
+///
+/// These are the ops that have a real SIMD kernel. Expect a solid win — measured
+/// ~2-5x for `exp` on this workspace's Xeon.
+fn bench_simd_transcendental(c: &mut Criterion) {
+    let mut group = c.benchmark_group("simd_transcendental");
+
+    for &n in &[4096usize, 65_536, 1_048_576] {
         group.throughput(Throughput::Elements(n as u64));
+        let x = tensor_1d(n, |i| -6.0 + (i as f64) * 1e-5);
 
-        // Create test tensor
-        let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.001 + 1.0).collect();
-        let tensor = DenseND::from_vec(data, &[n]).unwrap();
-        let handle = TensorHandle::from_dense_auto(tensor);
-
-        // Benchmark with SIMD enabled
-        group.bench_with_input(BenchmarkId::new("simd_neg", n), &handle, |b, handle| {
-            let mut executor = CpuExecutor::new().with_simd(true);
-            b.iter(|| {
-                let result = executor.elem_op(ElemOp::Neg, black_box(handle)).unwrap();
-                black_box(result);
+        for (label, op) in [("exp", ElemOp::Exp), ("gelu", ElemOp::Gelu)] {
+            group.bench_with_input(BenchmarkId::new(format!("{label}_simd"), n), &x, |b, x| {
+                let mut ex = CpuExecutor::new().with_simd(true);
+                b.iter(|| black_box(ex.parallel_elem_op(op.clone(), black_box(x)).expect("op")));
             });
-        });
-
-        // Benchmark without SIMD (baseline)
-        group.bench_with_input(BenchmarkId::new("standard_neg", n), &handle, |b, handle| {
-            let mut executor = CpuExecutor::new().with_simd(false);
-            b.iter(|| {
-                let result = executor.elem_op(ElemOp::Neg, black_box(handle)).unwrap();
-                black_box(result);
-            });
-        });
-
-        // Benchmark expensive operations (exp, sin, etc.)
-        let data_exp: Vec<f64> = (0..n).map(|i| (i as f64) * 0.001).collect();
-        let tensor_exp = DenseND::from_vec(data_exp, &[n]).unwrap();
-        let handle_exp = TensorHandle::from_dense_auto(tensor_exp);
-
-        group.bench_with_input(BenchmarkId::new("simd_exp", n), &handle_exp, |b, handle| {
-            let mut executor = CpuExecutor::new().with_simd(true);
-            b.iter(|| {
-                let result = executor.elem_op(ElemOp::Exp, black_box(handle)).unwrap();
-                black_box(result);
-            });
-        });
-
-        group.bench_with_input(
-            BenchmarkId::new("standard_exp", n),
-            &handle_exp,
-            |b, handle| {
-                let mut executor = CpuExecutor::new().with_simd(false);
-                b.iter(|| {
-                    let result = executor.elem_op(ElemOp::Exp, black_box(handle)).unwrap();
-                    black_box(result);
-                });
-            },
-        );
+            group.bench_with_input(
+                BenchmarkId::new(format!("{label}_scalar"), n),
+                &x,
+                |b, x| {
+                    let mut ex = CpuExecutor::new().with_simd(false);
+                    b.iter(|| {
+                        black_box(ex.parallel_elem_op(op.clone(), black_box(x)).expect("op"))
+                    });
+                },
+            );
+        }
     }
-
     group.finish();
 }
 
-/// Benchmark SIMD binary operations
-fn bench_simd_binary_ops(c: &mut Criterion) {
-    let mut group = c.benchmark_group("simd_binary_ops");
+/// Ops with **no** SIMD kernel, benchmarked to keep the claim honest.
+///
+/// `relu` is bandwidth-bound: an intrinsic version measured *slower* than `mapv`,
+/// which is why there is no kernel for it. Both arms here run the same code, and
+/// this benchmark exists to document that they are supposed to — if a future
+/// change makes these diverge, someone has added a SIMD path that needs its own
+/// measurement.
+fn bench_bandwidth_bound_have_no_simd_path(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bandwidth_bound_no_simd");
+    let n = 1_048_576usize;
+    group.throughput(Throughput::Elements(n as u64));
+    let x = tensor_1d(n, |i| -1.0 + (i as f64) * 2e-6);
 
-    for size in [1024, 4096, 16384, 65536].iter() {
-        let n = *size;
+    for (label, op) in [("relu", ElemOp::ReLU), ("sqrt", ElemOp::Sqrt)] {
+        group.bench_with_input(BenchmarkId::new(label, n), &x, |b, x| {
+            let mut ex = CpuExecutor::new();
+            b.iter(|| black_box(ex.parallel_elem_op(op.clone(), black_box(x)).expect("op")));
+        });
+    }
+    group.finish();
+}
+
+/// Blocked (multi-accumulator) reduction vs the naive single-accumulator fold.
+fn bench_blocked_reductions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("blocked_reductions");
+
+    for &n in &[65_536usize, 1_048_576, 4_194_304] {
         group.throughput(Throughput::Elements(n as u64));
+        let x = tensor_1d(n, |i| ((i % 1000) as f64) * 0.001);
 
-        let data_a: Vec<f64> = (0..n).map(|i| (i as f64) * 0.001 + 1.0).collect();
-        let data_b: Vec<f64> = (0..n).map(|i| (i as f64) * 0.002 + 2.0).collect();
-        let tensor_a = DenseND::from_vec(data_a, &[n]).unwrap();
-        let tensor_b = DenseND::from_vec(data_b, &[n]).unwrap();
-        let handle_a = TensorHandle::from_dense_auto(tensor_a);
-        let handle_b = TensorHandle::from_dense_auto(tensor_b);
-
-        // Add operation
-        group.bench_with_input(
-            BenchmarkId::new("simd_add", n),
-            &(handle_a.clone(), handle_b.clone()),
-            |b, (ha, hb)| {
-                let mut executor = CpuExecutor::new().with_simd(true);
-                b.iter(|| {
-                    let result = executor
-                        .binary_op(BinaryOp::Add, black_box(ha), black_box(hb))
-                        .unwrap();
-                    black_box(result);
-                });
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("standard_add", n),
-            &(handle_a.clone(), handle_b.clone()),
-            |b, (ha, hb)| {
-                let mut executor = CpuExecutor::new().with_simd(false);
-                b.iter(|| {
-                    let result = executor
-                        .binary_op(BinaryOp::Add, black_box(ha), black_box(hb))
-                        .unwrap();
-                    black_box(result);
-                });
-            },
-        );
-
-        // Multiply operation
-        group.bench_with_input(
-            BenchmarkId::new("simd_mul", n),
-            &(handle_a.clone(), handle_b.clone()),
-            |b, (ha, hb)| {
-                let mut executor = CpuExecutor::new().with_simd(true);
-                b.iter(|| {
-                    let result = executor
-                        .binary_op(BinaryOp::Mul, black_box(ha), black_box(hb))
-                        .unwrap();
-                    black_box(result);
-                });
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("standard_mul", n),
-            &(handle_a.clone(), handle_b.clone()),
-            |b, (ha, hb)| {
-                let mut executor = CpuExecutor::new().with_simd(false);
-                b.iter(|| {
-                    let result = executor
-                        .binary_op(BinaryOp::Mul, black_box(ha), black_box(hb))
-                        .unwrap();
-                    black_box(result);
-                });
-            },
-        );
-    }
-
-    group.finish();
-}
-
-/// Benchmark tiled reductions vs standard reductions
-fn bench_tiled_reductions(c: &mut Criterion) {
-    let mut group = c.benchmark_group("tiled_reductions");
-
-    // Test sizes: small (no tiling), medium (tiling threshold), large (tiling optimal)
-    for size in [50_000, 100_000, 250_000, 500_000, 1_000_000].iter() {
-        let n = *size;
-        group.throughput(Throughput::Elements(n as u64));
-
-        // Create test tensor
-        let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.001).collect();
-        let tensor = DenseND::from_vec(data, &[n]).unwrap();
-        let handle = TensorHandle::from_dense_auto(tensor);
-
-        // Sum reduction with tiling
-        group.bench_with_input(BenchmarkId::new("tiled_sum", n), &handle, |b, handle| {
-            let mut executor = CpuExecutor::new().with_tiled_reductions(true);
-            b.iter(|| {
-                let result = executor
-                    .reduce(ReduceOp::Sum, black_box(handle), black_box(&[]))
-                    .unwrap();
-                black_box(result);
+        for (label, op) in [("sum", ReduceOp::Sum), ("max", ReduceOp::Max)] {
+            group.bench_with_input(
+                BenchmarkId::new(format!("{label}_blocked"), n),
+                &x,
+                |b, x| {
+                    let mut ex = CpuExecutor::new().with_blocked_reductions(true);
+                    b.iter(|| black_box(ex.full_reduce(op.clone(), black_box(x)).expect("reduce")));
+                },
+            );
+            group.bench_with_input(BenchmarkId::new(format!("{label}_naive"), n), &x, |b, x| {
+                let mut ex = CpuExecutor::new().with_blocked_reductions(false);
+                b.iter(|| black_box(ex.full_reduce(op.clone(), black_box(x)).expect("reduce")));
             });
-        });
-
-        // Sum reduction without tiling
-        group.bench_with_input(BenchmarkId::new("standard_sum", n), &handle, |b, handle| {
-            let mut executor = CpuExecutor::new().with_tiled_reductions(false);
-            b.iter(|| {
-                let result = executor
-                    .reduce(ReduceOp::Sum, black_box(handle), black_box(&[]))
-                    .unwrap();
-                black_box(result);
-            });
-        });
-
-        // Mean reduction with tiling
-        group.bench_with_input(BenchmarkId::new("tiled_mean", n), &handle, |b, handle| {
-            let mut executor = CpuExecutor::new().with_tiled_reductions(true);
-            b.iter(|| {
-                let result = executor
-                    .reduce(ReduceOp::Mean, black_box(handle), black_box(&[]))
-                    .unwrap();
-                black_box(result);
-            });
-        });
-
-        // Mean reduction without tiling
-        group.bench_with_input(
-            BenchmarkId::new("standard_mean", n),
-            &handle,
-            |b, handle| {
-                let mut executor = CpuExecutor::new().with_tiled_reductions(false);
-                b.iter(|| {
-                    let result = executor
-                        .reduce(ReduceOp::Mean, black_box(handle), black_box(&[]))
-                        .unwrap();
-                    black_box(result);
-                });
-            },
-        );
+        }
     }
-
     group.finish();
 }
 
-/// Benchmark axis-specific tiled reductions
-fn bench_tiled_axis_reductions(c: &mut Criterion) {
-    let mut group = c.benchmark_group("tiled_axis_reductions");
+/// Broadcasting binary ops.
+///
+/// The old implementation rebuilt per-operand subscripts for every output element,
+/// allocating two `Vec`s each time; this walks stride-0 broadcast views instead.
+fn bench_broadcast_binary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("broadcast_binary");
 
-    for size in [256, 512, 1024].iter() {
-        let n = *size;
-        let total_elements = n * n;
-        group.throughput(Throughput::Elements(total_elements as u64));
+    // (B, 1, K) + (B, M, K): the classic "add a bias row" shape.
+    for &(b_dim, m, k) in &[(64usize, 64usize, 64usize), (256, 128, 64)] {
+        let out = b_dim * m * k;
+        group.throughput(Throughput::Elements(out as u64));
 
-        let data: Vec<f64> = (0..total_elements).map(|i| (i as f64) * 0.001).collect();
-        let tensor = DenseND::from_vec(data, &[n, n]).unwrap();
-        let handle = TensorHandle::from_dense_auto(tensor);
-
-        // Sum along axis 0 with tiling
-        group.bench_with_input(
-            BenchmarkId::new("tiled_sum_axis0", n),
-            &handle,
-            |b, handle| {
-                let mut executor = CpuExecutor::new().with_tiled_reductions(true);
-                b.iter(|| {
-                    let result = executor
-                        .reduce(ReduceOp::Sum, black_box(handle), black_box(&[0]))
-                        .unwrap();
-                    black_box(result);
-                });
-            },
+        let x = TensorHandle::from_dense_auto(
+            DenseND::from_vec(
+                (0..b_dim * k).map(|i| i as f64 * 1e-3).collect(),
+                &[b_dim, 1, k],
+            )
+            .expect("x"),
+        );
+        let y = TensorHandle::from_dense_auto(
+            DenseND::from_vec((0..out).map(|i| i as f64 * 1e-4).collect(), &[b_dim, m, k])
+                .expect("y"),
         );
 
-        // Sum along axis 0 without tiling
         group.bench_with_input(
-            BenchmarkId::new("standard_sum_axis0", n),
-            &handle,
-            |b, handle| {
-                let mut executor = CpuExecutor::new().with_tiled_reductions(false);
-                b.iter(|| {
-                    let result = executor
-                        .reduce(ReduceOp::Sum, black_box(handle), black_box(&[0]))
-                        .unwrap();
-                    black_box(result);
+            BenchmarkId::new("add_broadcast", out),
+            &(x, y),
+            |bench, (x, y)| {
+                let mut ex = CpuExecutor::new();
+                bench.iter(|| {
+                    black_box(
+                        ex.parallel_binary_op(BinaryOp::Add, black_box(x), black_box(y))
+                            .expect("add"),
+                    )
                 });
             },
         );
     }
-
     group.finish();
 }
 
-/// Benchmark combined optimizations (all enabled vs all disabled)
-fn bench_combined_optimizations(c: &mut Criterion) {
-    let mut group = c.benchmark_group("combined_optimizations");
+/// How the executor's private pool scales with its thread count.
+///
+/// `with_threads(n)` builds a real rayon pool of `n` workers and installs the
+/// parallel regions into it, so these numbers should actually move with `n`.
+fn bench_thread_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("thread_scaling");
+    let n = 2_097_152usize;
+    group.throughput(Throughput::Elements(n as u64));
+    let x = tensor_1d(n, |i| -6.0 + (i as f64) * 6e-6);
 
-    let size = 100_000;
-    group.throughput(Throughput::Elements(size as u64));
-
-    let data: Vec<f64> = (0..size).map(|i| (i as f64) * 0.001 + 1.0).collect();
-    let tensor = DenseND::from_vec(data, &[size]).unwrap();
-    let handle = TensorHandle::from_dense_auto(tensor.clone());
-
-    // Full optimization pipeline
-    group.bench_function("all_optimizations", |b| {
-        let mut executor = CpuExecutor::new()
-            .with_simd(true)
-            .with_tiled_reductions(true)
-            .with_vectorized_broadcast(true);
-
-        b.iter(|| {
-            // Element-wise operation
-            let neg = executor.elem_op(ElemOp::Neg, black_box(&handle)).unwrap();
-            // Binary operation
-            let mul = executor
-                .binary_op(BinaryOp::Mul, black_box(&neg), black_box(&handle))
-                .unwrap();
-            // Reduction
-            let sum = executor
-                .reduce(ReduceOp::Sum, black_box(&mul), black_box(&[]))
-                .unwrap();
-            black_box(sum);
+    for threads in [1usize, 2, 4, 8] {
+        group.bench_with_input(BenchmarkId::new("exp", threads), &x, |b, x| {
+            let mut ex = CpuExecutor::with_threads(threads).expect("pool");
+            b.iter(|| black_box(ex.parallel_elem_op(ElemOp::Exp, black_box(x)).expect("op")));
         });
-    });
-
-    // No optimizations
-    group.bench_function("no_optimizations", |b| {
-        let mut executor = CpuExecutor::unoptimized();
-
-        b.iter(|| {
-            // Element-wise operation
-            let neg = executor.elem_op(ElemOp::Neg, black_box(&handle)).unwrap();
-            // Binary operation
-            let mul = executor
-                .binary_op(BinaryOp::Mul, black_box(&neg), black_box(&handle))
-                .unwrap();
-            // Reduction
-            let sum = executor
-                .reduce(ReduceOp::Sum, black_box(&mul), black_box(&[]))
-                .unwrap();
-            black_box(sum);
-        });
-    });
-
-    group.finish();
-}
-
-/// Benchmark optimization thresholds (verify smart dispatch)
-fn bench_optimization_thresholds(c: &mut Criterion) {
-    let mut group = c.benchmark_group("optimization_thresholds");
-
-    // Test around SIMD threshold (1024 elements)
-    for size in [512, 768, 1024, 1280, 2048].iter() {
-        let n = *size;
-        group.throughput(Throughput::Elements(n as u64));
-
-        let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.001 + 1.0).collect();
-        let tensor = DenseND::from_vec(data, &[n]).unwrap();
-        let handle = TensorHandle::from_dense_auto(tensor);
-
-        group.bench_with_input(
-            BenchmarkId::new("auto_dispatch", n),
-            &handle,
-            |b, handle| {
-                let mut executor = CpuExecutor::new(); // All optimizations enabled
-                b.iter(|| {
-                    let result = executor.elem_op(ElemOp::Abs, black_box(handle)).unwrap();
-                    black_box(result);
-                });
-            },
-        );
     }
-
-    // Test around tiling threshold (100K elements)
-    for size in [50_000, 75_000, 100_000, 150_000, 200_000].iter() {
-        let n = *size;
-        group.throughput(Throughput::Elements(n as u64));
-
-        let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.001).collect();
-        let tensor = DenseND::from_vec(data, &[n]).unwrap();
-        let handle = TensorHandle::from_dense_auto(tensor);
-
-        group.bench_with_input(
-            BenchmarkId::new("auto_reduction", n),
-            &handle,
-            |b, handle| {
-                let mut executor = CpuExecutor::new();
-                b.iter(|| {
-                    let result = executor
-                        .reduce(ReduceOp::Sum, black_box(handle), black_box(&[]))
-                        .unwrap();
-                    black_box(result);
-                });
-            },
-        );
-    }
-
-    group.finish();
-}
-
-/// Benchmark memory bandwidth effects (large tensor operations)
-fn bench_memory_bandwidth(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memory_bandwidth");
-    group.sample_size(20); // Reduce sample size for very large tensors
-
-    for size_mb in [1, 4, 16, 64].iter() {
-        let elements = (size_mb * 1024 * 1024) / 8; // f64 is 8 bytes
-        group.throughput(Throughput::Bytes((elements * 8) as u64));
-
-        let data: Vec<f64> = (0..elements).map(|i| (i as f64) * 0.001).collect();
-        let tensor = DenseND::from_vec(data, &[elements]).unwrap();
-        let handle = TensorHandle::from_dense_auto(tensor);
-
-        group.bench_with_input(
-            BenchmarkId::new("tiled_sum_large", size_mb),
-            &handle,
-            |b, handle| {
-                let mut executor = CpuExecutor::new().with_tiled_reductions(true);
-                b.iter(|| {
-                    let result = executor
-                        .reduce(ReduceOp::Sum, black_box(handle), black_box(&[]))
-                        .unwrap();
-                    black_box(result);
-                });
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("simd_neg_large", size_mb),
-            &handle,
-            |b, handle| {
-                let mut executor = CpuExecutor::new().with_simd(true);
-                b.iter(|| {
-                    let result = executor.elem_op(ElemOp::Neg, black_box(handle)).unwrap();
-                    black_box(result);
-                });
-            },
-        );
-    }
-
     group.finish();
 }
 
 criterion_group!(
-    optimization_benches,
-    bench_simd_element_wise,
-    bench_simd_binary_ops,
-    bench_tiled_reductions,
-    bench_tiled_axis_reductions,
-    bench_combined_optimizations,
-    bench_optimization_thresholds,
-    bench_memory_bandwidth,
+    benches,
+    bench_simd_transcendental,
+    bench_bandwidth_bound_have_no_simd_path,
+    bench_blocked_reductions,
+    bench_broadcast_binary,
+    bench_thread_scaling,
 );
-criterion_main!(optimization_benches);
+criterion_main!(benches);

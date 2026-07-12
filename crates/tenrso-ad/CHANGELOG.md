@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased - 0.1.0-alpha.2]
 
+### Fixed — graph optimizer reported a fabricated metric
+- **`OptimizationStats::fusions_applied` was never a fusion count.** Selecting
+  `OptimizationPass::OperationFusion` ran common subexpression elimination and then reported
+  CSE's node-dedup count under a field documented as "Number of operations fused" (and printed
+  as `Operations fused: {n}`). No `FusedOperation` was ever constructed outside of tests.
+  The field is gone; `OptimizationStats` now carries `cse_nodes_eliminated`, produced by the
+  pass that actually measures it, and `OptimizationPass::OperationFusion` has been renamed to
+  `OptimizationPass::CommonSubexpressionElimination` — the pass it always was.
+
+### Added — operation fusion, for real (`graph_optimizer/`)
+- `compile_fused_plan` / `compile_plan` compile a `ComputationGraph` into an executable
+  `FusionPlan`. Fusion cannot be an in-place rewrite here: the graph is an eager tape (every
+  buffer already exists when a pass runs, so no forward work can be saved) and `Operation` has
+  no fused variants for `ComputationGraph::backward` to dispatch on. The plan therefore owns its
+  own executor.
+- Fused kernels: `MatMulBias`, `MatMulBiasReLU`, `MulAdd`, `AddReLU`. Each writes exactly one
+  buffer (the GEMM output is the result buffer; bias and ReLU are applied in place, in one pass).
+- Fused VJPs need no interior value — a ReLU's mask is recovered from the fused *output* — so the
+  backward pass skips the eliminated buffers too. Correctness is pinned against the unfused plan,
+  against `ComputationGraph::backward`, and against central finite differences
+  (`gradcheck::check_gradient`) for every leaf, bias included.
+- Elementwise VJPs un-broadcast, so a bias of shape `[n]` gets a gradient of shape `[n]`.
+- `PlanExecution::buffers_allocated` / `elements_allocated` report *measured* allocation counts;
+  a 3-layer 64x128 MLP compiles from 10 steps to 4 and allocates 3.4x fewer intermediate elements.
+- `detect_fusion_patterns` now matches on the DAG and enforces the soundness conditions
+  (interior nodes must have exactly one consumer and must not be a requested output). The
+  previous version matched on adjacency in a `Vec` snapshot and checked neither, so it could not
+  have driven a rewrite safely.
+- `examples/graph_fusion.rs` reports the structural savings, verifies the math, and times
+  fused vs. unfused forward+backward.
+
 ### Added (2025-12-06 PM - Latest)
 - **Graph-Based AD Benchmarks** (`benches/graph_benchmarks.rs`) ✨ NEW - 435 lines
   - 8 comprehensive benchmark categories for computation graph performance

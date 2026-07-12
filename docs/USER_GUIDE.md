@@ -384,19 +384,34 @@ three-tensor example.
 use tenrso_exec::ExecHints;
 
 let hints = ExecHints {
-    mask: None,             // Some(MaskPack) to route through masked/sparse einsum
-    subset: None,           // Some(SubsetSpec) for subset reductions
-    prefer_sparse: true,    // prefer sparse representations/kernels when available
-    prefer_lowrank: false,  // prefer CP/Tucker/TT representations when available
-    tile_kb: Some(512),     // requested L2/L3-friendly tile size, in KB
+    mask: None,             // Some(MaskPack): compute only the cells this bitmap selects
+    subset: None,           // Some(SubsetSpec): the same, by flat index (sparse spelling)
+    prefer_sparse: true,    // route through the masked/sparse engine
 };
+
+// Builders are equivalent and usually shorter:
+let hints = ExecHints::new()
+    .with_sparse(true)
+    .with_subset(vec![0, 4, 8], vec![3, 3]); // only the diagonal of a 3x3 output
 ```
 
-`ExecHints` is a *hint*, not a guarantee: whether the executor actually routes
-through a sparse or masked kernel depends on the input `TensorHandle`'s real
-representation and the einsum pattern matching one of the specialized kernels
-(matmul, element-wise, outer product — see `tenrso_sparse::masked_einsum`).
-Unmatched patterns fall back to a generic (slower) contraction loop.
+`ExecHints` describes *which output cells you want*, and every field is read by
+the executor. `mask` and `subset` are two spellings of one selection — a dense
+`Vec<bool>` (`O(output)` memory) and a list of flat row-major indices
+(`O(selected)` memory) — so supplying both at once is an error, not a silent
+precedence rule. Both need `prefer_sparse: true`; that flag is what switches
+`einsum_ex` from the dense GEMM engine to the masked engine.
+
+Whether the masked engine reaches a *specialized* kernel (matmul, element-wise,
+outer product — see `tenrso_sparse::masked_einsum`) depends on the einsum
+pattern; unmatched patterns fall back to a generic masked loop. The selection
+itself is always honoured: unselected output cells are never computed.
+
+There is no `tile_kb` knob and no `prefer_lowrank` knob. `f32`/`f64` contractions
+go to a native `matrixmultiply` GEMM, which does its own register/cache blocking
+and is 4.8-6.1x faster than the portable blocked kernel a user-supplied tile size
+could steer — so a tile budget could only make things slower. And there is no
+low-rank execution path for `einsum_ex` to prefer: it requires dense operands.
 
 ### 5.3 The planner: contraction order and cost estimation
 

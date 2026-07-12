@@ -433,7 +433,7 @@ pub fn max_axis<T: Float + Clone>(tensor: &CooTensor<T>, axis: usize) -> Result<
 
     // Build new shape (remove the reduced axis)
     let mut new_shape = tensor.shape().to_vec();
-    let _axis_size = new_shape.remove(axis);
+    let axis_size = new_shape.remove(axis);
 
     // Handle edge case: reducing last dimension leaves scalar
     if new_shape.is_empty() {
@@ -441,17 +441,21 @@ pub fn max_axis<T: Float + Clone>(tensor: &CooTensor<T>, axis: usize) -> Result<
         return Ok(CooTensor::new(vec![vec![0]], vec![max_val], vec![1])?);
     }
 
-    // For max/min reductions, we need to be careful about implicit zeros
-    // We'll track which positions have been seen
+    // For max reductions we must be careful about implicit zeros. The implicit
+    // zero of a missing entry only participates in the maximum when the slice is
+    // NOT fully populated along the reduction axis. A slice that is fully dense
+    // with all-negative values has its true maximum equal to the largest (least
+    // negative) observed value, never 0. Track the observed count per slice so we
+    // can distinguish "has a structural zero" from "fully populated".
     let mut max_map: HashMap<Vec<usize>, T> = HashMap::new();
-    let mut seen_positions: HashMap<Vec<usize>, bool> = HashMap::new();
+    let mut count_map: HashMap<Vec<usize>, usize> = HashMap::new();
 
     for (idx, &val) in tensor.indices().iter().zip(tensor.values().iter()) {
         // Project index by removing the axis dimension
         let mut proj_idx = idx.clone();
         proj_idx.remove(axis);
 
-        seen_positions.insert(proj_idx.clone(), true);
+        *count_map.entry(proj_idx.clone()).or_insert(0) += 1;
 
         max_map
             .entry(proj_idx.clone())
@@ -463,16 +467,33 @@ pub fn max_axis<T: Float + Clone>(tensor: &CooTensor<T>, axis: usize) -> Result<
             .or_insert(val);
     }
 
-    // For positions with all implicit zeros in the reduced axis, max is 0
-    // But we only include them if they're non-zero or all values along that slice are zero
-
-    // Build result - only include non-zero values
+    // Build result - only include non-zero values.
+    // Slices that are entirely implicit (no observed entries) never appear in
+    // `max_map`; their maximum is the implicit 0, which is omitted from the
+    // sparse result by construction.
     let mut result_indices = Vec::new();
     let mut result_values = Vec::new();
 
     for (idx, val) in max_map {
-        // Compare with zero (implicit values)
-        let final_max = if val > T::zero() { val } else { T::zero() };
+        let count = count_map
+            .get(&idx)
+            .expect("count_map has the same keys as max_map by construction");
+
+        // If we haven't observed every position along the reduced axis, the slice
+        // contains at least one structural (implicit) zero that must be folded in.
+        let has_implicit_zeros = *count < axis_size;
+
+        let final_max = if has_implicit_zeros {
+            // The implicit zero participates: max(max_observed, 0).
+            if val > T::zero() {
+                val
+            } else {
+                T::zero()
+            }
+        } else {
+            // Slice is fully populated; the true max is the max of observed values.
+            val
+        };
 
         // Only include if non-zero
         if final_max.abs() > T::epsilon() {
@@ -891,5 +912,254 @@ mod tests {
         assert!(max_axis(&coo, 2).is_err());
         assert!(min_axis(&coo, 2).is_err());
         assert!(mean_axis(&coo, 2).is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // Regression tests for the "implicit zero" clamp bug in max_axis.
+    //
+    // The old code unconditionally clamped every reduced slice's maximum
+    // against 0. For a slice that is FULLY populated along the reduction
+    // axis with all-negative values, the true maximum is the largest
+    // (least negative) observed value, NOT 0. These tests fail against the
+    // old clamp and pass with the count-aware fix.
+    // ------------------------------------------------------------------
+
+    /// Fully-dense, all-negative slices: max must be the least-negative
+    /// observed value, never the implicit 0 (there is no implicit zero).
+    #[test]
+    fn test_max_axis_fully_dense_all_negative() {
+        // 2x2 matrix, every entry present, all negative.
+        // Reduce along axis 0 (each column fully populated, size 2).
+        let indices = vec![
+            vec![0, 0], // col 0
+            vec![1, 0], // col 0
+            vec![0, 1], // col 1
+            vec![1, 1], // col 1
+        ];
+        let values = vec![-1.0, -3.0, -5.0, -2.0];
+        let coo = CooTensor::new(indices, values, vec![2, 2]).unwrap();
+
+        let result = max_axis(&coo, 0).unwrap();
+        assert_eq!(result.shape(), &[2]);
+
+        let dense = result.to_dense().unwrap();
+        let data = dense.as_array();
+        // Column 0: max(-1, -3) = -1  (NOT 0)
+        // Column 1: max(-5, -2) = -2  (NOT 0)
+        assert_eq!(data[[0]], -1.0);
+        assert_eq!(data[[1]], -2.0);
+        // Both slices are genuinely nonzero maxima -> present in sparse result.
+        assert_eq!(result.nnz(), 2);
+    }
+
+    /// Partially-populated slice with all-negative observed values: the
+    /// structural (implicit) zero wins, so the max is 0. A sibling column
+    /// that is fully populated keeps its true negative max.
+    #[test]
+    fn test_max_axis_partial_all_negative() {
+        // 3x2 matrix, reduce along axis 0 (size 3).
+        // Column 0: rows 0,1 present (partial) -> implicit zero present.
+        // Column 1: rows 0,1,2 present (full)  -> no implicit zero.
+        let indices = vec![
+            vec![0, 0],
+            vec![1, 0], // col 0 partial (2 of 3)
+            vec![0, 1],
+            vec![1, 1],
+            vec![2, 1], // col 1 full (3 of 3)
+        ];
+        let values = vec![-1.0, -2.0, -4.0, -5.0, -6.0];
+        let coo = CooTensor::new(indices, values, vec![3, 2]).unwrap();
+
+        let result = max_axis(&coo, 0).unwrap();
+        assert_eq!(result.shape(), &[2]);
+
+        let dense = result.to_dense().unwrap();
+        let data = dense.as_array();
+        // Column 0: partial -> max(max(-1,-2), 0) = 0
+        assert_eq!(data[[0]], 0.0);
+        // Column 1: full -> max(-4,-5,-6) = -4
+        assert_eq!(data[[1]], -4.0);
+        // Only the fully-populated negative column survives as an entry.
+        assert_eq!(result.nnz(), 1);
+    }
+
+    /// A slice with no observed entries: max is the implicit 0.
+    #[test]
+    fn test_max_axis_empty_slice() {
+        // 2x2 matrix, reduce along axis 0. Column 1 has no entries.
+        let indices = vec![
+            vec![0, 0],
+            vec![1, 0], // col 0 full, all negative
+        ];
+        let values = vec![-1.0, -2.0];
+        let coo = CooTensor::new(indices, values, vec![2, 2]).unwrap();
+
+        let result = max_axis(&coo, 0).unwrap();
+        assert_eq!(result.shape(), &[2]);
+
+        let dense = result.to_dense().unwrap();
+        let data = dense.as_array();
+        // Column 0: full negative -> max(-1,-2) = -1
+        assert_eq!(data[[0]], -1.0);
+        // Column 1: empty -> implicit 0
+        assert_eq!(data[[1]], 0.0);
+        assert_eq!(result.nnz(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Mirror tests for min_axis. min_axis already tracks the observed
+    // count per slice, so it does NOT share the max_axis clamp bug. These
+    // tests document and lock in that correct behavior.
+    // ------------------------------------------------------------------
+
+    /// Fully-dense, all-positive slices: min must be the smallest observed
+    /// positive value, never the implicit 0 (there is no implicit zero).
+    #[test]
+    fn test_min_axis_fully_dense_all_positive() {
+        // 2x2 matrix, every entry present, all positive.
+        let indices = vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![1, 1]];
+        let values = vec![1.0, 3.0, 5.0, 2.0];
+        let coo = CooTensor::new(indices, values, vec![2, 2]).unwrap();
+
+        let result = min_axis(&coo, 0).unwrap();
+        assert_eq!(result.shape(), &[2]);
+
+        let dense = result.to_dense().unwrap();
+        let data = dense.as_array();
+        // Column 0: min(1, 3) = 1  (NOT 0)
+        // Column 1: min(5, 2) = 2  (NOT 0)
+        assert_eq!(data[[0]], 1.0);
+        assert_eq!(data[[1]], 2.0);
+        assert_eq!(result.nnz(), 2);
+    }
+
+    /// Partially-populated all-positive slice: implicit zero wins -> min 0.
+    #[test]
+    fn test_min_axis_partial_all_positive() {
+        // 3x2 matrix, reduce along axis 0 (size 3).
+        let indices = vec![
+            vec![0, 0],
+            vec![1, 0], // col 0 partial (2 of 3)
+            vec![0, 1],
+            vec![1, 1],
+            vec![2, 1], // col 1 full (3 of 3)
+        ];
+        let values = vec![1.0, 2.0, 4.0, 5.0, 6.0];
+        let coo = CooTensor::new(indices, values, vec![3, 2]).unwrap();
+
+        let result = min_axis(&coo, 0).unwrap();
+        let dense = result.to_dense().unwrap();
+        let data = dense.as_array();
+        // Column 0: partial -> min(min(1,2), 0) = 0
+        assert_eq!(data[[0]], 0.0);
+        // Column 1: full -> min(4,5,6) = 4
+        assert_eq!(data[[1]], 4.0);
+        assert_eq!(result.nnz(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Randomized cross-check: max_axis / min_axis must agree with a
+    // densify()-then-reduce reference over tensors of mixed sign and
+    // mixed density (fully-dense, partial, and empty slices all appear).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_max_min_axis_cross_check_dense_reference() {
+        use scirs2_core::ndarray_ext::{Array, Axis, IxDyn};
+        use scirs2_core::random::{SeedableRng, StdRng};
+
+        /// Enumerate every multi-index of `shape` in row-major order.
+        fn all_indices(shape: &[usize]) -> Vec<Vec<usize>> {
+            let total: usize = shape.iter().product();
+            let mut out = Vec::with_capacity(total);
+            for flat in 0..total {
+                let mut rem = flat;
+                let mut idx = vec![0usize; shape.len()];
+                for d in (0..shape.len()).rev() {
+                    idx[d] = rem % shape[d];
+                    rem /= shape[d];
+                }
+                out.push(idx);
+            }
+            out
+        }
+
+        /// Reference max over `axis` on a dense array (implicit zeros already
+        /// materialized as explicit 0.0 by densification).
+        fn dense_max_axis(dense: &Array<f64, IxDyn>, axis: usize) -> Array<f64, IxDyn> {
+            dense.fold_axis(
+                Axis(axis),
+                f64::NEG_INFINITY,
+                |&a, &b| if b > a { b } else { a },
+            )
+        }
+        fn dense_min_axis(dense: &Array<f64, IxDyn>, axis: usize) -> Array<f64, IxDyn> {
+            dense.fold_axis(
+                Axis(axis),
+                f64::INFINITY,
+                |&a, &b| if b < a { b } else { a },
+            )
+        }
+
+        let shapes: [Vec<usize>; 3] = [vec![4, 3], vec![2, 3, 4], vec![5, 5]];
+
+        for (trial, shape) in shapes.iter().enumerate() {
+            for seed in 0..4u64 {
+                let mut rng = StdRng::seed_from_u64(seed + 1000 * trial as u64);
+
+                // Build a dense reference array with mixed-sign, magnitude-bounded
+                // values, sparsifying a random subset to implicit zeros.
+                let mut dense = Array::<f64, _>::zeros(IxDyn(shape));
+                let mut indices: Vec<Vec<usize>> = Vec::new();
+                let mut values: Vec<f64> = Vec::new();
+
+                for idx in all_indices(shape) {
+                    // ~40% of entries are structural zeros -> guarantees a mix of
+                    // fully-dense, partial, and (occasionally) empty slices.
+                    let present = rng.random_f64() > 0.4;
+                    if present {
+                        let sign = if rng.random_f64() > 0.5 { 1.0 } else { -1.0 };
+                        // Magnitude in [0.1, 1.0): safely above `epsilon`, so no
+                        // near-zero values get dropped by the sparsity filter.
+                        let mag = 0.1 + 0.9 * rng.random_f64();
+                        let val = sign * mag;
+                        dense[&idx[..]] = val;
+                        indices.push(idx);
+                        values.push(val);
+                    }
+                }
+
+                let coo = CooTensor::new(indices, values, shape.clone()).unwrap();
+
+                for axis in 0..shape.len() {
+                    // ---- max_axis ----
+                    let got_max = max_axis(&coo, axis).unwrap();
+                    let got_max_dense = got_max.to_dense().unwrap();
+                    let ref_max = dense_max_axis(&dense, axis);
+                    assert_eq!(
+                        got_max_dense.as_array().shape(),
+                        ref_max.shape(),
+                        "max_axis shape mismatch (shape={shape:?}, axis={axis}, seed={seed})"
+                    );
+                    for (g, r) in got_max_dense.as_array().iter().zip(ref_max.iter()) {
+                        assert!(
+                            (g - r).abs() < 1e-9,
+                            "max_axis mismatch: got {g}, ref {r} (shape={shape:?}, axis={axis}, seed={seed})"
+                        );
+                    }
+
+                    // ---- min_axis ----
+                    let got_min = min_axis(&coo, axis).unwrap();
+                    let got_min_dense = got_min.to_dense().unwrap();
+                    let ref_min = dense_min_axis(&dense, axis);
+                    for (g, r) in got_min_dense.as_array().iter().zip(ref_min.iter()) {
+                        assert!(
+                            (g - r).abs() < 1e-9,
+                            "min_axis mismatch: got {g}, ref {r} (shape={shape:?}, axis={axis}, seed={seed})"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

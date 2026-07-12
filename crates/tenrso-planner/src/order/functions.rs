@@ -962,58 +962,6 @@ pub fn genetic_algorithm_planner(
     build_plan_from_order(spec, shapes, hints, &best.0)
 }
 
-/// Refine a plan using local search
-///
-/// Takes an existing plan and attempts to improve it by trying local modifications:
-/// - Swapping adjacent contractions
-/// - Trying alternative contraction orders for subsets
-///
-/// # Algorithm
-///
-/// 1. Start with input plan
-/// 2. Try all adjacent swaps
-/// 3. Accept first improvement found
-/// 4. Repeat until no improvement for max_no_improve iterations
-///
-/// # Use Cases
-///
-/// - Post-process greedy/beam search plans
-/// - Fine-tune DP plans with additional constraints
-/// - Polish plans before execution
-pub fn refine_plan(
-    original_plan: &Plan,
-    _spec: &EinsumSpec,
-    _shapes: &[Vec<usize>],
-    _hints: &PlanHints,
-    max_iterations: usize,
-) -> Result<Plan> {
-    let mut current_plan = original_plan.clone();
-    let mut current_cost = current_plan.estimated_flops;
-    let mut no_improve_count = 0;
-    for _iteration in 0..max_iterations {
-        let mut improved = false;
-        for i in 0..current_plan.nodes.len().saturating_sub(1) {
-            let mut neighbor_plan = current_plan.clone();
-            neighbor_plan.nodes.swap(i, i + 1);
-            let neighbor_cost = neighbor_plan.nodes.iter().map(|n| n.cost).sum::<f64>();
-            if neighbor_cost < current_cost {
-                current_plan = neighbor_plan;
-                current_cost = neighbor_cost;
-                improved = true;
-                no_improve_count = 0;
-                break;
-            }
-        }
-        if !improved {
-            no_improve_count += 1;
-            if no_improve_count >= 10 {
-                break;
-            }
-        }
-    }
-    current_plan.estimated_flops = current_cost;
-    Ok(current_plan)
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1492,31 +1440,12 @@ mod tests {
         let plan2 = simulated_annealing_planner(&spec, &shapes, &hints, 100.0, 0.95, 50).unwrap();
         assert_eq!(plan1.nodes.len(), plan2.nodes.len());
     }
-    #[test]
-    fn test_refine_plan_improves_or_maintains() {
-        let spec = EinsumSpec::parse("ij,jk,kl->il").unwrap();
-        let shapes = vec![vec![10, 100], vec![100, 10], vec![10, 10]];
-        let hints = PlanHints::default();
-        let original_plan = greedy_planner(&spec, &shapes, &hints).unwrap();
-        let original_cost = original_plan.estimated_flops;
-        let refined_plan = refine_plan(&original_plan, &spec, &shapes, &hints, 100).unwrap();
-        let refined_cost = refined_plan.estimated_flops;
-        assert!(
-            refined_cost <= original_cost,
-            "Refined cost {} should be <= original cost {}",
-            refined_cost,
-            original_cost
-        );
-    }
-    #[test]
-    fn test_refine_plan_single_node() {
-        let spec = EinsumSpec::parse("ij,jk->ik").unwrap();
-        let shapes = vec![vec![10, 20], vec![20, 30]];
-        let hints = PlanHints::default();
-        let original_plan = greedy_planner(&spec, &shapes, &hints).unwrap();
-        let refined_plan = refine_plan(&original_plan, &spec, &shapes, &hints, 10).unwrap();
-        assert_eq!(refined_plan.nodes.len(), original_plan.nodes.len());
-    }
+    // NOTE: `refine_plan`'s tests now live in `order::refine`, alongside the
+    // implementation. The two tests that used to sit here only asserted
+    // `refined <= original` and an unchanged node count — both of which the old
+    // no-op implementation satisfied trivially. Their strengthened successors are
+    // `refine_improves_or_maintains_a_greedy_plan` and
+    // `refine_single_step_plan_is_a_fixed_point`.
     #[test]
     fn test_planner_trait_polymorphism_all_planners() {
         fn test_planner(planner: &dyn Planner, expected_nodes: usize) {

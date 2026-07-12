@@ -18,6 +18,7 @@
 //! - `conv_pool_tests`   - max_pool_1d/2d, avg_pool_1d/2d, conv1d/2d/3d
 //! - `linalg_tests`      - determinant, matrix_inverse, solve
 //! - `pool_tests`        - memory pool behaviour and automatic-pooling integration
+//! - `thread_pool_tests` - `with_threads(n)` really bounds parallelism to `n`
 
 mod conv_pool_tests;
 mod einsum_tests;
@@ -27,3 +28,4 @@ mod linalg_tests;
 mod pool_tests;
 mod reduction_tests;
 mod shape_tests;
+mod thread_pool_tests;

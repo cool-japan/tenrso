@@ -8,12 +8,22 @@
 //! | operands | path |
 //! |----------|------|
 //! | 1 | native single-operand einsum (permute / diagonal / sum) |
-//! | 2 | [`tenrso_exec::ops::execute_dense_contraction`] |
+//! | 2 | [`tenrso_exec::ops::execute_dense_contraction_accelerated`] |
 //! | ≥3 | [`tenrso_exec::einsum_ex`] (cost-based contraction path from the planner) |
 //!
 //! A single-operand einsum is implemented here because the executor's planner
 //! has no pairwise contraction to schedule for one input and would return the
 //! operand unchanged — silently wrong for `"ij->ji"`.
+//!
+//! The two-operand path deliberately uses the *accelerated* entry point rather
+//! than the plain [`tenrso_exec::ops::execute_dense_contraction`]: for `f32` /
+//! `f64` it downcasts through [`std::any::Any`] and hands the inner product to
+//! `ndarray`'s `Array2::dot` (pure-Rust `matrixmultiply`, packed and
+//! register-blocked), and for every other standard scalar it runs the blocked
+//! kernel in parallel. [`AdScalar`] already requires `'static`, which is the
+//! only extra bound that dispatch needs. [`crate::vjp::EinsumVjp`] — the
+//! backward pass — has always taken that path; the forward pass now matches it,
+//! so a contraction and its adjoint run on the same kernel.
 //!
 //! # Backward
 //!
@@ -37,7 +47,7 @@
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use tenrso_core::{DenseND, TensorHandle};
-use tenrso_exec::ops::execute_dense_contraction;
+use tenrso_exec::ops::execute_dense_contraction_accelerated;
 use tenrso_exec::{einsum_ex, ExecHints};
 use tenrso_planner::EinsumSpec;
 
@@ -75,7 +85,7 @@ where
 
         match inputs.len() {
             1 => unary_einsum_forward(&spec.inputs[0], &spec.output, &inputs[0], &dims),
-            2 => execute_dense_contraction(&spec, &inputs[0], &inputs[1]),
+            2 => execute_dense_contraction_accelerated(&spec, &inputs[0], &inputs[1]),
             _ => nary_einsum(spec_str, inputs),
         }
     }
@@ -130,9 +140,9 @@ where
 /// Validate the spec against the actual operand shapes and return the extent of
 /// every index.
 ///
-/// This closes a real hole in the executor: `execute_dense_contraction` falls back
-/// to an extent of `1` for an index it cannot find, which would silently produce a
-/// wrong-shaped result instead of an error.
+/// This closes a real hole in the executor: its dense-contraction entry points
+/// fall back to an extent of `1` for an index they cannot find, which would
+/// silently produce a wrong-shaped result instead of an error.
 fn validate_spec<T: AdScalar>(
     spec: &EinsumSpec,
     inputs: &[DenseND<T>],
@@ -266,6 +276,10 @@ fn nary_einsum<T: AdScalar>(spec: &str, inputs: &[DenseND<T>]) -> Result<DenseND
 }
 
 /// Contract an arbitrary operand list into `output_subscript`.
+///
+/// Mirrors [`EinsumRule::forward`]'s dispatch exactly, including the native-GEMM
+/// two-operand path, so a general adjoint is never slower than the forward it
+/// differentiates.
 fn contract<T: AdScalar>(
     subscripts: &[String],
     operands: &[DenseND<T>],
@@ -278,7 +292,7 @@ fn contract<T: AdScalar>(
     match operands.len() {
         0 => bail!("cannot contract an empty operand list ('{spec_str}')"),
         1 => unary_einsum_forward(&spec.inputs[0], &spec.output, &operands[0], dims),
-        2 => execute_dense_contraction(&spec, &operands[0], &operands[1]),
+        2 => execute_dense_contraction_accelerated(&spec, &operands[0], &operands[1]),
         _ => nary_einsum(&spec_str, operands),
     }
 }
@@ -503,6 +517,201 @@ mod tests {
         (0..n)
             .map(|i| ((i as f64) * 0.53 + offset).cos() + 1.25)
             .collect()
+    }
+
+    /// Fully independent naive two-operand einsum: one accumulator per output
+    /// cell, a plain nested walk over the whole index space, no blocking, no
+    /// GEMM, no code shared with `tenrso-exec`.
+    ///
+    /// This is the oracle for the native-GEMM forward path: it pins down operand
+    /// orientation (a transposed operand cannot survive it) *and* the value.
+    fn naive_binary_einsum(spec_str: &str, a: &DenseND<f64>, b: &DenseND<f64>) -> DenseND<f64> {
+        let spec = EinsumSpec::parse(spec_str).expect("spec");
+        let subscripts = [spec.inputs[0].as_str(), spec.inputs[1].as_str()];
+        let operands = [a, b];
+
+        // Extent of every index, taken straight from the operands.
+        let mut dims: HashMap<char, usize> = HashMap::new();
+        for (subscript, tensor) in subscripts.iter().zip(operands.iter()) {
+            for (axis, index) in subscript.chars().enumerate() {
+                dims.insert(index, tensor.shape()[axis]);
+            }
+        }
+
+        // Every index, output ones first so the loop nest is easy to reason about.
+        let mut all: Vec<char> = spec.output.chars().collect();
+        for subscript in &subscripts {
+            for index in subscript.chars() {
+                if !all.contains(&index) {
+                    all.push(index);
+                }
+            }
+        }
+        let extents: Vec<usize> = all.iter().map(|index| dims[index]).collect();
+
+        let output_shape: Vec<usize> = spec.output.chars().map(|index| dims[&index]).collect();
+        let output_strides = row_major_strides(&output_shape);
+        let mut values = vec![0.0f64; output_shape.iter().product::<usize>().max(1)];
+
+        let total: usize = extents.iter().product();
+        let mut assignment = vec![0usize; all.len()];
+        for linear in 0..total {
+            linear_to_multi(linear, &extents, &mut assignment);
+            let position = |index: char| -> usize {
+                assignment[all
+                    .iter()
+                    .position(|candidate| *candidate == index)
+                    .expect("index is in `all`")]
+            };
+
+            // Row-major offset of this assignment inside each operand.
+            let offset = |operand: usize| -> usize {
+                let strides = row_major_strides(operands[operand].shape());
+                subscripts[operand]
+                    .chars()
+                    .enumerate()
+                    .map(|(axis, index)| position(index) * strides[axis])
+                    .sum()
+            };
+
+            let out_linear: usize = spec
+                .output
+                .chars()
+                .enumerate()
+                .map(|(axis, index)| position(index) * output_strides[axis])
+                .sum();
+
+            values[out_linear] += a.as_slice()[offset(0)] * b.as_slice()[offset(1)];
+        }
+
+        DenseND::from_vec(values, &output_shape).expect("reference tensor")
+    }
+
+    /// The native-GEMM forward must stay inside the *classical* forward-error
+    /// bound for a dot product.
+    ///
+    /// Switching the two-operand forward from the blocked triple loop to
+    /// `matrixmultiply` changes the order in which the `k` products are summed, so
+    /// the last bits of the result move. What must *not* change is that the kernel
+    /// is backward stable: for `c = Σ_k a_k · b_k` computed in any order,
+    ///
+    /// ```text
+    /// |ĉ − c| ≤ γ_k · Σ_k |a_k · b_k|,   γ_k = k·u / (1 − k·u),   u = 2^-53
+    /// ```
+    ///
+    /// (Higham, *Accuracy and Stability of Numerical Algorithms*, §3.1). This
+    /// holds for *every* summation order, so it is a tolerance that does not have
+    /// to be re-tuned when the kernel changes — unlike an `assert!(a == b)` on two
+    /// kernels, which would forbid the switch outright, and unlike a magic epsilon,
+    /// which would just be re-tuned until green.
+    ///
+    /// The reference is Kahan-compensated, whose own error is `O(u)` independent of
+    /// `k` — effectively exact at this size.
+    #[test]
+    fn test_binary_forward_is_backward_stable() {
+        let rule = EinsumRule::new();
+
+        let (m, k, n) = (64usize, 96usize, 80usize);
+        let a = DenseND::from_vec(ramp(m * k, 0.31), &[m, k]).unwrap();
+        let b = DenseND::from_vec(ramp(k * n, 1.87), &[k, n]).unwrap();
+
+        let out = rule
+            .forward(&[a.clone(), b.clone()], &OpParams::einsum("ij,jk->ik"))
+            .expect("forward");
+
+        let unit_roundoff = f64::EPSILON / 2.0;
+        let gamma_k = (k as f64) * unit_roundoff / (1.0 - (k as f64) * unit_roundoff);
+
+        let (sa, sb) = (a.as_slice(), b.as_slice());
+        let mut worst_ratio = 0.0f64;
+
+        for i in 0..m {
+            for j in 0..n {
+                // Kahan-compensated reference, and the magnitude sum that scales
+                // the bound.
+                let mut sum = 0.0f64;
+                let mut compensation = 0.0f64;
+                let mut magnitude = 0.0f64;
+                for kk in 0..k {
+                    let term = sa[i * k + kk] * sb[kk * n + j];
+                    magnitude += term.abs();
+                    let y = term - compensation;
+                    let t = sum + y;
+                    compensation = (t - sum) - y;
+                    sum = t;
+                }
+
+                let error = (out.as_slice()[i * n + j] - sum).abs();
+                let bound = gamma_k * magnitude;
+                assert!(
+                    error <= bound,
+                    "({i},{j}): |error| {error:.3e} exceeds the backward-stability bound \
+                     {bound:.3e} (gamma_k={gamma_k:.3e}) — the GEMM is not merely reassociating, \
+                     it is wrong"
+                );
+                worst_ratio = worst_ratio.max(error / bound.max(f64::MIN_POSITIVE));
+            }
+        }
+
+        // Sanity: the bound must not be vacuous. A kernel that summed in a truly
+        // pathological order would sit near 1.0; a sane one sits orders below.
+        assert!(
+            worst_ratio < 1.0,
+            "error/bound ratio {worst_ratio} must be below 1"
+        );
+    }
+
+    #[test]
+    fn test_binary_forward_matches_naive_reference() {
+        let rule = EinsumRule::new();
+
+        // Shapes large enough that `matrixmultiply` actually reaches its packed
+        // micro-kernel (m, n, k all > its 8×4 register block), and every operand
+        // extent is distinct so a transposed operand cannot accidentally agree.
+        let cases: [(&str, Vec<usize>, Vec<usize>); 6] = [
+            ("ij,jk->ik", vec![13, 17], vec![17, 11]),
+            // Non-identity output permutation: the GEMM emits `ik`, the caller
+            // wants `ki`, so the gather afterwards must transpose.
+            ("ij,jk->ki", vec![13, 17], vec![17, 11]),
+            // Contract over the *leading* axis of both operands.
+            ("ij,ik->jk", vec![19, 7], vec![19, 5]),
+            // Batched.
+            ("bij,bjk->bik", vec![3, 9, 12], vec![3, 12, 6]),
+            // Batched with a permuted output.
+            ("bij,bjk->kbi", vec![3, 9, 12], vec![3, 12, 6]),
+            // Full contraction to a scalar.
+            ("ij,ij->", vec![11, 13], vec![11, 13]),
+        ];
+
+        for (spec, shape_a, shape_b) in cases {
+            let a = DenseND::from_vec(ramp(shape_a.iter().product(), 0.31), &shape_a).unwrap();
+            let b = DenseND::from_vec(ramp(shape_b.iter().product(), 1.87), &shape_b).unwrap();
+
+            let actual = rule
+                .forward(&[a.clone(), b.clone()], &OpParams::einsum(spec))
+                .unwrap_or_else(|e| panic!("forward '{spec}': {e:#}"));
+            let expected = naive_binary_einsum(spec, &a, &b);
+
+            assert_eq!(actual.shape(), expected.shape(), "shape for '{spec}'");
+
+            // The two differ only in summation order. The contracted extents here
+            // are ≤ 17 and the values are O(1), so a relative bound of 1e-13 is
+            // orders of magnitude above the ~k·eps ≈ 4e-15 worst case and still
+            // tight enough that a genuinely wrong (e.g. transposed) result — which
+            // is O(1) away — cannot slip through.
+            for (index, (lhs, rhs)) in actual
+                .as_slice()
+                .iter()
+                .zip(expected.as_slice().iter())
+                .enumerate()
+            {
+                let scale = rhs.abs().max(1.0);
+                assert!(
+                    (lhs - rhs).abs() <= 1e-13 * scale,
+                    "'{spec}' element {index}: {lhs} vs reference {rhs}"
+                );
+            }
+        }
     }
 
     #[test]

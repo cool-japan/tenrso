@@ -21,8 +21,11 @@ fn test_memory_pool_stats() {
 
 #[test]
 fn test_executor_with_threads() {
-    let executor = CpuExecutor::with_threads(4);
-    assert_eq!(executor.num_threads, 4);
+    let executor = CpuExecutor::with_threads(4).expect("4-thread pool");
+    assert_eq!(executor.num_threads(), 4);
+    // The configured count is only worth anything if it is also the *effective*
+    // one; `thread_pool_tests` proves the parallel regions really run on it.
+    assert_eq!(executor.effective_num_threads(), 4);
 }
 
 #[test]

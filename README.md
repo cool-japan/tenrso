@@ -67,15 +67,11 @@ let tensor = TensorHandle::from_dense(data, axes);
 ```rust
 use tenrso_exec::{einsum_ex, ExecHints};
 
-// Unified contraction with automatic optimization
+// Unified contraction with automatic optimization.
+// f32/f64 dispatch to a native matrixmultiply GEMM, parallel over the batch.
 let y = einsum_ex::<f32>("bij,bjk->bik")
     .inputs(&[A, B])
-    .hints(&ExecHints{
-        prefer_lowrank: true,
-        prefer_sparse: true,
-        tile_kb: Some(512),
-        ..Default::default()
-    })
+    .hints(&ExecHints::default())
     .run()?;
 ```
 

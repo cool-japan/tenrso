@@ -45,3 +45,7 @@ harness = false
 [[bench]]
 name = "pooled_ops_benchmarks"
 harness = false
+
+[[bench]]
+name = "optimization_benchmarks"
+harness = false
