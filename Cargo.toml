@@ -80,9 +80,9 @@ oxicuda-memory = "0.5.1"
 oxicuda-blas = "0.5.1"
 
 # SciRS2 ecosystem (MANDATORY - see SCIRS2_INTEGRATION_POLICY.md)
-scirs2-core = { version = "0.6.1", features = ["array", "random", "parallel"] }
-scirs2-linalg = { version = "0.6.1" }
-scirs2-fft = { version = "0.6.1" }
+scirs2-core = { version = "0.6.2", features = ["array", "random", "parallel"] }
+scirs2-linalg = { version = "0.6.2" }
+scirs2-fft = { version = "0.6.2" }
 
 # Tensorlogic (optional, default-off; enabled by tenrso-ad's `tensorlogic` feature)
 tensorlogic-infer = { version = "0.1.1", default-features = false }
