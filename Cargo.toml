@@ -75,9 +75,9 @@ blake3 = "1.8.5"
 # unaffected. Version 0.4.1 matches what scirs2-fft / torsh already lock, so a
 # downstream lockfile keeps a single copy. Optional-ness is declared per member
 # crate (Workspace Policy: no version pin in member Cargo.toml).
-oxicuda-driver = "0.5.4"
-oxicuda-memory = "0.5.4"
-oxicuda-blas = "0.5.4"
+oxicuda-driver = "0.5.5"
+oxicuda-memory = "0.5.5"
+oxicuda-blas = "0.5.5"
 
 # SciRS2 ecosystem (MANDATORY - see SCIRS2_INTEGRATION_POLICY.md)
 scirs2-core = { version = "0.6.5", features = ["array", "random", "parallel"] }
