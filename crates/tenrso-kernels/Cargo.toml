@@ -7,6 +7,8 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 description = "Tensor kernel operations: Khatri-Rao, Kronecker, Hadamard, n-mode products, MTTKRP"
+categories = ["algorithms", "mathematics", "science"]
+keywords = ["tenrso", "khatri-rao", "kronecker", "mttkrp", "hadamard"]
 
 [dependencies]
 tenrso-core.workspace = true

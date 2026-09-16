@@ -7,6 +7,8 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 description = "Automatic differentiation support for TenRSo"
+categories = ["artificial-intelligence", "algorithms", "mathematics"]
+keywords = ["tenrso", "autodiff", "gradient", "backprop", "hessian"]
 
 [dependencies]
 tenrso-core.workspace = true

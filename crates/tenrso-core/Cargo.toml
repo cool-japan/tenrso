@@ -7,6 +7,8 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 description = "Core tensor types, views, and axis metadata for TenRSo"
+categories = ["data-structures", "science", "mathematics"]
+keywords = ["tenrso", "tensor", "multidimensional", "ndarray", "reshape"]
 
 [dependencies]
 anyhow.workspace = true

@@ -7,6 +7,8 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 description = "Unified execution API for TenRSo"
+categories = ["algorithms", "mathematics", "science"]
+keywords = ["tenrso", "einsum", "tensor-contraction", "execution", "gemm"]
 
 [dependencies]
 tenrso-core.workspace = true

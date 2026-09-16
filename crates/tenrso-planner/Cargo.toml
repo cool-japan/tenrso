@@ -7,6 +7,8 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 description = "Contraction order planning and optimization for TenRSo"
+categories = ["algorithms", "science", "mathematics", "caching"]
+keywords = ["tenrso", "einsum", "contraction-order", "cost-model", "planner"]
 
 [dependencies]
 tenrso-core.workspace = true

@@ -7,6 +7,8 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 description = "Out-of-core processing with Arrow/Parquet for TenRSo"
+categories = ["filesystem", "caching", "concurrency", "science"]
+keywords = ["tenrso", "out-of-core", "arrow", "parquet", "memory-mapped"]
 
 [dependencies]
 tenrso-core.workspace = true

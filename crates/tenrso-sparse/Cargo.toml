@@ -7,6 +7,8 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 description = "Sparse tensor formats and operations for TenRSo"
+categories = ["data-structures", "algorithms", "mathematics", "science", "visualization"]
+keywords = ["tenrso", "sparse-matrix", "csr", "coo", "iterative-solver"]
 
 [dependencies]
 tenrso-core.workspace = true
