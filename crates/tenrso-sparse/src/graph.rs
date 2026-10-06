@@ -292,9 +292,7 @@ pub fn dijkstra<T: Float + std::cmp::PartialOrd>(
             }
 
             let new_dist = d + weight;
-            if dist[v].is_none()
-                || new_dist < dist[v].expect("dist[v] is Some because is_none() returned false")
-            {
+            if dist[v].is_none_or(|current| new_dist < current) {
                 dist[v] = Some(new_dist);
                 pq.push((new_dist, v));
             }
@@ -467,9 +465,11 @@ pub fn strongly_connected_components<T: Float>(graph: &CsrMatrix<T>) -> Vec<Vec<
         lowlinks: &mut [usize],
         sccs: &mut Vec<Vec<usize>>,
     ) {
-        // Set the depth index for v
-        indices[v] = Some(*index);
-        lowlinks[v] = *index;
+        // Set the depth index for v (`indices[v]` is assigned only here, and
+        // `strongconnect(v)` runs once, so `v_index` stays its value)
+        let v_index = *index;
+        indices[v] = Some(v_index);
+        lowlinks[v] = v_index;
         *index += 1;
         stack.push(v);
         on_stack[v] = true;
@@ -481,19 +481,22 @@ pub fn strongly_connected_components<T: Float>(graph: &CsrMatrix<T>) -> Vec<Vec<
         for idx in row_start..row_end {
             let w = graph.col_indices()[idx];
 
-            if indices[w].is_none() {
-                // Successor w has not been visited; recurse
-                strongconnect(w, graph, index, stack, on_stack, indices, lowlinks, sccs);
-                lowlinks[v] = lowlinks[v].min(lowlinks[w]);
-            } else if on_stack[w] {
-                // Successor w is in stack and hence in current SCC
-                lowlinks[v] = lowlinks[v]
-                    .min(indices[w].expect("indices[w] is Some: is_none() was checked above"));
+            match indices[w] {
+                None => {
+                    // Successor w has not been visited; recurse
+                    strongconnect(w, graph, index, stack, on_stack, indices, lowlinks, sccs);
+                    lowlinks[v] = lowlinks[v].min(lowlinks[w]);
+                }
+                Some(w_index) if on_stack[w] => {
+                    // Successor w is in stack and hence in current SCC
+                    lowlinks[v] = lowlinks[v].min(w_index);
+                }
+                Some(_) => {}
             }
         }
 
         // If v is a root node, pop the stack to create an SCC
-        if lowlinks[v] == indices[v].expect("indices[v] is set by strongconnect before returning") {
+        if lowlinks[v] == v_index {
             let mut scc = Vec::new();
 
             loop {
@@ -638,14 +641,14 @@ pub fn is_bipartite<T: Float>(graph: &CsrMatrix<T>) -> bool {
             continue;
         }
 
+        // Each queue entry carries the colour its vertex was given when it was
+        // queued; `color[x]` is assigned only while it is `None`, so the two
+        // never disagree.
         let mut queue = VecDeque::new();
-        queue.push_back(start);
+        queue.push_back((start, 0));
         color[start] = Some(0);
 
-        while let Some(u) = queue.pop_front() {
-            let u_color =
-                color[u].expect("color[u] is Some: only colored nodes are added to queue");
-
+        while let Some((u, u_color)) = queue.pop_front() {
             let row_start = graph.row_ptr()[u];
             let row_end = graph.row_ptr()[u + 1];
 
@@ -656,7 +659,7 @@ pub fn is_bipartite<T: Float>(graph: &CsrMatrix<T>) -> bool {
                     None => {
                         // Assign opposite color
                         color[v] = Some(1 - u_color);
-                        queue.push_back(v);
+                        queue.push_back((v, 1 - u_color));
                     }
                     Some(v_color) if v_color == u_color => {
                         // Same color as parent - not bipartite

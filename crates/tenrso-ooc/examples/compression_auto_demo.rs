@@ -119,13 +119,9 @@ fn main() -> Result<()> {
     ];
 
     for (name, data) in &test_cases {
-        // Convert to bytes
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                data.as_ptr() as *const u8,
-                data.len() * std::mem::size_of::<f64>(),
-            )
-        };
+        // Convert to bytes (the native-endian bytes of each value, in order)
+        let owned_bytes: Vec<u8> = data.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let bytes: &[u8] = &owned_bytes;
 
         let codec = selector.select_codec(bytes);
 
@@ -220,9 +216,9 @@ fn main() -> Result<()> {
 }
 
 fn test_compression_strategies(data: &[f64]) -> Result<()> {
-    let bytes = unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
-    };
+    // The native-endian bytes of each value, in order.
+    let owned_bytes: Vec<u8> = data.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    let bytes: &[u8] = &owned_bytes;
 
     // Auto-selection
     let mut selector = CompressionAutoSelector::new();

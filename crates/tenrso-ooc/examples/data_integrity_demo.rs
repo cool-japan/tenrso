@@ -19,12 +19,9 @@ fn main() -> Result<()> {
 
     // Create some test data
     let chunk_data = [1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            chunk_data.as_ptr() as *const u8,
-            chunk_data.len() * std::mem::size_of::<f64>(),
-        )
-    };
+    // The native-endian bytes of each value, in order.
+    let owned_bytes: Vec<u8> = chunk_data.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    let bytes: &[u8] = &owned_bytes;
 
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("1. Checksum Algorithm Comparison");

@@ -119,6 +119,17 @@ use std::borrow::Cow;
 
 // ─── Tree structure ─────────────────────────────────────────────────────────
 
+/// Where an internal node splits, and the arena indices of its two children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Split {
+    /// Split point: `lo < at < hi`.
+    at: usize,
+    /// Arena index of the `[lo, at)` child.
+    left: usize,
+    /// Arena index of the `[at, hi)` child.
+    right: usize,
+}
+
 /// One node of the dimension tree: a contiguous mode range `[lo, hi)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DimTreeNode {
@@ -126,10 +137,10 @@ struct DimTreeNode {
     lo: usize,
     /// One past the last mode of this node (exclusive).
     hi: usize,
-    /// Split point: `lo < split < hi`. `None` for a leaf (`hi - lo == 1`).
-    split: Option<usize>,
-    /// Arena indices of the `[lo, split)` and `[split, hi)` children.
-    children: Option<(usize, usize)>,
+    /// The split point together with both children; `None` for a leaf
+    /// (`hi - lo == 1`). One field, so a node cannot have one without the
+    /// other.
+    split: Option<Split>,
 }
 
 /// A reusable balanced binary **dimension tree** over the modes of a tensor.
@@ -230,7 +241,6 @@ impl DimTree {
             lo,
             hi,
             split: None,
-            children: None,
         });
 
         if hi - lo == 1 {
@@ -241,8 +251,11 @@ impl DimTree {
         let left = self.build_subtree(lo, split);
         let right = self.build_subtree(split, hi);
 
-        self.nodes[idx].split = Some(split);
-        self.nodes[idx].children = Some((left, right));
+        self.nodes[idx].split = Some(Split {
+            at: split,
+            left,
+            right,
+        });
         idx
     }
 
@@ -468,13 +481,14 @@ impl DimTree {
         let owned = standard_factors(factors);
         let mut out: Vec<Option<Array2<T>>> = vec![None; self.shape.len()];
 
-        let root = &self.nodes[0];
-        let mid = root
-            .split
-            .expect("root of an order>=2 tree is always internal");
-        let (left_idx, right_idx) = root
-            .children
-            .expect("root of an order>=2 tree always has children");
+        let Some(Split {
+            at: mid,
+            left: left_idx,
+            right: right_idx,
+        }) = self.nodes[0].split
+        else {
+            anyhow::bail!("malformed dimension tree: the root of an order >= 2 tree is a leaf");
+        };
 
         let (rows, cols) = self.root_matrix_shape(mid);
         let standard = tensor.as_standard_layout();
@@ -482,17 +496,17 @@ impl DimTree {
 
         // P_left = X₂ · KR([mid, N))  — a (rows × cols) · (cols × R) GEMM.
         let partial_left = {
-            let kr_right = khatri_rao_range(&owned, mid, self.shape.len(), cp_rank);
+            let kr_right = khatri_rao_range(&owned, mid, self.shape.len(), cp_rank)?;
             x2.dot(kr_right.as_ref())
         };
         // P_right = X₂ᵀ · KR([0, mid))  — a (cols × rows) · (rows × R) GEMM.
         let partial_right = {
-            let kr_left = khatri_rao_range(&owned, 0, mid, cp_rank);
+            let kr_left = khatri_rao_range(&owned, 0, mid, cp_rank)?;
             x2.t().dot(kr_left.as_ref())
         };
 
-        self.descend(left_idx, partial_left, &owned, cp_rank, &mut out);
-        self.descend(right_idx, partial_right, &owned, cp_rank, &mut out);
+        self.descend(left_idx, partial_left, &owned, cp_rank, &mut out)?;
+        self.descend(right_idx, partial_right, &owned, cp_rank, &mut out)?;
 
         collect_leaves(out, self.shape.len())
     }
@@ -531,46 +545,49 @@ impl DimTree {
 
         let owned = standard_factors(factors);
 
-        let root = &self.nodes[0];
-        let mid = root
-            .split
-            .expect("root of an order>=2 tree is always internal");
-        let (left_idx, right_idx) = root
-            .children
-            .expect("root of an order>=2 tree always has children");
+        let Some(Split {
+            at: mid,
+            left: left_idx,
+            right: right_idx,
+        }) = self.nodes[0].split
+        else {
+            anyhow::bail!("malformed dimension tree: the root of an order >= 2 tree is a leaf");
+        };
 
         let (rows, cols) = self.root_matrix_shape(mid);
         let standard = tensor.as_standard_layout();
         let x2: ArrayView2<T> = standard.view().into_shape_with_order((rows, cols))?;
 
         let (mut node_idx, mut partial) = if mode < mid {
-            let kr_right = khatri_rao_range(&owned, mid, ndim, cp_rank);
+            let kr_right = khatri_rao_range(&owned, mid, ndim, cp_rank)?;
             (left_idx, x2.dot(kr_right.as_ref()))
         } else {
-            let kr_left = khatri_rao_range(&owned, 0, mid, cp_rank);
+            let kr_left = khatri_rao_range(&owned, 0, mid, cp_rank)?;
             (right_idx, x2.t().dot(kr_left.as_ref()))
         };
         drop(standard);
 
         // Walk down the single path to the leaf, contracting away one sibling
         // subtree per level.
-        while let Some(split) = self.nodes[node_idx].split {
+        while let Some(Split {
+            at: split,
+            left,
+            right,
+        }) = self.nodes[node_idx].split
+        {
             let node = self.nodes[node_idx].clone();
-            let (left, right) = node
-                .children
-                .expect("internal node always has children by construction");
             let left_dim = self.range_prod(node.lo, split);
             let right_dim = self.range_prod(split, node.hi);
 
             if mode < split {
-                let kr_right = khatri_rao_range(&owned, split, node.hi, cp_rank);
+                let kr_right = khatri_rao_range(&owned, split, node.hi, cp_rank)?;
                 partial =
-                    contract_left_child(&partial, left_dim, right_dim, cp_rank, kr_right.as_ref());
+                    contract_left_child(&partial, left_dim, right_dim, cp_rank, kr_right.as_ref())?;
                 node_idx = left;
             } else {
-                let kr_left = khatri_rao_range(&owned, node.lo, split, cp_rank);
+                let kr_left = khatri_rao_range(&owned, node.lo, split, cp_rank)?;
                 partial =
-                    contract_right_child(&partial, left_dim, right_dim, cp_rank, kr_left.as_ref());
+                    contract_right_child(&partial, left_dim, right_dim, cp_rank, kr_left.as_ref())?;
                 node_idx = right;
             }
         }
@@ -587,24 +604,27 @@ impl DimTree {
         owned: &[Array2<T>],
         cp_rank: usize,
         out: &mut [Option<Array2<T>>],
-    ) where
+    ) -> Result<()>
+    where
         T: Copy + Num + One + Zero + 'static,
     {
         let node = &self.nodes[node_idx];
-        let Some(split) = node.split else {
+        let Some(Split {
+            at: split,
+            left,
+            right,
+        }) = node.split
+        else {
             // Leaf: `P_{{k}} = M_k`.
             out[node.lo] = Some(partial);
-            return;
+            return Ok(());
         };
-        let (left, right) = node
-            .children
-            .expect("internal node always has children by construction");
         let (lo, hi) = (node.lo, node.hi);
         let left_dim = self.range_prod(lo, split);
         let right_dim = self.range_prod(split, hi);
 
-        let kr_left = khatri_rao_range(owned, lo, split, cp_rank);
-        let kr_right = khatri_rao_range(owned, split, hi, cp_rank);
+        let kr_left = khatri_rao_range(owned, lo, split, cp_rank)?;
+        let kr_right = khatri_rao_range(owned, split, hi, cp_rank)?;
 
         // One streaming pass over `partial` produces BOTH children.
         let (child_left, child_right) = contract_both_children(
@@ -614,13 +634,13 @@ impl DimTree {
             cp_rank,
             kr_left.as_ref(),
             kr_right.as_ref(),
-        );
+        )?;
         drop(partial);
         drop(kr_left);
         drop(kr_right);
 
-        self.descend(left, child_left, owned, cp_rank, out);
-        self.descend(right, child_right, owned, cp_rank, out);
+        self.descend(left, child_left, owned, cp_rank, out)?;
+        self.descend(right, child_right, owned, cp_rank, out)
     }
 }
 
@@ -657,35 +677,35 @@ fn khatri_rao_range<T>(
     lo: usize,
     hi: usize,
     cp_rank: usize,
-) -> Cow<'_, Array2<T>>
+) -> Result<Cow<'_, Array2<T>>>
 where
     T: Copy + Num + Zero + 'static,
 {
     debug_assert!(lo < hi);
     if hi - lo == 1 {
-        return Cow::Borrowed(&owned[lo]);
+        return Ok(Cow::Borrowed(&owned[lo]));
     }
 
     let mut acc: Array2<T> = owned[lo].clone();
     for factor in &owned[lo + 1..hi] {
-        acc = khatri_rao_row_major(&acc, factor, cp_rank);
+        acc = khatri_rao_row_major(&acc, factor, cp_rank)?;
     }
-    Cow::Owned(acc)
+    Ok(Cow::Owned(acc))
 }
 
 /// Row-major Khatri-Rao: `out[(i·J + j), :] = a[i, :] * b[j, :]`.
-fn khatri_rao_row_major<T>(a: &Array2<T>, b: &Array2<T>, cp_rank: usize) -> Array2<T>
+fn khatri_rao_row_major<T>(a: &Array2<T>, b: &Array2<T>, cp_rank: usize) -> Result<Array2<T>>
 where
     T: Copy + Num + Zero + 'static,
 {
     let rows_a = a.shape()[0];
     let rows_b = b.shape()[0];
-    let a_data = a
-        .as_slice()
-        .expect("khatri_rao_row_major: `a` is built standard-layout by this module");
-    let b_data = b
-        .as_slice()
-        .expect("khatri_rao_row_major: `b` is a standard-layout owned factor");
+    let a_data = a.as_slice().ok_or_else(|| {
+        anyhow::anyhow!("khatri_rao_row_major: `a` is not standard-layout (malformed intermediate)")
+    })?;
+    let b_data = b.as_slice().ok_or_else(|| {
+        anyhow::anyhow!("khatri_rao_row_major: `b` is not standard-layout (malformed factor copy)")
+    })?;
 
     let mut out = vec![T::zero(); rows_a * rows_b * cp_rank];
     for row_a in 0..rows_a {
@@ -701,18 +721,18 @@ where
     }
 
     Array2::from_shape_vec((rows_a * rows_b, cp_rank), out)
-        .expect("khatri_rao_row_major: shape matches the buffer length by construction")
+        .map_err(|e| anyhow::anyhow!("khatri_rao_row_major: {e}"))
 }
 
 /// Flat row-major slice of a matrix that this module built (partial contractions,
 /// Khatri-Rao products and the standardized factors are all standard-layout).
-fn flat_slice<T>(matrix: &Array2<T>) -> &[T]
+fn flat_slice<T>(matrix: &Array2<T>) -> Result<&[T]>
 where
     T: Copy,
 {
-    matrix
-        .as_slice()
-        .expect("dimension-tree intermediates are standard-layout by construction")
+    matrix.as_slice().ok_or_else(|| {
+        anyhow::anyhow!("dimension-tree intermediate is not standard-layout (malformed tree)")
+    })
 }
 
 /// Turn the per-mode leaf slots into the ordered result vector.
@@ -747,12 +767,12 @@ fn contract_left_child<T>(
     right_dim: usize,
     cp_rank: usize,
     kr_right: &Array2<T>,
-) -> Array2<T>
+) -> Result<Array2<T>>
 where
     T: Copy + Num + Zero + 'static,
 {
-    let p_data = flat_slice(partial);
-    let k_data = flat_slice(kr_right);
+    let p_data = flat_slice(partial)?;
+    let k_data = flat_slice(kr_right)?;
     let mut acc = vec![T::zero(); left_dim * cp_rank];
 
     for row_left in 0..left_dim {
@@ -768,7 +788,7 @@ where
     }
 
     Array2::from_shape_vec((left_dim, cp_rank), acc)
-        .expect("contract_left_child: shape matches the buffer length by construction")
+        .map_err(|e| anyhow::anyhow!("contract_left_child: {e}"))
 }
 
 /// `q[i₂, r] = Σ_{i₁} P[i₁·b + i₂, r] · KR₁[i₁, r]` — the *right* child.
@@ -783,12 +803,12 @@ fn contract_right_child<T>(
     right_dim: usize,
     cp_rank: usize,
     kr_left: &Array2<T>,
-) -> Array2<T>
+) -> Result<Array2<T>>
 where
     T: Copy + Num + Zero + 'static,
 {
-    let p_data = flat_slice(partial);
-    let k_data = flat_slice(kr_left);
+    let p_data = flat_slice(partial)?;
+    let k_data = flat_slice(kr_left)?;
     let mut acc = vec![T::zero(); right_dim * cp_rank];
 
     for row_left in 0..left_dim {
@@ -804,7 +824,7 @@ where
     }
 
     Array2::from_shape_vec((right_dim, cp_rank), acc)
-        .expect("contract_right_child: shape matches the buffer length by construction")
+        .map_err(|e| anyhow::anyhow!("contract_right_child: {e}"))
 }
 
 /// Fused version of [`contract_left_child`] + [`contract_right_child`]: produces
@@ -820,13 +840,13 @@ fn contract_both_children<T>(
     cp_rank: usize,
     kr_left: &Array2<T>,
     kr_right: &Array2<T>,
-) -> (Array2<T>, Array2<T>)
+) -> Result<(Array2<T>, Array2<T>)>
 where
     T: Copy + Num + Zero + 'static,
 {
-    let p_data = flat_slice(partial);
-    let kl_data = flat_slice(kr_left);
-    let kr_data = flat_slice(kr_right);
+    let p_data = flat_slice(partial)?;
+    let kl_data = flat_slice(kr_left)?;
+    let kr_data = flat_slice(kr_right)?;
 
     let mut acc_left = vec![T::zero(); left_dim * cp_rank];
     let mut acc_right = vec![T::zero(); right_dim * cp_rank];
@@ -855,10 +875,10 @@ where
     }
 
     let left = Array2::from_shape_vec((left_dim, cp_rank), acc_left)
-        .expect("contract_both_children: left shape matches the buffer length by construction");
+        .map_err(|e| anyhow::anyhow!("contract_both_children (left): {e}"))?;
     let right = Array2::from_shape_vec((right_dim, cp_rank), acc_right)
-        .expect("contract_both_children: right shape matches the buffer length by construction");
-    (left, right)
+        .map_err(|e| anyhow::anyhow!("contract_both_children (right): {e}"))?;
+    Ok((left, right))
 }
 
 // ─── Private kernels (parallel) ─────────────────────────────────────────────
@@ -950,7 +970,7 @@ fn contract_left_child_parallel<T>(
     right_dim: usize,
     cp_rank: usize,
     kr_right: &Array2<T>,
-) -> Array2<T>
+) -> Result<Array2<T>>
 where
     T: Copy + Num + Zero + Send + Sync + 'static,
 {
@@ -960,8 +980,8 @@ where
         return contract_left_child(partial, left_dim, right_dim, cp_rank, kr_right);
     }
 
-    let p_data = flat_slice(partial);
-    let k_data = flat_slice(kr_right);
+    let p_data = flat_slice(partial)?;
+    let k_data = flat_slice(kr_right)?;
     let chunk = parallel_chunk_rows(left_dim);
     let n_chunks = left_dim.div_ceil(chunk.max(1));
 
@@ -993,7 +1013,7 @@ where
         acc.extend_from_slice(&block);
     }
     Array2::from_shape_vec((left_dim, cp_rank), acc)
-        .expect("contract_left_child_parallel: shape matches the buffer length by construction")
+        .map_err(|e| anyhow::anyhow!("contract_left_child_parallel: {e}"))
 }
 
 /// Parallel [`contract_right_child`]: the reduction runs over `i₁`, so we block
@@ -1006,7 +1026,7 @@ fn contract_right_child_parallel<T>(
     right_dim: usize,
     cp_rank: usize,
     kr_left: &Array2<T>,
-) -> Array2<T>
+) -> Result<Array2<T>>
 where
     T: Copy + Num + Zero + Send + Sync + 'static,
 {
@@ -1016,8 +1036,8 @@ where
         return contract_right_child(partial, left_dim, right_dim, cp_rank, kr_left);
     }
 
-    let p_data = flat_slice(partial);
-    let k_data = flat_slice(kr_left);
+    let p_data = flat_slice(partial)?;
+    let k_data = flat_slice(kr_left)?;
     let chunk = parallel_chunk_rows(right_dim);
     let n_chunks = right_dim.div_ceil(chunk.max(1));
 
@@ -1049,7 +1069,7 @@ where
         acc.extend_from_slice(&block);
     }
     Array2::from_shape_vec((right_dim, cp_rank), acc)
-        .expect("contract_right_child_parallel: shape matches the buffer length by construction")
+        .map_err(|e| anyhow::anyhow!("contract_right_child_parallel: {e}"))
 }
 
 #[cfg(feature = "parallel")]
@@ -1087,30 +1107,31 @@ impl DimTree {
         let owned = standard_factors(factors);
         let mut out: Vec<Option<Array2<T>>> = vec![None; self.shape.len()];
 
-        let root = &self.nodes[0];
-        let mid = root
-            .split
-            .expect("root of an order>=2 tree is always internal");
-        let (left_idx, right_idx) = root
-            .children
-            .expect("root of an order>=2 tree always has children");
+        let Some(Split {
+            at: mid,
+            left: left_idx,
+            right: right_idx,
+        }) = self.nodes[0].split
+        else {
+            anyhow::bail!("malformed dimension tree: the root of an order >= 2 tree is a leaf");
+        };
 
         let (rows, cols) = self.root_matrix_shape(mid);
         let standard = tensor.as_standard_layout();
         let x2: ArrayView2<T> = standard.view().into_shape_with_order((rows, cols))?;
 
         let partial_left = {
-            let kr_right = khatri_rao_range(&owned, mid, self.shape.len(), cp_rank);
+            let kr_right = khatri_rao_range(&owned, mid, self.shape.len(), cp_rank)?;
             gemm_rows_parallel(&x2, kr_right.as_ref())
         };
         let partial_right = {
-            let kr_left = khatri_rao_range(&owned, 0, mid, cp_rank);
+            let kr_left = khatri_rao_range(&owned, 0, mid, cp_rank)?;
             gemm_cols_parallel(&x2, kr_left.as_ref())
         };
         drop(standard);
 
-        self.descend_parallel(left_idx, partial_left, &owned, cp_rank, &mut out);
-        self.descend_parallel(right_idx, partial_right, &owned, cp_rank, &mut out);
+        self.descend_parallel(left_idx, partial_left, &owned, cp_rank, &mut out)?;
+        self.descend_parallel(right_idx, partial_right, &owned, cp_rank, &mut out)?;
 
         collect_leaves(out, self.shape.len())
     }
@@ -1140,54 +1161,57 @@ impl DimTree {
 
         let owned = standard_factors(factors);
 
-        let root = &self.nodes[0];
-        let mid = root
-            .split
-            .expect("root of an order>=2 tree is always internal");
-        let (left_idx, right_idx) = root
-            .children
-            .expect("root of an order>=2 tree always has children");
+        let Some(Split {
+            at: mid,
+            left: left_idx,
+            right: right_idx,
+        }) = self.nodes[0].split
+        else {
+            anyhow::bail!("malformed dimension tree: the root of an order >= 2 tree is a leaf");
+        };
 
         let (rows, cols) = self.root_matrix_shape(mid);
         let standard = tensor.as_standard_layout();
         let x2: ArrayView2<T> = standard.view().into_shape_with_order((rows, cols))?;
 
         let (mut node_idx, mut partial) = if mode < mid {
-            let kr_right = khatri_rao_range(&owned, mid, ndim, cp_rank);
+            let kr_right = khatri_rao_range(&owned, mid, ndim, cp_rank)?;
             (left_idx, gemm_rows_parallel(&x2, kr_right.as_ref()))
         } else {
-            let kr_left = khatri_rao_range(&owned, 0, mid, cp_rank);
+            let kr_left = khatri_rao_range(&owned, 0, mid, cp_rank)?;
             (right_idx, gemm_cols_parallel(&x2, kr_left.as_ref()))
         };
         drop(standard);
 
-        while let Some(split) = self.nodes[node_idx].split {
+        while let Some(Split {
+            at: split,
+            left,
+            right,
+        }) = self.nodes[node_idx].split
+        {
             let node = self.nodes[node_idx].clone();
-            let (left, right) = node
-                .children
-                .expect("internal node always has children by construction");
             let left_dim = self.range_prod(node.lo, split);
             let right_dim = self.range_prod(split, node.hi);
 
             if mode < split {
-                let kr_right = khatri_rao_range(&owned, split, node.hi, cp_rank);
+                let kr_right = khatri_rao_range(&owned, split, node.hi, cp_rank)?;
                 partial = contract_left_child_parallel(
                     &partial,
                     left_dim,
                     right_dim,
                     cp_rank,
                     kr_right.as_ref(),
-                );
+                )?;
                 node_idx = left;
             } else {
-                let kr_left = khatri_rao_range(&owned, node.lo, split, cp_rank);
+                let kr_left = khatri_rao_range(&owned, node.lo, split, cp_rank)?;
                 partial = contract_right_child_parallel(
                     &partial,
                     left_dim,
                     right_dim,
                     cp_rank,
                     kr_left.as_ref(),
-                );
+                )?;
                 node_idx = right;
             }
         }
@@ -1203,34 +1227,47 @@ impl DimTree {
         owned: &[Array2<T>],
         cp_rank: usize,
         out: &mut [Option<Array2<T>>],
-    ) where
+    ) -> Result<()>
+    where
         T: Copy + Num + One + Zero + Send + Sync + 'static,
     {
         let node = &self.nodes[node_idx];
-        let Some(split) = node.split else {
+        let Some(Split {
+            at: split,
+            left,
+            right,
+        }) = node.split
+        else {
             out[node.lo] = Some(partial);
-            return;
+            return Ok(());
         };
-        let (left, right) = node
-            .children
-            .expect("internal node always has children by construction");
         let (lo, hi) = (node.lo, node.hi);
         let left_dim = self.range_prod(lo, split);
         let right_dim = self.range_prod(split, hi);
 
-        let kr_left = khatri_rao_range(owned, lo, split, cp_rank);
-        let kr_right = khatri_rao_range(owned, split, hi, cp_rank);
+        let kr_left = khatri_rao_range(owned, lo, split, cp_rank)?;
+        let kr_right = khatri_rao_range(owned, split, hi, cp_rank)?;
 
-        let child_left =
-            contract_left_child_parallel(&partial, left_dim, right_dim, cp_rank, kr_right.as_ref());
-        let child_right =
-            contract_right_child_parallel(&partial, left_dim, right_dim, cp_rank, kr_left.as_ref());
+        let child_left = contract_left_child_parallel(
+            &partial,
+            left_dim,
+            right_dim,
+            cp_rank,
+            kr_right.as_ref(),
+        )?;
+        let child_right = contract_right_child_parallel(
+            &partial,
+            left_dim,
+            right_dim,
+            cp_rank,
+            kr_left.as_ref(),
+        )?;
         drop(partial);
         drop(kr_left);
         drop(kr_right);
 
-        self.descend_parallel(left, child_left, owned, cp_rank, out);
-        self.descend_parallel(right, child_right, owned, cp_rank, out);
+        self.descend_parallel(left, child_left, owned, cp_rank, out)?;
+        self.descend_parallel(right, child_right, owned, cp_rank, out)
     }
 }
 
@@ -1558,7 +1595,7 @@ mod tests {
         // 200 | 400 (mid=2), 400 | 200 (mid=3), 800 | 100 (mid=4).
         // Balanced max is 400, attained first at mid=2.
         let tree = DimTree::new(&[100, 2, 2, 2, 100]).expect("tree");
-        assert_eq!(tree.nodes[0].split, Some(2));
+        assert_eq!(tree.nodes[0].split.map(|split| split.at), Some(2));
         assert_eq!(tree.ndim(), 5);
         assert_eq!(tree.numel(), 100 * 2 * 2 * 2 * 100);
     }

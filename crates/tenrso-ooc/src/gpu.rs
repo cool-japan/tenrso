@@ -641,6 +641,11 @@ impl Device {
             // `[T]` slices are `[f32]` with identical layout.
             let a_f32: &[f32] =
                 unsafe { std::slice::from_raw_parts(a_host.as_ptr().cast::<f32>(), n) };
+            // SAFETY: `b_host` is a live `&[T]` whose length the check above
+            // made equal to `n`, and `T` is exactly `f32` by the same `TypeId`
+            // comparison (`T: 'static`), so the pointer is aligned for `f32`,
+            // the `n` elements are initialised `f32`s, and the new slice reads
+            // `b` through the shared borrow `b_host` holds, for no longer.
             let b_f32: &[f32] =
                 unsafe { std::slice::from_raw_parts(b_host.as_ptr().cast::<f32>(), n) };
             let mut out = vec![0.0f32; n];
@@ -659,6 +664,10 @@ impl Device {
             // SAFETY: guarded by the TypeId check — `T` is exactly `f64`.
             let a_f64: &[f64] =
                 unsafe { std::slice::from_raw_parts(a_host.as_ptr().cast::<f64>(), n) };
+            // SAFETY: as for `b_f32` above, with `T` exactly `f64` by this
+            // branch's `TypeId` comparison: `b_host` is a live `&[T]` of `n`
+            // elements (the length check above), aligned and initialised as
+            // `f64`s, read through the shared borrow `b_host` holds.
             let b_f64: &[f64] =
                 unsafe { std::slice::from_raw_parts(b_host.as_ptr().cast::<f64>(), n) };
             let mut out = vec![0.0f64; n];

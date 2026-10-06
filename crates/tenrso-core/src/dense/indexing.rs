@@ -181,10 +181,13 @@ where
             }
         }
 
-        Ok(self
-            .data
-            .get(index)
-            .expect("Index validation passed but get failed"))
+        self.data.get(index).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Index {:?} passed validation for shape {:?} but is not in the array",
+                index,
+                self.shape()
+            )
+        })
     }
 
     /// Get mutable element with detailed error reporting

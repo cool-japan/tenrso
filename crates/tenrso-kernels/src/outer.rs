@@ -411,11 +411,9 @@ where
 
             // Compute weighted outer product
             let weight = weights.map(|w| w[r].clone()).unwrap_or_else(T::one);
-            outer_product_weighted(&vector_views, weight).expect(
-                "invariant: factors validated non-empty with consistent rank before par_iter",
-            )
+            outer_product_weighted(&vector_views, weight)
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     // Sum all components
     let mut result = Array::<T, IxDyn>::zeros(IxDyn(&shape));

@@ -270,12 +270,13 @@ pub fn amd<T: Float>(matrix: &CsrMatrix<T>) -> SparseResult<Vec<usize>> {
     // Supervariable representation (for mass elimination)
     let supervars: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
 
-    for _ in 0..n {
-        // Find vertex with minimum degree (excluding eliminated)
-        let v = (0..n)
-            .filter(|&i| !eliminated[i])
-            .min_by_key(|&i| (degree[i], i))
-            .expect("at least one non-eliminated vertex remains in each loop iteration");
+    // Each pass eliminates exactly the one vertex it selects, so this runs `n`
+    // times and stops once every vertex is eliminated.
+    while let Some(v) = (0..n)
+        .filter(|&i| !eliminated[i])
+        .min_by_key(|&i| (degree[i], i))
+    {
+        // `v`: the non-eliminated vertex with minimum degree
 
         // Add all vertices in supervar to ordering
         for &u in &supervars[v] {

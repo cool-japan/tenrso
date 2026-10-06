@@ -447,24 +447,24 @@ pub fn max_axis<T: Float + Clone>(tensor: &CooTensor<T>, axis: usize) -> Result<
     // with all-negative values has its true maximum equal to the largest (least
     // negative) observed value, never 0. Track the observed count per slice so we
     // can distinguish "has a structural zero" from "fully populated".
-    let mut max_map: HashMap<Vec<usize>, T> = HashMap::new();
-    let mut count_map: HashMap<Vec<usize>, usize> = HashMap::new();
+    // One entry per slice: its maximum observed value and how many values
+    // were observed, kept together so that every slice has both.
+    let mut max_map: HashMap<Vec<usize>, (T, usize)> = HashMap::new();
 
     for (idx, &val) in tensor.indices().iter().zip(tensor.values().iter()) {
         // Project index by removing the axis dimension
         let mut proj_idx = idx.clone();
         proj_idx.remove(axis);
 
-        *count_map.entry(proj_idx.clone()).or_insert(0) += 1;
-
         max_map
-            .entry(proj_idx.clone())
-            .and_modify(|current| {
+            .entry(proj_idx)
+            .and_modify(|(current, count)| {
                 if val > *current {
                     *current = val;
                 }
+                *count += 1;
             })
-            .or_insert(val);
+            .or_insert((val, 1));
     }
 
     // Build result - only include non-zero values.
@@ -474,14 +474,10 @@ pub fn max_axis<T: Float + Clone>(tensor: &CooTensor<T>, axis: usize) -> Result<
     let mut result_indices = Vec::new();
     let mut result_values = Vec::new();
 
-    for (idx, val) in max_map {
-        let count = count_map
-            .get(&idx)
-            .expect("count_map has the same keys as max_map by construction");
-
+    for (idx, (val, count)) in max_map {
         // If we haven't observed every position along the reduced axis, the slice
         // contains at least one structural (implicit) zero that must be folded in.
-        let has_implicit_zeros = *count < axis_size;
+        let has_implicit_zeros = count < axis_size;
 
         let final_max = if has_implicit_zeros {
             // The implicit zero participates: max(max_observed, 0).
@@ -564,37 +560,33 @@ pub fn min_axis<T: Float + Clone>(tensor: &CooTensor<T>, axis: usize) -> Result<
     }
 
     // Track minimum values and whether we've seen any values
-    let mut min_map: HashMap<Vec<usize>, T> = HashMap::new();
-    let mut count_map: HashMap<Vec<usize>, usize> = HashMap::new();
+    // One entry per slice: its minimum observed value and how many values
+    // were observed, kept together so that every slice has both.
+    let mut min_map: HashMap<Vec<usize>, (T, usize)> = HashMap::new();
 
     for (idx, &val) in tensor.indices().iter().zip(tensor.values().iter()) {
         // Project index by removing the axis dimension
         let mut proj_idx = idx.clone();
         proj_idx.remove(axis);
 
-        *count_map.entry(proj_idx.clone()).or_insert(0) += 1;
-
         min_map
-            .entry(proj_idx.clone())
-            .and_modify(|current| {
+            .entry(proj_idx)
+            .and_modify(|(current, count)| {
                 if val < *current {
                     *current = val;
                 }
+                *count += 1;
             })
-            .or_insert(val);
+            .or_insert((val, 1));
     }
 
     // Build result
     let mut result_indices = Vec::new();
     let mut result_values = Vec::new();
 
-    for (idx, val) in min_map {
-        let count = count_map
-            .get(&idx)
-            .expect("count_map has the same keys as min_map by construction");
-
+    for (idx, (val, count)) in min_map {
         // If we haven't seen all positions along this axis, there are implicit zeros
-        let has_implicit_zeros = *count < axis_size;
+        let has_implicit_zeros = count < axis_size;
 
         let final_min = if has_implicit_zeros {
             // Compare with zero

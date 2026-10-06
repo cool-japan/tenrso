@@ -315,6 +315,14 @@ unsafe fn log_pd(x: __m256d) -> __m256d {
 }
 
 /// True iff every lane is finite with `|x| <= limit` (NaN and inf both fail).
+///
+/// # Safety
+///
+/// The CPU must support AVX2, the feature this function is compiled with (its
+/// AVX compare / mask instructions are a subset of it). That is the only
+/// requirement: the function reads nothing but its by-value arguments.
+/// Every caller is an `avx2,fma` function whose own `# Safety` requires the
+/// same, reached only after `simd_available()` detected AVX2 and FMA.
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn tame_pd(x: __m256d, limit: f64) -> bool {
@@ -324,6 +332,11 @@ unsafe fn tame_pd(x: __m256d, limit: f64) -> bool {
 }
 
 /// True iff every lane is a positive normal double (the domain `log_pd` needs).
+///
+/// # Safety
+///
+/// As for [`tame_pd`]: the CPU must support AVX2; the function reads nothing
+/// but its by-value argument.
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn log_domain_pd(x: __m256d) -> bool {
@@ -456,6 +469,11 @@ unsafe fn log_ps(x: __m256) -> __m256 {
 }
 
 /// True iff every lane is finite with `|x| <= limit`.
+///
+/// # Safety
+///
+/// As for [`tame_pd`]: the CPU must support AVX2; the function reads nothing
+/// but its by-value arguments.
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn tame_ps(x: __m256, limit: f32) -> bool {
@@ -464,6 +482,11 @@ unsafe fn tame_ps(x: __m256, limit: f32) -> bool {
 }
 
 /// True iff every lane is a positive normal float.
+///
+/// # Safety
+///
+/// As for [`tame_pd`]: the CPU must support AVX2; the function reads nothing
+/// but its by-value argument.
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn log_domain_ps(x: __m256) -> bool {

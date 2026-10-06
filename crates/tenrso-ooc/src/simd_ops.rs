@@ -96,6 +96,10 @@ pub fn simd_add_f64(a: &[f64], b: &[f64], dst: &mut [f64]) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
+            // SAFETY: `is_x86_feature_detected!("avx2")` returned true on the
+            // line above, and the two `assert_eq!`s at the top of this function
+            // make `b.len()` and `dst.len()` equal to `a.len()` -- the whole of
+            // the contract `simd_add_f64_avx2`'s `# Safety` section states.
             unsafe { simd_add_f64_avx2(a, b, dst) };
             return;
         }
@@ -113,6 +117,9 @@ pub fn simd_mul_f64(a: &[f64], b: &[f64], dst: &mut [f64]) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was detected on the line above, and the two
+            // `assert_eq!`s at the top of this function make `b.len()` and
+            // `dst.len()` equal to `a.len()`, as `simd_mul_f64_avx2` requires.
             unsafe { simd_mul_f64_avx2(a, b, dst) };
             return;
         }
@@ -130,6 +137,9 @@ pub fn simd_fma_f64(a: &[f64], b: &[f64], c: &mut [f64]) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: both AVX2 and FMA were detected on the line above, and the
+            // two `assert_eq!`s at the top of this function make `b.len()` and
+            // `c.len()` equal to `a.len()`, as `simd_fma_f64_avx2` requires.
             unsafe { simd_fma_f64_avx2(a, b, c) };
             return;
         }
@@ -144,6 +154,9 @@ pub fn simd_sum_f64(a: &[f64]) -> f64 {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was detected on the line above, the only requirement
+            // `simd_sum_f64_avx2` places on its caller (it takes one slice of
+            // any length).
             return unsafe { simd_sum_f64_avx2(a) };
         }
     }
@@ -157,6 +170,9 @@ pub fn simd_min_f64(a: &[f64]) -> f64 {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was detected on the line above, the only requirement
+            // `simd_min_f64_avx2` places on its caller (it takes one slice of
+            // any length).
             return unsafe { simd_min_f64_avx2(a) };
         }
     }
@@ -170,6 +186,9 @@ pub fn simd_max_f64(a: &[f64]) -> f64 {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was detected on the line above, the only requirement
+            // `simd_max_f64_avx2` places on its caller (it takes one slice of
+            // any length).
             return unsafe { simd_max_f64_avx2(a) };
         }
     }
@@ -182,15 +201,22 @@ pub fn simd_max_f64(a: &[f64]) -> f64 {
 // AVX2 Implementations (x86_64)
 // ============================================================================
 
-// SAFETY for all `#[target_feature(enable = "avx2")] unsafe fn` below:
-// Each function is only called from its corresponding safe wrapper after the wrapper
-// verifies `is_x86_feature_detected!("avx2")` (and "fma" for the FMA variant) at
-// runtime. `#[target_feature(enable = "avx2")]` makes the AVX2 instruction set
-// available to the compiler for the function body. Slice lengths are checked (via
-// assert_eq!) by the public-facing safe wrappers before delegation, so pointer
-// arithmetic inside the function never exceeds the slice bounds.
-// Violating this: calling these functions directly without a CPU-feature check, or
-// passing mismatched slice lengths (which is prevented by the assert_eq! guards).
+// Each function below is only called from its safe wrapper above, after the
+// wrapper has detected the CPU features it is compiled for and, for the
+// two- and three-slice kernels, asserted the slice lengths equal.
+
+/// AVX2 kernel of [`simd_add_f64`]: `dst = a + b`.
+///
+/// # Safety
+///
+/// The CPU must support AVX2, the feature this function is compiled with, and
+/// `b.len()` and `dst.len()` must both equal `a.len()`. Given that, every
+/// 4-lane load and store starts at `idx = 4 * i` with `i < a.len() / 4`, so it
+/// covers elements `idx..idx + 4`, all `<= a.len()`, of each slice, and
+/// `as_ptr().add(idx)` stays inside it; `_mm256_loadu_pd` / `_mm256_storeu_pd`
+/// are the unaligned forms, so no alignment beyond `f64`'s is assumed; `dst` is
+/// a `&mut` borrow, so it overlaps neither input. The remainder is written
+/// with bounds-checked indexing.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn simd_add_f64_avx2(a: &[f64], b: &[f64], dst: &mut [f64]) {
@@ -213,6 +239,14 @@ unsafe fn simd_add_f64_avx2(a: &[f64], b: &[f64], dst: &mut [f64]) {
     }
 }
 
+/// AVX2 kernel of [`simd_mul_f64`]: `dst = a * b`.
+///
+/// # Safety
+///
+/// As for [`simd_add_f64_avx2`]: the CPU must support AVX2, and `b.len()` and
+/// `dst.len()` must both equal `a.len()`, which keeps every unaligned 4-lane
+/// load and store at `idx = 4 * i`, `i < a.len() / 4`, inside all three
+/// slices.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn simd_mul_f64_avx2(a: &[f64], b: &[f64], dst: &mut [f64]) {
@@ -234,6 +268,16 @@ unsafe fn simd_mul_f64_avx2(a: &[f64], b: &[f64], dst: &mut [f64]) {
     }
 }
 
+/// AVX2 + FMA kernel of [`simd_fma_f64`]: `c = a * b + c`.
+///
+/// # Safety
+///
+/// The CPU must support AVX2 and FMA, the two features this function is
+/// compiled with, and `b.len()` and `c.len()` must both equal `a.len()`: every
+/// unaligned 4-lane load (of `a`, `b` and `c`) and store (to `c`) then starts
+/// at `idx = 4 * i` with `i < a.len() / 4` and stays inside its slice. `c` is
+/// read and then written through the one `&mut` borrow, which no input
+/// overlaps.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 unsafe fn simd_fma_f64_avx2(a: &[f64], b: &[f64], c: &mut [f64]) {
@@ -256,6 +300,14 @@ unsafe fn simd_fma_f64_avx2(a: &[f64], b: &[f64], c: &mut [f64]) {
     }
 }
 
+/// AVX2 kernel of [`simd_sum_f64`].
+///
+/// # Safety
+///
+/// The CPU must support AVX2, the feature this function is compiled with; `a`
+/// may have any length. Every unaligned 4-lane load starts at `idx = 4 * i`
+/// with `i < a.len() / 4`, so it stays inside `a`, and the one store writes
+/// the four lanes into the local `[f64; 4]`, exactly its size.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn simd_sum_f64_avx2(a: &[f64]) -> f64 {
@@ -285,6 +337,12 @@ unsafe fn simd_sum_f64_avx2(a: &[f64]) -> f64 {
     sum
 }
 
+/// AVX2 kernel of [`simd_min_f64`].
+///
+/// # Safety
+///
+/// As for [`simd_sum_f64_avx2`]: the CPU must support AVX2; the loads stay
+/// inside `a` and the one store fills the local `[f64; 4]`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn simd_min_f64_avx2(a: &[f64]) -> f64 {
@@ -316,6 +374,12 @@ unsafe fn simd_min_f64_avx2(a: &[f64]) -> f64 {
     min
 }
 
+/// AVX2 kernel of [`simd_max_f64`].
+///
+/// # Safety
+///
+/// As for [`simd_sum_f64_avx2`]: the CPU must support AVX2; the loads stay
+/// inside `a` and the one store fills the local `[f64; 4]`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn simd_max_f64_avx2(a: &[f64]) -> f64 {
@@ -472,6 +536,34 @@ mod tests {
 
         assert_eq!(min, 1.0);
         assert_eq!(max, 9.0);
+    }
+
+    #[test]
+    fn test_every_short_length_matches_scalar() {
+        // Lengths 0..=9 cover no full 4-lane block, one or two blocks, and
+        // every remainder, on whichever path the CPU selects.
+        for n in 0..=9usize {
+            let a: Vec<f64> = (0..n).map(|i| i as f64 * 1.5 - 4.0).collect();
+            let b: Vec<f64> = (0..n).map(|i| 7.0 - i as f64 * 0.25).collect();
+
+            let mut sum = vec![0.0; n];
+            simd_add_f64(&a, &b, &mut sum);
+            let mut product = vec![0.0; n];
+            simd_mul_f64(&a, &b, &mut product);
+            let mut fused = vec![0.5; n];
+            simd_fma_f64(&a, &b, &mut fused);
+            for i in 0..n {
+                assert_eq!(sum[i], a[i] + b[i], "add, n = {n}, i = {i}");
+                assert_eq!(product[i], a[i] * b[i], "mul, n = {n}, i = {i}");
+                assert_eq!(fused[i], a[i].mul_add(b[i], 0.5), "fma, n = {n}, i = {i}");
+            }
+
+            assert_eq!(simd_sum_f64(&a), a.iter().sum::<f64>(), "sum, n = {n}");
+            let min = a.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = a.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            assert_eq!(simd_min_f64(&a), min, "min, n = {n}");
+            assert_eq!(simd_max_f64(&a), max, "max, n = {n}");
+        }
     }
 
     #[test]

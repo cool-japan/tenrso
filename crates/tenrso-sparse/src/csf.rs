@@ -194,8 +194,10 @@ impl<T: Float> CsfTensor<T> {
         let mut current_ptrs = vec![0];
         let mut current_indices = Vec::new();
 
-        // Group by first mode
+        // Group by first mode. `level0_total` is the running total that the
+        // last entry of `current_ptrs` holds (it starts at the `0` above).
         let first_mode = mode_order[0];
+        let mut level0_total = 0usize;
         let mut i = 0;
         while i < sorted_indices.len() {
             let idx_val = sorted_indices[i].0[first_mode];
@@ -206,12 +208,8 @@ impl<T: Float> CsfTensor<T> {
             while j < sorted_indices.len() && sorted_indices[j].0[first_mode] == idx_val {
                 j += 1;
             }
-            current_ptrs.push(
-                j - i
-                    + current_ptrs
-                        .last()
-                        .expect("current_ptrs initialized with vec![0]"),
-            );
+            level0_total += j - i;
+            current_ptrs.push(level0_total);
             i = j;
         }
 
@@ -222,6 +220,9 @@ impl<T: Float> CsfTensor<T> {
         for level in 1..ndim {
             let mode = mode_order[level];
             let mut next_ptrs = vec![0];
+            // Running total held by the last entry of `next_ptrs` on a
+            // non-leaf level (it starts at the `0` above).
+            let mut level_total = 0usize;
             let mut next_indices = Vec::new();
 
             // For each fiber at previous level
@@ -248,12 +249,8 @@ impl<T: Float> CsfTensor<T> {
                         while local_end < end && sorted_indices[local_end].0[mode] == idx_val {
                             local_end += 1;
                         }
-                        next_ptrs.push(
-                            next_ptrs
-                                .last()
-                                .expect("next_ptrs initialized with vec![0]")
-                                + (local_end - local_start),
-                        );
+                        level_total += local_end - local_start;
+                        next_ptrs.push(level_total);
                         local_start = local_end;
                     }
                 }

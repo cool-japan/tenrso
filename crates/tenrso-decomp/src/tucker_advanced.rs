@@ -730,8 +730,10 @@ where
     let shape = tensor1.shape();
     let mut result_data = ArrayD::<T>::zeros(shape);
 
-    for (i, (&v1, &v2)) in view1.iter().zip(view2.iter()).enumerate() {
-        result_data.as_slice_mut().unwrap()[i] = v1 * v2;
+    // `result_data` is freshly zeroed in standard layout, so its logical order
+    // (the order `iter_mut` visits) is the order `view1` / `view2` iterate in.
+    for (out, (&v1, &v2)) in result_data.iter_mut().zip(view1.iter().zip(view2.iter())) {
+        *out = v1 * v2;
     }
 
     Ok(DenseND::from_array(result_data))

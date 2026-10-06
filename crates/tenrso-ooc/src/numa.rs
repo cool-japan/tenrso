@@ -1074,6 +1074,13 @@ impl NumaBuffer {
             // precondition. Both calls only read through the pointer.
             let (mode, nodes) =
                 unsafe { sys::policy_of(self.ptr.as_ptr()) }.map_err(NumaError::QueryFailed)?;
+            // SAFETY: as for `policy_of` just above: `self.ptr` starts the
+            // `self.layout.size()`-byte block `allocate_raw` obtained from
+            // `alloc_zeroed` (non-zero size, null rejected there), freed only
+            // by `Drop`, and `&self` keeps this buffer alive for the call, so
+            // `addr` points into a live, readable mapping of this process, which
+            // is `resident_node`'s whole precondition; the kernel writes only
+            // the local `node`, never through `addr`.
             let first_page_node =
                 unsafe { sys::resident_node(self.ptr.as_ptr()) }.map_err(NumaError::QueryFailed)?;
 

@@ -52,7 +52,9 @@ where
                 <T as From<f64>>::from(sample)
             })
             .collect();
-        // `data.len() == shape.iter().product()` by construction above.
+        // `data.len() == shape.iter().product()` by construction above;
+        // `from_shape_vec` still fails when that element count overflows
+        // `isize` (the product wraps in a release build).
         Self {
             data: Array::from_shape_vec(IxDyn(shape), data)
                 .expect("random_uniform: generated data length matches shape"),
@@ -83,8 +85,10 @@ where
     {
         use scirs2_core::random::quick::random_f64;
         let total: usize = shape.iter().product();
-        let data: Vec<T> = (0..total / 2 * 2)
-            .step_by(2)
+        // `total.div_ceil(2)` Box-Muller pairs give at least `total` values
+        // (`total / 2` pairs, as before, for an even `total`; an odd `total`
+        // needs the extra pair, whose second value `take` drops).
+        let data: Vec<T> = (0..total.div_ceil(2))
             .flat_map(|_| {
                 let u1 = random_f64();
                 let u2 = random_f64();
@@ -97,7 +101,9 @@ where
             })
             .take(total)
             .collect();
-        // `data.len() == total` by construction of the Box-Muller loop above.
+        // `data.len() == total` by construction of the Box-Muller loop above;
+        // `from_shape_vec` still fails when the element count of `shape`
+        // overflows `isize` (`total` wraps in a release build).
         Self {
             data: Array::from_shape_vec(IxDyn(shape), data)
                 .expect("random_normal: generated data length matches shape"),

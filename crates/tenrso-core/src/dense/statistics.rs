@@ -1927,7 +1927,8 @@ where
         output_shape.remove(axis);
 
         if output_shape.is_empty() {
-            // Scalar result
+            // Scalar result (an empty 1-D tensor has no maximum)
+            anyhow::ensure!(!self.is_empty(), "Axis {axis} has length 0");
             return Ok(Self::from_elem(&[1], self.max().clone()));
         }
 
@@ -1981,11 +1982,8 @@ where
                 });
             }
 
-            // `axis_size` is guaranteed non-zero because an axis of size 0
-            // would have been rejected by the axis-bounds check above;
-            // therefore the inner loop always sets `max_val = Some(..)` at
-            // least once. `.expect` documents this invariant.
-            result_data.push(max_val.expect("max_axis: non-empty axis produces a maximum"));
+            // `None` only for `axis_size == 0` (the check above bounds the index)
+            result_data.push(max_val.ok_or_else(|| anyhow::anyhow!("Axis {axis} has length 0"))?);
         }
 
         let mut result = Self::from_vec(result_data, &output_shape)?;

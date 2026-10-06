@@ -536,25 +536,24 @@ pub fn create_cv_split(shape: &[usize], train_ratio: f64) -> (DenseND<f64>, Dens
     let total_size: usize = shape.iter().product();
     let mut rng = thread_rng();
 
-    // Create random assignments
+    // Create random assignments (one draw per position)
     let mut train_data = Vec::with_capacity(total_size);
-    let mut val_data = Vec::with_capacity(total_size);
 
     for _ in 0..total_size {
         let r: f64 = rng.random::<f64>();
         if r < train_ratio {
             train_data.push(1.0);
-            val_data.push(0.0);
         } else {
             train_data.push(0.0);
-            val_data.push(1.0);
         }
     }
 
     let train_array =
         Array::from_shape_vec(IxDyn(shape), train_data).expect("Shape mismatch in train data");
-    let val_array =
-        Array::from_shape_vec(IxDyn(shape), val_data).expect("Shape mismatch in validation data");
+    // Every position is in exactly one of the two sets, so the validation mask
+    // is the complement of the training mask (1.0 - 1.0 = 0.0, 1.0 - 0.0 = 1.0,
+    // both exact).
+    let val_array = train_array.mapv(|in_train| 1.0 - in_train);
 
     (
         DenseND::from_array(train_array),
@@ -720,7 +719,7 @@ where
         let (train_mask, val_mask) = create_cv_split(shape, train_ratio);
 
         // Convert train_mask to tensor type T for cp_completion
-        let train_mask_t = convert_mask_to_t::<T>(&train_mask);
+        let train_mask_t = convert_mask_to_t::<T>(&train_mask)?;
 
         for (rank_idx, &rank) in candidate_ranks.iter().enumerate() {
             // Skip ranks that are too large for any dimension
@@ -797,7 +796,7 @@ where
 }
 
 /// Convert a f64 mask to type T for use with cp_completion
-fn convert_mask_to_t<T>(mask: &DenseND<f64>) -> DenseND<T>
+fn convert_mask_to_t<T>(mask: &DenseND<f64>) -> anyhow::Result<DenseND<T>>
 where
     T: Float + NumCast,
 {
@@ -811,9 +810,9 @@ where
         .map(|&v| T::from(v).unwrap_or_else(T::zero))
         .collect();
 
-    let array =
-        Array::from_shape_vec(IxDyn(shape), data).expect("Shape mismatch in mask conversion");
-    DenseND::from_array(array)
+    let array = Array::from_shape_vec(IxDyn(shape), data)
+        .map_err(|e| anyhow::anyhow!("mask conversion: {e}"))?;
+    Ok(DenseND::from_array(array))
 }
 
 /// Strategy for automated rank selection
@@ -1189,6 +1188,20 @@ mod tests {
 
         // (1.0 - 0.3) / 1.0 = 0.7
         assert!((improvement - 0.7).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_create_cv_split_is_a_partition() {
+        for shape in [vec![10, 10, 10], vec![7], vec![3, 0, 2], vec![]] {
+            let (train_mask, val_mask) = create_cv_split(&shape, 0.6);
+            assert_eq!(train_mask.shape(), &shape[..]);
+            assert_eq!(val_mask.shape(), &shape[..]);
+            assert!(train_mask.is_contiguous() && val_mask.is_contiguous());
+            for (&t, &v) in train_mask.view().iter().zip(val_mask.view().iter()) {
+                assert!(t == 0.0 || t == 1.0, "train entry {t}");
+                assert_eq!(t + v, 1.0, "each position is in exactly one set");
+            }
+        }
     }
 
     #[test]
@@ -1628,7 +1641,7 @@ mod tests {
         let data = Array::from_shape_vec(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]).unwrap();
         let mask = DenseND::from_array(data.into_dyn());
 
-        let mask_f32: DenseND<f32> = convert_mask_to_t(&mask);
+        let mask_f32: DenseND<f32> = convert_mask_to_t(&mask).expect("mask conversion");
         let view = mask_f32.view();
 
         assert!((view[[0, 0]] - 1.0_f32).abs() < 1e-6);

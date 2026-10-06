@@ -21,8 +21,13 @@
 //! **thread-local** counters. Thread-locality matters: the test harness (and
 //! nextest, and any rayon pool) allocates on other threads concurrently, and a
 //! global atomic counter would fold that noise into our numbers. The counters
-//! are `const`-initialized `Cell`s with no destructor, so touching them from
-//! inside `alloc` cannot itself allocate or recurse.
+//! are `const`-initialized `Cell`s with no destructor, so wherever the standard
+//! library keeps thread-locals in native thread-local storage (or, without
+//! threads, in a plain static), touching them from inside `alloc` makes no call
+//! back into the allocator and cannot recurse. On a target with neither (such
+//! as `x86_64-pc-windows-gnu`, `i686-pc-windows-gnu` or the Android targets)
+//! the first access allocates, re-enters the allocator and recurses until the
+//! stack overflows (an abort), so these tests cannot run there.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -35,22 +40,51 @@ thread_local! {
 
 struct CountingAllocator;
 
-// SAFETY: every method forwards to `System` unchanged; the only added work is
-// bumping two thread-local `Cell`s, which cannot allocate (no destructor => no
-// lazy TLS registration) and cannot panic (`try_with` swallows the
-// during-destruction case).
+// SAFETY: every method passes its arguments unchanged to `System`, so the
+// blocks handed out meet the `GlobalAlloc` contract exactly as `System`'s do.
+// The only added work is `record`, which never unwinds, as an allocator must
+// not: `try_with` turns an unavailable slot into an ignored `Err` rather than
+// a panic, and both counters advance with `wrapping_add`, so no overflow check
+// can panic. Its two thread-locals are `const`-initialised `Cell`s without
+// `Drop`. Where the standard library keeps them in native thread-local storage
+// (`cfg(target_thread_local)`, as on the `*-unknown-linux-gnu`,
+// `*-apple-darwin` and `x86_64-pc-windows-msvc` targets) or, on a target
+// without threads, in a plain static, touching them makes no call into this
+// allocator. On a target with neither (such as `x86_64-pc-windows-gnu`,
+// `i686-pc-windows-gnu` or the Android targets), the first access boxes the
+// value before storing it; that allocation re-enters this allocator, which
+// touches the same still-empty slot again, and the recursion goes on until
+// the stack overflows, as unbounded recursion in safe code would: on those
+// targets' guard-paged stacks an abort, not an unwind and not undefined
+// behaviour. So this impl is sound on every target, and these tests cannot
+// run on such a target.
+// `realloc` keeps the trait's default, which is built on `alloc` and `dealloc`.
 unsafe impl GlobalAlloc for CountingAllocator {
+    // SAFETY: the caller upholds `GlobalAlloc::alloc`'s contract (`layout` has
+    // a non-zero size); this implementation adds no requirement.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
+        // SAFETY: `layout` is the caller's, unchanged, so `System.alloc`'s
+        // identical precondition holds.
         unsafe { System.alloc(layout) }
     }
 
+    // SAFETY: the caller upholds `GlobalAlloc::dealloc`'s contract: `ptr` is a
+    // block this allocator returned for `layout` and has not freed.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: every block this allocator returns is `System`'s, made for
+        // the layout the caller passed (`alloc` and `alloc_zeroed` forward it
+        // unchanged, and the default `realloc` goes through them), so `ptr` is
+        // a live `System` block of `layout`.
         unsafe { System.dealloc(ptr, layout) }
     }
 
+    // SAFETY: the caller upholds `GlobalAlloc::alloc_zeroed`'s contract
+    // (`layout` has a non-zero size); this implementation adds no requirement.
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
+        // SAFETY: `layout` is the caller's, unchanged, so
+        // `System.alloc_zeroed`'s identical precondition holds.
         unsafe { System.alloc_zeroed(layout) }
     }
 
@@ -59,8 +93,10 @@ unsafe impl GlobalAlloc for CountingAllocator {
 }
 
 fn record(size: usize) {
-    let _ = ALLOC_COUNT.try_with(|c| c.set(c.get() + 1));
-    let _ = ALLOC_BYTES.try_with(|c| c.set(c.get() + size as u64));
+    // `wrapping_add`: this runs inside the allocator, where an overflow panic
+    // (a debug build checks `+`) would be an unwind out of `GlobalAlloc`.
+    let _ = ALLOC_COUNT.try_with(|c| c.set(c.get().wrapping_add(1)));
+    let _ = ALLOC_BYTES.try_with(|c| c.set(c.get().wrapping_add(size as u64)));
 }
 
 #[global_allocator]

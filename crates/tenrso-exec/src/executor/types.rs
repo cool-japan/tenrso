@@ -1125,8 +1125,9 @@ impl CpuExecutor {
                 }
             }
             if max_val
-                < T2::from_f64(1e-10)
-                    .expect("FromPrimitive invariant: 1e-10 representable in float type")
+                < T2::from_f64(1e-10).ok_or_else(|| {
+                    anyhow!("pivot tolerance 1e-10 is not representable in the element type")
+                })?
             {
                 return Ok(T2::zero());
             }
@@ -1179,8 +1180,9 @@ impl CpuExecutor {
                 }
             }
             if max_val
-                < T2::from_f64(1e-10)
-                    .expect("FromPrimitive invariant: 1e-10 representable in float type")
+                < T2::from_f64(1e-10).ok_or_else(|| {
+                    anyhow!("pivot tolerance 1e-10 is not representable in the element type")
+                })?
             {
                 return Err(anyhow!("Matrix is singular and cannot be inverted"));
             }
@@ -1239,8 +1241,9 @@ impl CpuExecutor {
                 }
             }
             if max_val
-                < T2::from_f64(1e-10)
-                    .expect("FromPrimitive invariant: 1e-10 representable in float type")
+                < T2::from_f64(1e-10).ok_or_else(|| {
+                    anyhow!("pivot tolerance 1e-10 is not representable in the element type")
+                })?
             {
                 return Err(anyhow!("Matrix is singular, cannot solve"));
             }

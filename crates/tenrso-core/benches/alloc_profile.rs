@@ -45,22 +45,42 @@ static DEALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 /// always available in CI/sandbox environments).
 struct CountingAllocator;
 
+// SAFETY: every method passes its arguments unchanged to `System`, so the
+// blocks handed out meet the `GlobalAlloc` contract exactly as `System`'s do;
+// the only added work is relaxed atomic `fetch_add`s on four statics, which
+// wrap on overflow instead of panicking and neither allocate nor unwind, as an
+// allocator must not. `realloc` keeps the trait's default, which is built on
+// `alloc` and `dealloc` below.
 unsafe impl GlobalAlloc for CountingAllocator {
+    // SAFETY: the caller upholds `GlobalAlloc::alloc`'s contract (`layout` has
+    // a non-zero size); this implementation adds no requirement.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        // SAFETY: `layout` is the caller's, unchanged, so `System.alloc`'s
+        // identical precondition holds.
         unsafe { System.alloc(layout) }
     }
 
+    // SAFETY: the caller upholds `GlobalAlloc::dealloc`'s contract: `ptr` is a
+    // block this allocator returned for `layout` and has not freed.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         DEALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         DEALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        // SAFETY: every block this allocator returns is `System`'s, made for
+        // the layout the caller passed (`alloc` and `alloc_zeroed` forward it
+        // unchanged, and the default `realloc` goes through them), so `ptr` is
+        // a live `System` block of `layout`.
         unsafe { System.dealloc(ptr, layout) }
     }
 
+    // SAFETY: the caller upholds `GlobalAlloc::alloc_zeroed`'s contract
+    // (`layout` has a non-zero size); this implementation adds no requirement.
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        // SAFETY: `layout` is the caller's, unchanged, so
+        // `System.alloc_zeroed`'s identical precondition holds.
         unsafe { System.alloc_zeroed(layout) }
     }
 

@@ -4,7 +4,7 @@
 //! unfold/fold (matricization/tensorization), squeeze/unsqueeze, and axis operations.
 
 use super::types::DenseND;
-use scirs2_core::ndarray_ext::{Array2, ArrayView, IxDyn};
+use scirs2_core::ndarray_ext::{Array, Array2, ArrayView, Axis, IxDyn};
 use scirs2_core::numeric::Num;
 use smallvec::{smallvec, SmallVec};
 
@@ -742,12 +742,14 @@ where
     /// assert_eq!(permuted.flatten().to_vec(), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
     /// ```
     pub fn flatten(&self) -> Self {
-        let total = self.len();
-        // `reshape` handles both layouts: metadata-only view + copy when
-        // contiguous, logical-order gather when not. A 1-D shape always has the
-        // same element count as the source, so this cannot fail.
-        self.reshape(&[total])
-            .expect("flatten: [len] preserves the element count")
+        // The elements in row-major logical order, for either layout, as a
+        // fresh standard-layout 1-D array: what `reshape(&[len])` returns,
+        // built without a shape check (a `Vec` becomes a 1-D array whatever
+        // its length).
+        let flat: Vec<T> = self.data.iter().cloned().collect();
+        Self {
+            data: Array::from_vec(flat).into_dyn(),
+        }
     }
 
     /// Alias for flatten (returns a 1D view in row-major order)
@@ -841,9 +843,8 @@ where
     pub fn atleast_1d(&self) -> Self {
         if self.rank() == 0 {
             // Convert scalar to 1D array: a rank-0 tensor has exactly 1
-            // element, so reshaping to `[1]` preserves the element count.
-            self.reshape(&[1])
-                .expect("atleast_1d: scalar has exactly one element")
+            // element, so its flattening has shape `[1]`.
+            self.flatten()
         } else {
             self.clone()
         }
@@ -870,17 +871,13 @@ where
     /// assert_eq!(result.shape(), &[1, 3]);
     /// ```
     pub fn atleast_2d(&self) -> Self {
-        // Each branch below preserves the total number of elements, so
-        // `reshape` cannot fail. `.expect` documents that invariant.
+        // Ranks 0 and 1: the flattening (`[1]` or `[n]`, standard layout) with
+        // a leading axis of length 1 inserted, giving `[1, 1]` or `[1, n]`.
+        // Inserting axis 0 is always in bounds, so nothing here can fail.
         match self.rank() {
-            0 => self
-                .reshape(&[1, 1])
-                .expect("atleast_2d: scalar has exactly one element"),
-            1 => {
-                let n = self.shape()[0];
-                self.reshape(&[1, n])
-                    .expect("atleast_2d: 1×n preserves 1D element count")
-            }
+            0 | 1 => Self {
+                data: self.flatten().data.insert_axis(Axis(0)),
+            },
             _ => self.clone(),
         }
     }
@@ -911,23 +908,30 @@ where
     /// assert_eq!(result.shape(), &[2, 3, 1]);
     /// ```
     pub fn atleast_3d(&self) -> Self {
-        // Each reshape below preserves element count; any failure would be
-        // an internal logic bug.
+        // Each branch inserts length-1 axes into a fresh standard-layout copy,
+        // at positions that are always in bounds (`Axis(k)` with `k <= ndim`),
+        // so nothing here can fail. The result equals `reshape` to the same
+        // shape in shape, values and standard layout; only the strides of
+        // length-1 axes can differ from the default strides `reshape` gives
+        // (an inserted axis carries stride 1, and a 2-D input keeps its own),
+        // and a length-1 axis's stride selects no element.
         match self.rank() {
-            0 => self
-                .reshape(&[1, 1, 1])
-                .expect("atleast_3d: scalar has exactly one element"),
-            1 => {
-                let n = self.shape()[0];
-                self.reshape(&[1, n, 1])
-                    .expect("atleast_3d: 1×n×1 preserves 1D element count")
-            }
-            2 => {
-                let m = self.shape()[0];
-                let n = self.shape()[1];
-                self.reshape(&[m, n, 1])
-                    .expect("atleast_3d: m×n×1 preserves 2D element count")
-            }
+            // `[1]` or `[n]` -> `[1, 1, 1]` or `[1, n, 1]`
+            0 | 1 => Self {
+                data: self
+                    .flatten()
+                    .data
+                    .insert_axis(Axis(0))
+                    .insert_axis(Axis(2)),
+            },
+            // `[m, n]` -> `[m, n, 1]`
+            2 => Self {
+                data: self
+                    .data
+                    .as_standard_layout()
+                    .into_owned()
+                    .insert_axis(Axis(2)),
+            },
             _ => self.clone(),
         }
     }

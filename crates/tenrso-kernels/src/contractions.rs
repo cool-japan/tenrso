@@ -300,8 +300,9 @@ where
     if output_shape.is_empty() {
         // Sum to scalar
         let total: T = tensor.iter().cloned().fold(T::zero(), |acc, x| acc + x);
-        return Ok(Array::from_shape_vec(vec![1], vec![total])
-            .expect("shape invariant: vec![1] matches single-element data vector"));
+        // A one-element vector as a shape-`[1]` dynamic array: no shape check
+        // to fail.
+        return Ok(Array::from_vec(vec![total]).into_dyn());
     }
 
     // Sum along specified axes
@@ -471,8 +472,9 @@ where
             coord[mode2] = i;
             total = total.clone() + tensor[&coord[..]].clone();
         }
-        return Ok(Array::from_shape_vec(vec![1], vec![total])
-            .expect("shape invariant: vec![1] matches single-element data vector"));
+        // A one-element vector as a shape-`[1]` dynamic array: no shape check
+        // to fail.
+        return Ok(Array::from_vec(vec![total]).into_dyn());
     }
 
     let mut result = Array::zeros(IxDyn(&output_shape));
